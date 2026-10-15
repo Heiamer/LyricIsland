@@ -1049,7 +1049,7 @@ fn select_best_outcome(
 
 /// A provider result reduced to what the selection rule needs.
 ///
-/// Exposed so hosts (the C# app through `lyric-ffi`) can run the *same* selection rule
+/// Exposed so hosts can run the *same* selection rule
 /// without re-implementing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoredCandidate {

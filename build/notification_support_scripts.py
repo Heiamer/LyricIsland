@@ -21,7 +21,7 @@ $CertificateObject=New-Object System.Security.Cryptography.X509Certificates.X509
 if ($CertificateObject.Thumbprint -ne '__THUMBPRINT__') { throw '证书与本版本不匹配。' }
 if (-not $ConfirmInstall) {
  Write-Host '本预览版需要管理员确认，将本版公钥证书加入本地计算机的“受信任人”，然后只为当前用户注册通知身份。'
- Write-Host '不加入根证书，不安装 WPF、.NET 8 或 Windows App SDK。系统通知读取仍受 Windows 权限控制。'
+ Write-Host '不加入根证书。系统通知读取仍受 Windows 权限控制。'
  Write-Host ('程序目录：'+$NativeBase)
  if ((Read-Host '输入 Y 确认安装，其他输入取消') -ne 'Y') { return }
 }

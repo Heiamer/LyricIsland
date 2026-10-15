@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><TargetFramework>net8.0</TargetFramework><Version>1.0.0</Version><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
-  <ItemGroup>
-    <Compile Include="..\TaskbarLyrics.Core\Models.TrackInfo.cs" Link="Models.TrackInfo.cs" />
-    <Compile Include="..\TaskbarLyrics.Core\Models.PlaybackSnapshot.cs" Link="Models.PlaybackSnapshot.cs" />
-    <Compile Include="..\TaskbarLyrics.Core\Models.LyricDisplayFrame.cs" Link="Models.LyricDisplayFrame.cs" />
-    <None Include="..\Rust\artifacts\lyric_ffi.dll" Link="lyric_ffi.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-  </ItemGroup>
-</Project>

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lyric-core", "crates/lyric-cli", "crates/lyric-ffi", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
+members = ["crates/lyric-core", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
 
 [workspace.package]
 version = "1.1.0"

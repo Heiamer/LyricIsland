@@ -2577,14 +2577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyric-cli"
-version = "1.1.0"
-dependencies = [
- "lyric-core",
- "serde_json",
-]
-
-[[package]]
 name = "lyric-core"
 version = "1.1.0"
 dependencies = [
@@ -2596,16 +2588,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
-]
-
-[[package]]
-name = "lyric-ffi"
-version = "1.1.0"
-dependencies = [
- "lyric-backend",
- "lyric-core",
- "serde",
- "serde_json",
 ]
 
 [[package]]

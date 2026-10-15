@@ -1216,7 +1216,7 @@ fn font_directory() -> Option<PathBuf> {
     if beside.is_dir() {
         return Some(beside);
     }
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../LyricIsland.App/Assets/Fonts");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Assets/Fonts");
     source.is_dir().then_some(source)
 }
 

@@ -1,4 +1,4 @@
-"""Package the native development build without a WPF/.NET 8 runtime."""
+"""Package the current native application, settings and bootstrap."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -11,8 +11,6 @@ args=argparse.ArgumentParser()
 args.add_argument('--binary-dir',type=Path,required=True)
 args.add_argument('--output',type=Path,required=True)
 args.add_argument('--sqlite',type=Path,default=Path.home()/'.nuget/packages/sqlitepclraw.lib.e_sqlite3/2.1.6/runtimes/win-x64/native/e_sqlite3.dll')
-# The native runtime carries no .NET/WPF at all, so the same composition can be released under a
-# different version name (for example the "1.0" release) without pulling a runtime back in.
 args.add_argument('--version',default='1.1')
 options=args.parse_args()
 root=Path(__file__).resolve().parents[1]
@@ -32,19 +30,19 @@ def copy(source,target):
 copy(options.binary_dir/'LyricIsland.exe','LyricIsland.exe')
 copy(options.binary_dir/'lyric-island-settings.exe','LyricIsland.Settings.exe')
 from embed_icon import embed_icon
-embed_icon(stage/'LyricIsland.Settings.exe',root/'LyricIsland.App/Assets/LyricIsland-v2.ico')
-embed_icon(stage/'LyricIsland.exe',root/'LyricIsland.App/Assets/LyricIsland-v2.ico')
+embed_icon(stage/'LyricIsland.Settings.exe',root/'Assets/LyricIsland-v2.ico')
+embed_icon(stage/'LyricIsland.exe',root/'Assets/LyricIsland-v2.ico')
 copy(options.sqlite,'e_sqlite3.dll')
-font=root/'LyricIsland.App/Assets/Fonts/OPPOSans.ttf'
+font=root/'Assets/Fonts/OPPOSans.ttf'
 font_hash='6c7d5864c661516e1f400d9f21e4297f2e2a0719909691e29607cc4ef484a9f4'
 assert hashlib.sha256(font.read_bytes()).hexdigest()==font_hash,'Full font differs from the original file'
 copy(font,'Assets/Fonts/OPPOSans.ttf')
-japanese=root/'LyricIsland.App/Assets/Fonts/NotoSansJP.ttf'
+japanese=root/'Assets/Fonts/NotoSansJP.ttf'
 assert hashlib.sha256(japanese.read_bytes()).hexdigest()=='c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f','Japanese font differs from verified source'
 copy(japanese,'Assets/Fonts/NotoSansJP.ttf')
 for icon in ['LyricIsland-v2.ico','LyricIsland-v2.png']:
-    copy(root/'LyricIsland.App/Assets'/icon,'Assets/'+icon)
-docs=['NATIVE-README.md','HISTORY-SOURCES.md','CHANGELOG.md','LICENSE','FONT-NOTICE.md','THIRD-PARTY-NOTICES.md','NETWORK.md']
+    copy(root/'Assets'/icon,'Assets/'+icon)
+docs=['NATIVE-README.md','CHANGELOG.md','LICENSE','FONT-NOTICE.md','THIRD-PARTY-NOTICES.md']
 for doc in docs: copy(root/doc,doc)
 for path in sorted((root/'licenses').rglob('*')):
     if path.is_file():copy(path,path.relative_to(root))
@@ -63,8 +61,8 @@ generated=root/'publish'/'NativeBundleVersion.g.cs'
 generated.write_text('internal static class BundleVersion { internal const string Version="'+version+'"; internal const string PayloadHash="'+hashlib.sha256(payload.read_bytes()).hexdigest()+'"; }\n',encoding='utf-8')
 framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
 share=out/(name+'.exe')
-subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+','/define:NATIVE_FRONTEND',
-    '/out:'+str(share),'/win32icon:'+str(root/'LyricIsland.App/Assets/LyricIsland-v2.ico'),
+subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+',
+    '/out:'+str(share),'/win32icon:'+str(root/'Assets/LyricIsland-v2.ico'),
     '/resource:'+str(payload)+',LyricIsland.Payload.zip',
     '/reference:'+str(framework/'System.IO.Compression.dll'),
     str(root/'LyricIsland.Bootstrap/Program.cs'),str(generated)],check=True)

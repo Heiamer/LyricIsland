@@ -44,7 +44,7 @@ $ExtraCargo = @()
 if ($Offline) { $ExtraCargo += '--offline' }
 Push-Location (Join-Path $ProjectRoot 'Rust')
 try {
-    & cargo test @ExtraCargo -p lyric-native -p lyric-settings
+    & cargo test @ExtraCargo --workspace
     if ($LASTEXITCODE -ne 0) { throw 'Native checks failed.' }
     & cargo build @ExtraCargo --release -p lyric-native -p lyric-settings
     if ($LASTEXITCODE -ne 0) { throw 'Native build failed.' }

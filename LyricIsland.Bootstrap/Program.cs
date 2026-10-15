@@ -9,14 +9,11 @@ using System.Threading;
 
 // Uses the .NET Framework already supplied by supported Windows versions.
 // The native build extracts Rust executables and fonts; this bootstrap exits
-// after starting them. The legacy WPF payload is selected only without NATIVE_FRONTEND.
+// after starting them.
 internal static class Program
 {
-#if NATIVE_FRONTEND
     private const string Gui = "Direct2D";
-#else
-    private const string Gui = "WPF";
-#endif
+
     private static readonly string Folder = "LyricIsland-" + BundleVersion.Version;
     [STAThread]
     private static int Main(string[] args)
@@ -61,9 +58,7 @@ internal static class Program
                         File.WriteAllText(Path.Combine(root, "verification.json"), "{\"success\":true,\"version\":\"" + BundleVersion.Version + "\",\"executable\":\"" + executable.Replace("\\", "\\\\") + "\",\"gui\":\"" + Gui + "\",\"settingsUi\":\"GPUI\",\"backend\":\"Rust\"}", Encoding.UTF8);
                         return 0;
                     }
-#if NATIVE_FRONTEND
                     MigratePreviousData(root);
-#endif
                     Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(executable) });
                     return 0;
                 }
@@ -94,11 +89,8 @@ internal static class Program
     }
     private static bool Complete(string root)
     {
-#if NATIVE_FRONTEND
         string[] required = { "LyricIsland.exe", "LyricIsland.NotificationHost.exe", "LyricIsland.Settings.exe", "e_sqlite3.dll", "Assets/Fonts/OPPOSans.ttf", "Assets/Fonts/NotoSansJP.ttf" };
-#else
-        string[] required = { "LyricIsland.exe", "LyricIsland.dll", "LyricIsland.Settings.exe", "lyric_ffi.dll", "e_sqlite3.dll", "coreclr.dll", "PresentationFramework.dll", "Assets/Fonts/OPPOSans.ttf" };
-#endif
+
         foreach (string name in required)
             if (!File.Exists(Path.Combine(root, Folder, name.Replace('/', Path.DirectorySeparatorChar)))) return false;
         return true;

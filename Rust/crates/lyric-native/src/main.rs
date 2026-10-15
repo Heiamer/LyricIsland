@@ -213,7 +213,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
         WM_CLOSE=>{let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
     }}}DefWindowProcW(hwnd,msg,wparam,lparam)
 }
-fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/OPPOSans.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..").join("LyricIsland.App")}
+fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/OPPOSans.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")}
 unsafe fn create(a:&mut App,owner:*const RefCell<App>,hidden:bool)->Result<()> {
     shell::ensure_per_monitor_dpi_awareness();CoInitializeEx(None,COINIT_APARTMENTTHREADED).ok()?;
     a.transparent=windows::UI::ViewManagement::UISettings::new().and_then(|s|s.AdvancedEffectsEnabled()).unwrap_or(false);let instance=GetModuleHandleW(None)?;let class=w!("LyricIsland.Native.DirectComposition.v1");let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:class,hCursor:LoadCursorW(None,IDC_ARROW)?,..Default::default()};RegisterClassW(&wc);

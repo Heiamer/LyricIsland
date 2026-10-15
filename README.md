@@ -1,4 +1,4 @@
-<p align="center"><img src="LyricIsland.App/Assets/LyricIsland-v2.png" width="96" alt="歌词岛图标"></p>
+<p align="center"><img src="Assets/LyricIsland-v2.png" width="96" alt="歌词岛图标"></p>
 <h1 align="center">歌词岛 · Lyric Island</h1>
 <p align="center">Windows 桌面歌词与音乐控制 · 1.1</p>
 
@@ -29,7 +29,7 @@
 
 ## 源码
 
-当前界面与后台位于 `Rust/`，设置界面使用 GPUI，胶囊使用 Windows 原生图形接口。`build/` 包含构建及打包工具，其余目录保留历史实现与回归测试。
+当前界面与后台位于 `Rust/`，设置界面使用 GPUI，胶囊使用 Windows 原生图形接口。`Assets/` 保存图标与字体，`build/` 包含当前构建及打包工具。`LyricIsland.Bootstrap/` 是单文件分享版的解压启动器。
 
 公开仓库不包含独立 OPPO 字体文件、签名私钥、个人配置、缓存和发行产物。编译前请按构建说明从官方来源准备字体。
 

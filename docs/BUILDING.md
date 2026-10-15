@@ -15,7 +15,7 @@
 从 [OPPO 官方页面](https://www.coloros.com/article/A00000074/) 获取 OPPO Sans 4.0，将原始完整变量字体放到：
 
 ```text
-LyricIsland.App/Assets/Fonts/OPPOSans.ttf
+Assets/Fonts/OPPOSans.ttf
 ```
 
 本版本使用的文件 SHA256 为 `6c7d5864c661516e1f400d9f21e4297f2e2a0719909691e29607cc4ef484a9f4`。打包脚本校验该值，避免不完整字体导致显示异常。Noto Sans JP 已随源码提供，许可见 `FONT-NOTICE.md`。
@@ -35,4 +35,4 @@ LyricIsland.App/Assets/Fonts/OPPOSans.ttf
 
 运行时需要完整 `Assets/Fonts/`、设置程序及 SQLite 原生库，不能只复制主程序。完整发行流程见 `build/package_native.py`；通知身份包由 `build/notification_identity.py` 创建。首次打包会需要生成自己的开发签名，并可能需要为脚本指定本机 SDK 路径。仓库不提供任何开发者私钥，构建不会自动安装证书或申请通知访问。
 
-历史工程仅作参考，不能用历史发行入口代替当前构建脚本。
+仓库只保留当前使用的代码与测试，构建入口为 `build/native.ps1`。

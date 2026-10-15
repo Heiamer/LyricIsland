@@ -1,6 +1,6 @@
 [package]
 name = "lyric-core"
-description = "Rust port of the TaskbarLyrics.Core lyric pipeline used by LyricIsland 0.7.8.1"
+description = "Lyric parsing, matching and synchronization for Lyric Island"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
