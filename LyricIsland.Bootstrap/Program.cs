@@ -10,6 +10,7 @@ using System.Threading;
 // Uses the .NET Framework already supplied by supported Windows versions.
 // The native build extracts Rust executables and fonts; this bootstrap exits
 // after starting them.
+// This directory owns extraction, package verification and previous-version data migration.
 internal static class Program
 {
     private const string Gui = "Direct2D";
