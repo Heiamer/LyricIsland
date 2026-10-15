@@ -53,7 +53,7 @@ impl App {
         let y=if floating{(work.top as f64+((work.bottom-work.top)as f64-40.*scale)*self.settings["TopFraction"].as_f64().unwrap_or(0.08)-24.*scale).round()as i32}else{work.top-(24.*scale).round()as i32};
         SetWindowPos(self.hwnd,Some(if self.flag("AlwaysOnTop",true){HWND_TOPMOST}else{HWND_NOTOPMOST}),x,y,width,height,SWP_NOACTIVATE)?;
         SetWindowPos(self.visual_hwnd,Some(if self.flag("AlwaysOnTop",true){HWND_TOPMOST}else{HWND_NOTOPMOST}),x,y,width,height,SWP_NOACTIVATE)?;
-        let font=self.base.join("Assets/Fonts/OPPOSans.ttf");self.renderer=None;self.renderer=Some(Renderer::new(self.visual_hwnd,width as u32,height as u32,dpi as f32,&font)?);self.input_region=None;self.sync_input_region()?;self.cover_version=u64::MAX;self.last_poll=Instant::now()-Duration::from_secs(1);self.dirty=true;Ok(())
+        let font=self.base.join("Assets/Fonts/NotoSansSC.ttf");self.renderer=None;self.renderer=Some(Renderer::new(self.visual_hwnd,width as u32,height as u32,dpi as f32,&font)?);self.input_region=None;self.sync_input_region()?;self.cover_version=u64::MAX;self.last_poll=Instant::now()-Duration::from_secs(1);self.dirty=true;Ok(())
     }
     fn retarget(&mut self,expanded:bool){
         if self.expanded==expanded{return}let velocity=self.transition.as_ref().map(|t|t.velocity(self.sampled_ms)).unwrap_or_default();
@@ -213,7 +213,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
         WM_CLOSE=>{let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
     }}}DefWindowProcW(hwnd,msg,wparam,lparam)
 }
-fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/OPPOSans.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")}
+fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/NotoSansSC.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")}
 unsafe fn create(a:&mut App,owner:*const RefCell<App>,hidden:bool)->Result<()> {
     shell::ensure_per_monitor_dpi_awareness();CoInitializeEx(None,COINIT_APARTMENTTHREADED).ok()?;
     a.transparent=windows::UI::ViewManagement::UISettings::new().and_then(|s|s.AdvancedEffectsEnabled()).unwrap_or(false);let instance=GetModuleHandleW(None)?;let class=w!("LyricIsland.Native.DirectComposition.v1");let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:class,hCursor:LoadCursorW(None,IDC_ARROW)?,..Default::default()};RegisterClassW(&wc);
@@ -237,7 +237,7 @@ fn traces(directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
     }std::fs::write(directory.join("native-motion.json"),serde_json::to_vec(&cases)?)?;Ok(())
 }
 unsafe fn preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
-    std::fs::create_dir_all(directory)?;a.renderer=None;a.renderer=Some(Renderer::new(a.visual_hwnd,a.layout.host.w as u32,a.layout.host.h as u32,96.,&a.base.join("Assets/Fonts/OPPOSans.ttf"))?);a.poll();a.opacity=1.;let o=a.options();
+    std::fs::create_dir_all(directory)?;a.renderer=None;a.renderer=Some(Renderer::new(a.visual_hwnd,a.layout.host.w as u32,a.layout.host.h as u32,96.,&a.base.join("Assets/Fonts/NotoSansSC.ttf"))?);a.poll();a.opacity=1.;let o=a.options();
     for (name,expanded,count) in [("opening",true,34),("closing",false,29)]{let t=Transition::new(expanded,if expanded{Frame::hidden(o)}else{Frame::expanded()},o,Frame::default(),false);a.transition=Some(t);a.expanded=expanded;
         for i in 0..count{let ms=i as f64*20.;a.frame=t.sample(ms);let mut renderer=a.renderer.take().unwrap();let mut scene=a.scene();scene.time_ms=0.;scene.lyric_age_ms=1000.;scene.cover_opacity=1.;scene.progress=83./236.;let mut activity=motion::Activity::new();activity.retarget(true,0.,true);scene.activity_scales=activity.sample(330.+ms,true).0;scene.activity_opacity=0.9;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("{name}-{:03}ms.png",i*20)))?;a.renderer=Some(renderer);}
     }traces(directory)?;Ok(())
@@ -245,7 +245,7 @@ unsafe fn preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn st
 unsafe fn notification_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(directory)?;a.frame=Frame::hidden(a.options());a.opacity=1.;a.lyric="景色は移ろい瞬く間に変わる".into();
     for dpi in [96.,120.,144.,192.]{
-        a.renderer=None;let scale=dpi/96.;let mut renderer=Renderer::new(a.visual_hwnd,(a.layout.host.w*scale)as u32,(a.layout.host.h*scale)as u32,dpi as f32,&a.base.join("Assets/Fonts/OPPOSans.ttf"))?;
+        a.renderer=None;let scale=dpi/96.;let mut renderer=Renderer::new(a.visual_hwnd,(a.layout.host.w*scale)as u32,(a.layout.host.h*scale)as u32,dpi as f32,&a.base.join("Assets/Fonts/NotoSansSC.ttf"))?;
         for amount in [0.,0.5,1.]{let mut s=a.scene();s.notification=None;s.notification_mix=0.;s.layout_scale=scale;s.lyric_age_ms=1000.;s.highlight=amount;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("font-{dpi:.0}-{}.png",(amount*100.)as i32)))?;}
         {let mut s=a.scene();s.notification=None;s.notification_mix=0.;s.frame=Frame::expanded();s.layout_scale=scale;s.lyric_age_ms=1000.;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("toolbar-{dpi:.0}.png")))?;}
         let notice=notifications::Notice::example(&a.base);renderer.set_notification_icon(notice.icon.as_deref())?;

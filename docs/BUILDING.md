@@ -10,15 +10,9 @@
 - C 编译器驱动；现有脚本使用调用 `zig cc` 的包装脚本。
 - 打包时需要 Python 3、`cryptography`、Windows SDK 的打包与签名工具，以及 SQLite 原生库。
 
-## 准备字体
+## 字体资源
 
-从 [OPPO 官方页面](https://www.coloros.com/article/A00000074/) 获取 OPPO Sans 4.0，将原始完整变量字体放到：
-
-```text
-Assets/Fonts/OPPOSans.ttf
-```
-
-本版本使用的文件 SHA256 为 `6c7d5864c661516e1f400d9f21e4297f2e2a0719909691e29607cc4ef484a9f4`。打包脚本校验该值，避免不完整字体导致显示异常。Noto Sans JP 已随源码提供，许可见 `FONT-NOTICE.md`。
+源码已包含完整 Noto Sans SC 与 Noto Sans JP 变量字体，无需额外下载或安装到系统。请保留 `Assets/Fonts/` 与对应许可文件，打包时会校验完整字体的 SHA256。两套字体均使用 SIL Open Font License 1.1，见 `FONT-NOTICE.md`。
 
 ## 编译
 

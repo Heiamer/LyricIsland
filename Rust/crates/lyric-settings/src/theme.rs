@@ -88,8 +88,8 @@ pub const LIGHT: Palette = Palette {
     danger: c(0xB4, 0x36, 0x2C, 1.0),
 };
 
-/// The full OPPO Sans face shipped with the application.
-pub const FONT: &str = "OPPO Sans 4.0";
+/// The full Noto Sans SC face shipped with the application.
+pub const FONT: &str = "Noto Sans SC";
 
 thread_local! {
     static CURRENT: Cell<Palette> = const { Cell::new(DARK) };

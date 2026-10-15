@@ -11,7 +11,7 @@
 - **动画与交互**：连续形变、按压反馈、顶部居中或自由悬浮，可开启点击岛内任意区域展开。
 - **个性化设置**：尺寸、颜色、动画、播放器白名单，支持浅色与深色设置界面，调整自动保存。
 - **通知提醒**：应用白名单、系统应用图标、内容自适应高度，以及独立的“跟随 Windows 勿扰模式”开关。
-- **字体**：中文使用 OPPO Sans 4.0，日文使用 Noto Sans JP；字体分别遵循各自许可。
+- **字体**：中文使用 Noto Sans SC，日文使用 Noto Sans JP；字体分别遵循各自许可。
 
 ## 使用
 
@@ -31,7 +31,7 @@
 
 当前界面与后台位于 `Rust/`，设置界面使用 GPUI，胶囊使用 Windows 原生图形接口。`Assets/` 保存图标与字体，`build/` 包含当前构建及打包工具。`LyricIsland.Bootstrap/` 是单文件分享版的解压启动器。
 
-公开仓库不包含独立 OPPO 字体文件、签名私钥、个人配置、缓存和发行产物。编译前请按构建说明从官方来源准备字体。
+仓库已包含完整中日文字体及许可，可直接准备构建。签名私钥、个人配置、缓存和发行产物不纳入源码。
 
 ## 开源来源与致谢
 
@@ -45,7 +45,7 @@
 | [Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper) | 在线歌词协议处理的移植参考 | Apache-2.0 · XY Wang、WXRIW |
 | [GPUI](https://github.com/zed-industries/zed) | 设置界面 | Apache-2.0 · Zed Industries, Inc. |
 | [SQLite](https://www.sqlite.org/) / [SQLitePCLRaw](https://github.com/ericsink/SQLitePCL.raw) | 歌曲映射数据库及原生库来源 | SQLite：公有领域；SQLitePCLRaw：Apache-2.0 |
-| [OPPO Sans 4.0](https://www.coloros.com/article/A00000074/) | 中文界面字体 | OPPO 字体使用条款 · OPPO 广东移动通信有限公司 |
+| [Noto Sans SC](https://github.com/google/fonts/tree/main/ofl/notosanssc) | 中文界面字体 | SIL OFL 1.1 · Adobe |
 | [Noto Sans JP](https://github.com/google/fonts/tree/main/ofl/notosansjp) | 日文字体 | SIL OFL 1.1 · Adobe |
 
 ## 许可证

@@ -439,7 +439,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
         }
         4 => vec![
             info_row("Lyric Island · 歌词岛 1.1", "原生胶囊 · GPUI 设置 · Rust 后台",
-                     "保留完整 OPPO Sans 4.0，并内置 Noto Sans JP 日文字体。"),
+                     "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
             info_row("开源来源与许可", "按实际使用保留版权和许可声明",
@@ -1225,14 +1225,20 @@ fn register_fonts(cx: &mut App) {
         return;
     };
     let mut fonts: Vec<Cow<'static, [u8]>> = Vec::new();
-    for name in ["OPPOSans.ttf", "NotoSansJP.ttf"] {
+    for name in ["NotoSansSC.ttf", "NotoSansJP.ttf"] {
         if let Ok(bytes) = std::fs::read(directory.join(name)) {
             fonts.push(Cow::Owned(bytes));
         }
     }
     if !fonts.is_empty() {
-        // A rejected font would only mean a fallback face, so the result is deliberately ignored.
-        let _ = cx.text_system().add_fonts(fonts);
+        if let Err(error) = cx.text_system().add_fonts(fonts) {
+            log("FONT", &format!("Bundled fonts could not be loaded: {error}"));
+        }
+        if let Some(path) = std::env::var_os("LYRICISLAND_FONT_REPORT") {
+            let names = cx.text_system().all_font_names();
+            let report = json!({"chinese": names.iter().any(|name| name == t::FONT), "japanese": names.iter().any(|name| name == "Noto Sans JP"), "family": t::FONT});
+            let _ = std::fs::write(path, report.to_string());
+        }
     }
 }
 

@@ -24,8 +24,6 @@ __pycache__/
 *.pem
 
 
-# Obtain OPPO Sans from its official source
-Assets/Fonts/OPPOSans.ttf
 
 # Generated bundle metadata
 LyricIsland.Bootstrap/BundleVersion.g.cs

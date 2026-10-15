@@ -33,10 +33,10 @@ from embed_icon import embed_icon
 embed_icon(stage/'LyricIsland.Settings.exe',root/'Assets/LyricIsland-v2.ico')
 embed_icon(stage/'LyricIsland.exe',root/'Assets/LyricIsland-v2.ico')
 copy(options.sqlite,'e_sqlite3.dll')
-font=root/'Assets/Fonts/OPPOSans.ttf'
-font_hash='6c7d5864c661516e1f400d9f21e4297f2e2a0719909691e29607cc4ef484a9f4'
+font=root/'Assets/Fonts/NotoSansSC.ttf'
+font_hash='a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da'
 assert hashlib.sha256(font.read_bytes()).hexdigest()==font_hash,'Full font differs from the original file'
-copy(font,'Assets/Fonts/OPPOSans.ttf')
+copy(font,'Assets/Fonts/NotoSansSC.ttf')
 japanese=root/'Assets/Fonts/NotoSansJP.ttf'
 assert hashlib.sha256(japanese.read_bytes()).hexdigest()=='c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f','Japanese font differs from verified source'
 copy(japanese,'Assets/Fonts/NotoSansJP.ttf')

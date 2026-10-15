@@ -78,11 +78,13 @@ Rust 后台通过它只读访问用户数据目录下的 `database/song_maps.db`
 
 ## 6. 字体
 
-OPPO Sans 4.0 不纳入项目 MIT 许可，公开源码仓库不分发独立字体文件。来源与条款见 `FONT-NOTICE.md`。
+中文使用 Noto Sans SC，日文使用 Noto Sans JP；两套均为未修改的完整变量字体，采用 SIL Open Font License 1.1。
 
-### Noto Sans JP
-
-Font source: https://github.com/google/fonts/tree/main/ofl/notosansjp
 Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
-SIL Open Font License, Version 1.1. Unmodified variable font bundled as Assets/Fonts/NotoSansJP.ttf.
-Full license: licenses/NotoSansJP-OFL.txt.
+
+- Noto Sans SC 来源：https://github.com/google/fonts/tree/main/ofl/notosanssc
+- Noto Sans JP 来源：https://github.com/google/fonts/tree/main/ofl/notosansjp
+- 完整许可：`licenses/NotoSansSC-OFL.txt`、`licenses/NotoSansJP-OFL.txt`
+- 资源位置：`Assets/Fonts/NotoSansSC.ttf`、`Assets/Fonts/NotoSansJP.ttf`
+
+具体使用说明见 `FONT-NOTICE.md`。

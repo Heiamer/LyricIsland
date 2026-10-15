@@ -41,14 +41,14 @@ impl Renderer{
         for weight in [400,500,600]{
             let text="每一段旋律，都有自己的光 Lyric Island 0123456789 译";
             self.text(text,Rect::new(0.,0.,1000.,32.),16.,weight,0)?;
-            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,weight,"OPPO Sans 4.0",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
+            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,weight,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
             let runs=crate::font_probe::inspect(self.layouts.get(&key).unwrap())?;
             rows.push(serde_json::json!({"requestedWeight":weight,"runs":runs}));
         }
         let mut languages=vec![];
         for text in ["景色は移ろい瞬く間に変わる", "ひらがな カタカナ 日本語 한국어"]{
             self.text(text,Rect::new(0.,0.,1000.,32.),16.,500,0)?;
-            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,500,"OPPO Sans 4.0",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
+            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,500,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
             languages.push(serde_json::json!({"text":text,"runs":crate::font_probe::inspect(self.layouts.get(&key).unwrap())?}));
         }
         self.dc.EndDraw(None,None)?;Ok(serde_json::json!({"family":self.body_family,"lineSpacing":self.body_line_spacing,"baseline":self.body_baseline,"weights":rows,"languageSamples":languages}))
@@ -80,8 +80,9 @@ impl Renderer{
         let body_fonts:IDWriteFontCollection=fw.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?.cast()?;
         let blur=dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;let shadow_fx=dc.CreateEffect(&CLSID_D2D1Shadow)?;
         dc.SetTarget(&screen);let mut system_fonts=None;write.GetSystemFontCollection(&mut system_fonts,false)?;let system_fonts=system_fonts.unwrap();let fallback=write.cast::<IDWriteFactory2>()?.GetSystemFontFallback()?;
-        let mut index=0;let mut exists=windows::core::BOOL(0);body_fonts.FindFamilyName(w!("OPPO Sans 4.0"),&mut index,&mut exists)?;
-        if !exists.as_bool(){return Err(windows::core::Error::new(windows::core::HRESULT(0x80070057u32 as i32),"随包字体不是 OPPO Sans 4.0"))}
+        let mut index=0;let mut body_family=String::new();
+        for name in ["Noto Sans SC","Noto Sans SC Thin"]{let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut found=windows::core::BOOL(0);body_fonts.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut index,&mut found)?;if found.as_bool(){body_family=name.into();break}}
+        if body_family.is_empty(){return Err(windows::core::Error::new(windows::core::HRESULT(0x80070057u32 as i32),"随包中文字体不是 Noto Sans SC"))}
         let mut japanese_family=String::new();
         for name in ["Noto Sans JP","Noto Sans JP Thin"]{let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut i=0;let mut found=windows::core::BOOL(0);body_fonts.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut i,&mut found)?;if found.as_bool(){japanese_family=name.into();break}}
         if japanese_family.is_empty(){return Err(windows::core::Error::new(windows::core::HRESULT(0x80070057u32 as i32),"随包日文字体不是 Noto Sans JP"))}
@@ -89,7 +90,6 @@ impl Renderer{
         let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
-        let body_family="OPPO Sans 4.0".to_string();
         Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,layouts:HashMap::new(),cover:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
@@ -114,7 +114,7 @@ impl Renderer{
         self.dc.PushLayer(&params,None);std::mem::ManuallyDrop::drop(&mut params.geometricMask);Ok(())
     }
     unsafe fn text(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32)->Result<()>{
-        self.text_family(text,r,size,weight,c,"OPPO Sans 4.0",false,DWRITE_TEXT_ALIGNMENT_LEADING,None)
+        self.text_family(text,r,size,weight,c,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,None)
     }
     unsafe fn language_family(&self,text:&str)->String{
         if text.chars().any(|c|matches!(c as u32,0x3040..=0x30ff|0x31f0..=0x31ff|0xff66..=0xff9f)){return self.japanese_family.clone()}
@@ -181,7 +181,7 @@ impl Renderer{
             3=>{l((3.,2.),(3.,14.));l((14.,2.),(5.,8.));l((5.,8.),(14.,14.));l((14.,14.),(14.,2.));},
             4=>{if scene.playing{l((5.,2.),(5.,14.));l((11.,2.),(11.,14.));}else{l((4.,2.),(13.,8.));l((13.,8.),(4.,14.));l((4.,14.),(4.,2.));}},
             5=>{l((13.,2.),(13.,14.));l((2.,2.),(11.,8.));l((11.,8.),(2.,14.));l((2.,14.),(2.,2.));},
-            6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),12.,c,"OPPO Sans 4.0",true);},
+            6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),12.,c,"Noto Sans SC",true);},
             7=>{let _=self.centered_icon("\u{e713}",Rect::new(x,y,size,size),13.,c,"Segoe Fluent Icons",false);},
             8=>{l((3.,10.),(8.,5.));l((8.,5.),(13.,10.));},
             9=>{let result=(||->Result<()>{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;let p=|x:f64,y:f64|point(ox+x*scale,oy+y*scale);sink.BeginFigure(p(8.,14.),D2D1_FIGURE_BEGIN_HOLLOW);for v in [[4.,11.,1.,8.,1.,5.],[1.,1.,6.,0.,8.,4.],[10.,0.,15.,1.,15.,5.],[15.,8.,12.,11.,8.,14.]]{sink.AddBezier(&D2D1_BEZIER_SEGMENT{point1:p(v[0],v[1]),point2:p(v[2],v[3]),point3:p(v[4],v[5])});}sink.EndFigure(D2D1_FIGURE_END_CLOSED);sink.Close()?;self.brush.SetColor(&color(c));self.dc.DrawGeometry(&path,&self.brush,1.4,None);Ok(())})();let _=result;},_=>{}
@@ -214,9 +214,9 @@ impl Renderer{
         self.fill(Rect::new(18.,status_y+(status_h-4.)/2.,4.,4.),2.,s.progress_color);self.text(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},Rect::new(28.,status_y,72.,status_h),10.,400,secondary)?;
         self.text(s.title,Rect::new(114.,title_y,w-164.,title_h),16.,600,s.text_color)?;self.text(s.artist,Rect::new(114.,artist_y,w-164.,artist_h),12.5,400,secondary)?;
         let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=5.*(1.-lyric_t).powi(3);
-        self.text_family(s.lyric,Rect::new(114.,lyric_y_base+lyric_y,w-132.,20.),s.font_size+3.,500,((255.*lyric_t)as u32)<<24|(s.text_color&0xffffff),"OPPO Sans 4.0",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(20.))?;self.text(s.secondary,Rect::new(114.,lyric_y_base+24.,w-132.,secondary_h),11.5,400,secondary)?;
+        self.text_family(s.lyric,Rect::new(114.,lyric_y_base+lyric_y,w-132.,20.),s.font_size+3.,500,((255.*lyric_t)as u32)<<24|(s.text_color&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(20.))?;self.text(s.secondary,Rect::new(114.,lyric_y_base+24.,w-132.,secondary_h),11.5,400,secondary)?;
         self.fill(Rect::new(18.,122.,w-36.,4.),2.,0xff343b45);let p=(w-36.)*s.progress.clamp(0.,1.);self.fill(Rect::new(18.,122.,p,4.),2.,s.component_color);let size=if s.pressed==10{14.}else if s.hover==10{12.}else{10.};self.fill(Rect::new(18.+p-size/2.,124.-size/2.,size,size),size/2.,s.component_color);
-        self.text(&time(s.elapsed),Rect::new(18.,elapsed_y,70.,status_h),10.,400,secondary)?;let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};self.text_family(&total,Rect::new(w-90.,elapsed_y,72.,status_h),10.,400,secondary,"OPPO Sans 4.0",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+        self.text(&time(s.elapsed),Rect::new(18.,elapsed_y,70.,status_h),10.,400,secondary)?;let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};self.text_family(&total,Rect::new(w-90.,elapsed_y,72.,status_h),10.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
         for (id,r) in crate::layout::buttons(w,s.layout_scale){self.button(id,r.x,r.y,r.w,s);}
         Ok(())
     }
