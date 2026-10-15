@@ -1,0 +1,2 @@
+# Keep full upstream license texts readable with stable line endings.
+*.txt text eol=lf
