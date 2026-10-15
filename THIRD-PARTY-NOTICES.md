@@ -1,11 +1,13 @@
 # 第三方组件与许可
 
 歌词岛 1.1 使用以下第三方组件与移植来源。
-**开源移植不得因改写而删除版权与许可声明**，因此每一项都保留归属，完整许可文本放在发行目录的 `licenses/` 中。
+本文件列出项目来源、移植参考与主要随包组件。原作者版权及许可声明保持有效；许可全文见根目录 `LICENSE`、本文件与 `licenses/`。其他依赖的具体版本见 `Rust/Cargo.lock`，其许可及 NOTICE 以对应上游包所附文件为准。
 
 ## 1. Lyric Island / TaskbarLyrics（本项目与其原始项目）
 
-MIT License，Copyright (c) 2026 anync。完整文本见发行目录的 `LICENSE`。
+来源：[ANYNC/TaskbarLyrics](https://github.com/ANYNC/TaskbarLyrics)。
+
+MIT License，Copyright (c) 2026 anync。后续修改：Copyright (c) 2026 Heiamer。完整文本见根目录 `LICENSE`。
 
 本项目在原作者许可下继续开发；原始 MIT 声明与版权行必须保留。
 
@@ -18,6 +20,8 @@ MIT License
 
 Copyright (c) 2026 AmorFate
 Copyright (c) 2018 Kyle
+
+各自的独立许可副本见 `licenses/AF-Media-Bar-MIT.txt` 与 `licenses/NetEase-Cloud-Music-DiscordRPC-MIT.txt`。
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -45,7 +49,7 @@ Apache License 2.0，Copyright 2023 XY Wang, WXRIW。
 
 Rust 后台把 QQ 音乐、网易云音乐、酷狗与 LRCLIB 的歌词协议处理移植到了
 `Rust/crates/lyric-backend/src/providers.rs`。移植是**参考该项目的协议实现**重写的 Rust 代码，
-并非逐行复制，但按 Apache-2.0 第 4 条仍在此保留归属与许可。
+在此保留来源、归属与 Apache-2.0 许可。
 
 - 完整许可文本：`licenses/Lyricify-Lyrics-Helper-Apache-2.0.txt`
 - 协议阅读所用的本地检出：`e875781e2e889d97c3c518fe388decd14805a56f`（2026-09-30）
@@ -76,7 +80,7 @@ Rust 后台通过它只读访问用户数据目录下的 `database/song_maps.db`
 
 OPPO Sans 4.0 不纳入项目 MIT 许可，公开源码仓库不分发独立字体文件。来源与条款见 `FONT-NOTICE.md`。
 
-## Noto Sans JP
+### Noto Sans JP
 
 Font source: https://github.com/google/fonts/tree/main/ofl/notosansjp
 Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.

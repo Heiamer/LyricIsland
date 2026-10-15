@@ -33,11 +33,26 @@
 
 公开仓库不包含独立 OPPO 字体文件、签名私钥、个人配置、缓存和发行产物。编译前请按构建说明从官方来源准备字体。
 
-## 来源与许可
+## 开源来源与致谢
 
-本项目基于 [ANYNC/TaskbarLyrics](https://github.com/ANYNC/TaskbarLyrics) 继续开发，保留原作者版权与 MIT 许可。
+歌词岛基于 [ANYNC/TaskbarLyrics](https://github.com/ANYNC/TaskbarLyrics) 继续开发。感谢以下项目与作者；移植和重写部分同样保留对应的版权与许可声明。
 
-项目代码采用 [MIT License](LICENSE)。第三方组件与字体不因本项目采用 MIT 而改变许可，详见 [第三方声明](THIRD-PARTY-NOTICES.md) 和 [字体条款](FONT-NOTICE.md)。
+| 项目 / 资源 | 在歌词岛中的用途 | 许可 / 版权 |
+| --- | --- | --- |
+| [TaskbarLyrics](https://github.com/ANYNC/TaskbarLyrics) | 原始项目、歌词处理与 Windows 媒体会话适配基础 | MIT · anync |
+| [AF-Media-Bar](https://github.com/Fervent-Tempo/AF-Media-Bar) | 网易云播放进度适配参考 | MIT · AmorFate |
+| [NetEase-Cloud-Music-DiscordRPC](https://github.com/Kxnrl/NetEase-Cloud-Music-DiscordRPC) | 网易云歌曲与播放进度适配参考 | MIT · Kyle |
+| [Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper) | 在线歌词协议处理的移植参考 | Apache-2.0 · XY Wang、WXRIW |
+| [GPUI](https://github.com/zed-industries/zed) | 设置界面 | Apache-2.0 · Zed Industries, Inc. |
+| [SQLite](https://www.sqlite.org/) / [SQLitePCLRaw](https://github.com/ericsink/SQLitePCL.raw) | 歌曲映射数据库及原生库来源 | SQLite：公有领域；SQLitePCLRaw：Apache-2.0 |
+| [OPPO Sans 4.0](https://www.coloros.com/article/A00000074/) | 中文界面字体 | OPPO 字体使用条款 · OPPO 广东移动通信有限公司 |
+| [Noto Sans JP](https://github.com/google/fonts/tree/main/ofl/notosansjp) | 日文字体 | SIL OFL 1.1 · Adobe |
+
+## 许可证
+
+项目自身代码采用 [MIT License](LICENSE)，保留原作者 `Copyright (c) 2026 anync`，新增修改署名为 Heiamer。
+
+第三方代码、协议移植与字体分别遵循其原始许可，不统一重新授权为 MIT。详细归属及版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，许可文本见 [licenses/](licenses/)，字体来源与使用条款见 [FONT-NOTICE.md](FONT-NOTICE.md)。其他直接及间接依赖以 [Cargo.lock](Rust/Cargo.lock) 锁定的版本和各上游包的许可、NOTICE 文件为准。
 
 ## 反馈
 
