@@ -14,6 +14,7 @@ fn point(x:f64,y:f64)->Vector2{Vector2{X:x as f32,Y:y as f32}}
 fn identity()->Matrix3x2{Matrix3x2{M11:1.,M12:0.,M21:0.,M22:1.,M31:0.,M32:0.}}
 fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:x as f32,M32:y as f32,..Default::default()}}
 pub struct Scene<'a>{
+    pub demo:bool,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
     pub lyric:&'a str,pub previous_lyric:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
@@ -39,7 +40,7 @@ impl Renderer{
     pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{
         let mut rows=vec![];self.dc.BeginDraw();
         for weight in [400,500,600]{
-            let text="每一段旋律，都有自己的光 Lyric Island 0123456789 译";
+            let text="晚风轻轻，音乐刚好 Lyric Island 0123456789 译";
             self.text(text,Rect::new(0.,0.,1000.,32.),16.,weight,0)?;
             let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,weight,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
             let runs=crate::font_probe::inspect(self.layouts.get(&key).unwrap())?;
@@ -163,9 +164,17 @@ impl Renderer{
         let center_x=(-ink.left+32.+ink.right)/2.;let center_y=(-ink.top+32.+ink.bottom)/2.;
         self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x+r.w/2.-center_x as f64,r.y+r.h/2.-center_y as f64),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_NONE);Ok(())
     }
-    unsafe fn cover_with_opacity(&mut self,x:f64,y:f64,size:f64,opacity:f32)->Result<()>{
-        let r=Rect::new(x,y,size,size);self.clip(r,size/6.,1.)?;self.fill(r,0.,if size>24.{0xff244b42}else{0xff242a31});
+    unsafe fn cover_with_opacity(&mut self,x:f64,y:f64,size:f64,opacity:f32,demo:bool)->Result<()>{
+        let r=Rect::new(x,y,size,size);self.clip(r,size/6.,1.)?;self.fill(r,0.,if demo{0xff26324a}else if size>24.{0xff244b42}else{0xff242a31});
         if let Some(b)=&self.cover {let s=b.GetSize();let edge=s.width.min(s.height);let source=D2D_RECT_F{left:(s.width-edge)/2.,top:(s.height-edge)/2.,right:(s.width+edge)/2.,bottom:(s.height+edge)/2.};self.dc.DrawBitmap(b,Some(&rect(r)),opacity,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
+        else if demo{
+            let center=point(x+size*0.5,y+size*0.5);let disc=D2D1_ELLIPSE{point:center,radiusX:(size*0.36)as f32,radiusY:(size*0.36)as f32};
+            self.brush.SetColor(&color(0xff101723));self.dc.FillEllipse(&disc,&self.brush);
+            self.brush.SetColor(&color(0x804e617c));
+            for radius in [0.30,0.25,0.20]{let groove=D2D1_ELLIPSE{point:center,radiusX:(size*radius)as f32,radiusY:(size*radius)as f32};self.dc.DrawEllipse(&groove,&self.brush,(size*0.008).max(0.45)as f32,None);}
+            self.brush.SetColor(&color(0xffb1e8d1));self.dc.FillEllipse(&D2D1_ELLIPSE{point:center,radiusX:(size*0.105)as f32,radiusY:(size*0.105)as f32},&self.brush);
+            self.brush.SetColor(&color(0xff1a2638));self.dc.FillEllipse(&D2D1_ELLIPSE{point:center,radiusX:(size*0.025)as f32,radiusY:(size*0.025)as f32},&self.brush);
+        }
         else{self.text_family("♫",r,size*13./24.,400,0xffc5f0dd,"Segoe UI Symbol",true,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
         self.dc.PopLayer();Ok(())
     }
@@ -188,7 +197,7 @@ impl Renderer{
         }
     }
     unsafe fn compact_content(&mut self,s:&Scene<'_>)->Result<()>{
-        let c=s.layout.capsule;let cover=s.layout.compact_cover(s.layout_scale);self.cover_with_opacity(cover.x,cover.y,cover.w,s.cover_opacity as f32)?;
+        let c=s.layout.capsule;let cover=s.layout.compact_cover(s.layout_scale);self.cover_with_opacity(cover.x,cover.y,cover.w,s.cover_opacity as f32,s.demo)?;
         let round=|v:f64|(v*s.layout_scale).round_ties_even()/s.layout_scale;
         let line_h=round(s.font_size*self.body_line_spacing);let line_y=c.y+round((40.-line_h)/2.);
         let viewport=Rect::new(c.x+round(7.)+30.+round(5.),line_y,c.w-14.-30.-22.-10.,line_h);self.dc.PushAxisAlignedClip(&rect(viewport),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -210,7 +219,7 @@ impl Renderer{
         let title_y=16.+round((42.-title_h-artist_h-4.)/2.);let artist_y=title_y+title_h+4.;
         let elapsed_y=134.+round((10.-round(10.*self.body_line_spacing))/2.);
         let secondary_h=round(11.5*self.body_line_spacing);let lyric_y_base=64.+round((46.-20.-secondary_h-4.)/2.);let status_h=round(10.*self.body_line_spacing);let status_y=110.-status_h;
-        let w=s.layout.card.w;let secondary=0xc2000000|(s.text_color&0xffffff);self.cover_with_opacity(18.,16.,80.,s.cover_opacity as f32)?;
+        let w=s.layout.card.w;let secondary=0xc2000000|(s.text_color&0xffffff);self.cover_with_opacity(18.,16.,80.,s.cover_opacity as f32,s.demo)?;
         self.fill(Rect::new(18.,status_y+(status_h-4.)/2.,4.,4.),2.,s.progress_color);self.text(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},Rect::new(28.,status_y,72.,status_h),10.,400,secondary)?;
         self.text(s.title,Rect::new(114.,title_y,w-164.,title_h),16.,600,s.text_color)?;self.text(s.artist,Rect::new(114.,artist_y,w-164.,artist_h),12.5,400,secondary)?;
         let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=5.*(1.-lyric_t).powi(3);
