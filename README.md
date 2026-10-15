@@ -17,7 +17,7 @@
 
 适用于 Windows 10 / 11 x64。请在支持 Windows 媒体会话的播放器中播放音乐。
 
-完整解压运行包后打开 `LyricIsland.exe`，通过系统托盘打开设置。升级至 1.1 前，请先退出旧版主程序及设置窗口。
+从 [Releases](https://github.com/Heiamer/LyricIsland/releases/latest) 下载单文件 EXE 或便携版 ZIP。便携版完整解压后打开 `LyricIsland.exe`，通过系统托盘打开设置。升级至 1.1 前，请先退出旧版主程序及设置窗口。
 
 - 默认收起宽度为 **260 逻辑像素**，已有自定义尺寸保留。
 - 默认点击封面展开，也可在设置中开启“点击任意区域展开”。
