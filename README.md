@@ -56,4 +56,4 @@
 
 ## 反馈
 
-请通过 [Issues](https://github.com/Heiamer/1/issues) 提交问题，附上版本、Windows 版本、缩放比例和复现步骤。发送截图或日志前请移除个人通知内容。
+请通过 [Issues](https://github.com/Heiamer/LyricIsland/issues) 提交问题，附上版本、Windows 版本、缩放比例和复现步骤。发送截图或日志前请移除个人通知内容。
