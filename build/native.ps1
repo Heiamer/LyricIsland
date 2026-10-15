@@ -1,3 +1,9 @@
+<#
+.SYNOPSIS
+编译当前歌词岛主程序与设置窗口，并执行工作区测试。
+.DESCRIPTION
+本目录还提供发行打包、应用图标嵌入及可选通知身份包的生成工具。
+#>
 param(
     [string]$DllTool = '',
     [string]$TargetDirectory = '',
