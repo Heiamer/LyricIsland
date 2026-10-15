@@ -1,3 +1,4 @@
+# Current application workspace: lyric core, media backend, native island and GPUI settings.
 [workspace]
 resolver = "2"
 members = ["crates/lyric-core", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
