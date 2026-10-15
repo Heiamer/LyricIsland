@@ -266,6 +266,13 @@ unsafe fn notification_preview(a:&mut App,directory:&Path)->std::result::Result<
         a.renderer=Some(renderer);
     }Ok(())
 }
+unsafe fn icon_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
+    std::fs::create_dir_all(directory)?;a.poll();a.opacity=1.;a.frame=Frame::expanded();a.expanded=true;
+    a.renderer=None;
+    for dpi in [96.,120.,144.,192.]{let scale=dpi/96.;let mut renderer=Renderer::new(a.visual_hwnd,(a.layout.host.w*scale)as u32,(a.layout.host.h*scale)as u32,dpi as f32,&a.base.join("Assets/Fonts/NotoSansSC.ttf"))?;
+        let mut scene=a.scene();scene.layout_scale=scale;scene.lyric_age_ms=1000.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("icons-{dpi:.0}.png")))?;std::fs::write(directory.join(format!("icons-{dpi:.0}.json")),serde_json::to_vec(&renderer.icon_bounds()?)?)?;
+    }Ok(())
+}
 fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let args=std::env::args().collect::<Vec<_>>();
     if args.get(1).is_some_and(|s|s=="--app-icon"){
@@ -285,8 +292,9 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
-    let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let preview_mode=font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else{base.join("Data")};
+    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let preview_mode=icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else{base.join("Data")};
     let owner=Box::new(RefCell::new(App::new(base,data,demo)));let owner_ptr=&*owner as *const RefCell<App>;let mut app=owner.borrow_mut();create(&mut app,owner_ptr,preview_mode)?;
+    if icon_mode{icon_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if font_mode{let report=app.renderer.as_mut().unwrap().verify_font()?;std::fs::write(args.get(2).ok_or("missing font report path")?,serde_json::to_vec_pretty(&report)?)?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if notice_mode{notification_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if preview_mode{preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}

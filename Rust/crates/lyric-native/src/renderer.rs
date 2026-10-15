@@ -34,7 +34,7 @@ pub struct Renderer{
     blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
     write:IDWriteFactory,body_fonts:IDWriteFontCollection,system_fonts:IDWriteFontCollection,fallback:IDWriteFontFallback,body_family:String,japanese_family:String,
     pub body_line_spacing:f64,pub body_baseline:f64,
-    layouts:HashMap<String,IDWriteTextLayout>,cover:Option<ID2D1Bitmap1>,pub width:u32,pub height:u32,pub dpi:f32,
+    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,cover:Option<ID2D1Bitmap1>,pub width:u32,pub height:u32,pub dpi:f32,
 }
 impl Renderer{
     pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{
@@ -91,7 +91,7 @@ impl Renderer{
         let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,layouts:HashMap::new(),cover:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),cover:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
         use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
@@ -146,23 +146,30 @@ impl Renderer{
         }
         self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x,r.y),self.layouts.get(&key).unwrap(),&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);Ok(())
     }
-    /// Center the visible glyph, rather than the font's line box. The text
-    /// translation icon and Fluent gear have different ascent/descent metrics.
+    /// Cache actual glyph outlines so both icons share one visible height and
+    /// physical-pixel center, independently of font line metrics and hinting.
     unsafe fn centered_icon(&mut self,text:&str,r:Rect,size:f64,c:u32,family:&str,body:bool)->Result<()>{
-        let key=format!("icon|{text}|{family}|{size}");
-        if !self.layouts.contains_key(&key){
-            let name=if body{self.body_family.as_str()}else{family}.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-            let format=self.write.CreateTextFormat(PCWSTR(name.as_ptr()),if body{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,w!("en-US"))?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            let text=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&text,&format,32.,32.)?;
-            if body{layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;}
-            let ink=layout.GetOverhangMetrics()?;let height=32.+ink.top+ink.bottom;
-            if height>0.{layout.SetFontSize(size as f32*13./height,DWRITE_TEXT_RANGE{startPosition:0,length:text.len()as u32})?;}
-            self.layouts.insert(key.clone(),layout);
+        let key=format!("{text}|{family}|{size}|{}|{}|{}|{}",r.x,r.y,r.w,r.h);
+        if !self.icons.contains_key(&key){
+            let collection=if body{&self.body_fonts}else{&self.system_fonts};
+            let mut index=0;let mut exists=windows::core::BOOL(0);
+            for name in [if body{self.body_family.as_str()}else{family},"Segoe MDL2 Assets"]{
+                let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();collection.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut index,&mut exists)?;if exists.as_bool(){break}
+            }
+            if !exists.as_bool(){return Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x80070057u32 as i32)))}
+            let mut face=collection.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STRETCH_NORMAL,DWRITE_FONT_STYLE_NORMAL)?.CreateFontFace()?;
+            if body{face=face.cast::<IDWriteFontFace5>()?.GetFontResource()?.CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE,&[DWRITE_FONT_AXIS_VALUE{axisTag:DWRITE_FONT_AXIS_TAG_WEIGHT,value:400.}])?.cast()?;}
+            let codepoints=text.chars().map(|c|c as u32).collect::<Vec<_>>();let mut glyphs=vec![0u16;codepoints.len()];face.GetGlyphIndices(codepoints.as_ptr(),codepoints.len()as u32,glyphs.as_mut_ptr())?;
+            let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;face.GetGlyphRunOutline(64.,glyphs.as_ptr(),None,None,glyphs.len()as u32,false,false,&sink)?;sink.Close()?;
+            let ink=path.GetBounds(None)?;let height=(ink.bottom-ink.top).max(0.001);let scale=size as f32/height;
+            let dpi=self.dpi as f64/96.;let cx=((r.x+r.w/2.)*dpi).round()/dpi;let cy=((r.y+r.h/2.)*dpi).round()/dpi;
+            let transform=Matrix3x2{M11:scale,M22:scale,M31:cx as f32-(ink.left+ink.right)*0.5*scale,M32:cy as f32-(ink.top+ink.bottom)*0.5*scale,..Default::default()};
+            let geometry=self.factory.CreateTransformedGeometry(&path,&transform)?;self.icons.insert(key.clone(),geometry);
         }
-        let layout=self.layouts.get(&key).unwrap();let ink=layout.GetOverhangMetrics()?;
-        let center_x=(-ink.left+32.+ink.right)/2.;let center_y=(-ink.top+32.+ink.bottom)/2.;
-        self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x+r.w/2.-center_x as f64,r.y+r.h/2.-center_y as f64),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_NONE);Ok(())
+        self.brush.SetColor(&color(c));self.dc.FillGeometry(self.icons.get(&key).unwrap(),&self.brush,None);Ok(())
+    }
+    pub unsafe fn icon_bounds(&self)->Result<serde_json::Value>{
+        let mut rows=vec![];for (key,geometry) in &self.icons{let r=geometry.GetBounds(None)?;rows.push(serde_json::json!({"glyph":key.split('|').next(),"top":r.top,"bottom":r.bottom,"centerY":(r.top+r.bottom)/2.,"height":r.bottom-r.top}));}Ok(serde_json::json!(rows))
     }
     unsafe fn cover_with_opacity(&mut self,x:f64,y:f64,size:f64,opacity:f32,demo:bool)->Result<()>{
         let r=Rect::new(x,y,size,size);self.clip(r,size/6.,1.)?;self.fill(r,0.,if demo{0xff26324a}else if size>24.{0xff244b42}else{0xff242a31});
@@ -190,7 +197,7 @@ impl Renderer{
             3=>{l((3.,2.),(3.,14.));l((14.,2.),(5.,8.));l((5.,8.),(14.,14.));l((14.,14.),(14.,2.));},
             4=>{if scene.playing{l((5.,2.),(5.,14.));l((11.,2.),(11.,14.));}else{l((4.,2.),(13.,8.));l((13.,8.),(4.,14.));l((4.,14.),(4.,2.));}},
             5=>{l((13.,2.),(13.,14.));l((2.,2.),(11.,8.));l((11.,8.),(2.,14.));l((2.,14.),(2.,2.));},
-            6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),12.,c,"Noto Sans SC",true);},
+            6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),13.,c,"Noto Sans SC",true);},
             7=>{let _=self.centered_icon("\u{e713}",Rect::new(x,y,size,size),13.,c,"Segoe Fluent Icons",false);},
             8=>{l((3.,10.),(8.,5.));l((8.,5.),(13.,10.));},
             9=>{let result=(||->Result<()>{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;let p=|x:f64,y:f64|point(ox+x*scale,oy+y*scale);sink.BeginFigure(p(8.,14.),D2D1_FIGURE_BEGIN_HOLLOW);for v in [[4.,11.,1.,8.,1.,5.],[1.,1.,6.,0.,8.,4.],[10.,0.,15.,1.,15.,5.],[15.,8.,12.,11.,8.,14.]]{sink.AddBezier(&D2D1_BEZIER_SEGMENT{point1:p(v[0],v[1]),point2:p(v[2],v[3]),point3:p(v[4],v[5])});}sink.EndFigure(D2D1_FIGURE_END_CLOSED);sink.Close()?;self.brush.SetColor(&color(c));self.dc.DrawGeometry(&path,&self.brush,1.4,None);Ok(())})();let _=result;},_=>{}
