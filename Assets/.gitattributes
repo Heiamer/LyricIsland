@@ -1,0 +1,4 @@
+# Preserve original binary icon and font resources.
+*.ttf binary
+*.ico binary
+*.png binary
