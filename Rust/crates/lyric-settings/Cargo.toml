@@ -1,0 +1,24 @@
+[package]
+name = "lyric-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lyric-island-settings"
+path = "src/main.rs"
+
+[dependencies]
+lyric-backend = { path = "../lyric-backend" }
+serde_json.workspace = true
+# Only the Windows DirectX backend is needed. Disabling the defaults also drops
+# `windows-manifest`, which would require a resource compiler (rc.exe) that is not installed
+# here; this crate embeds its own activation manifest instead (see build.rs).
+gpui = { version = "=0.2.2", default-features = false }
+# Used only to reach the window handle so the non-client frame can be switched to dark mode, which
+# gpui decides from the system theme rather than from the app's own palette.
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
+[build-dependencies]
+embed-manifest = "=1.5.1"

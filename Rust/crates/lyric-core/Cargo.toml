@@ -1,0 +1,25 @@
+[package]
+name = "lyric-core"
+description = "Rust port of the TaskbarLyrics.Core lyric pipeline used by LyricIsland 0.7.8.1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+unicode-normalization = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+# Optional: strict-UTF-8-then-GBK decoding for local sidecar files, mirroring the
+# original's `Encoding.GetEncoding(936)` fallback.
+encoding_rs = { version = "0.8", optional = true }
+
+[features]
+default = ["gbk"]
+gbk = ["dep:encoding_rs"]
+
+[dev-dependencies]

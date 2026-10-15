@@ -1,0 +1,19 @@
+[package]
+name = "lyric-ffi"
+description = "C ABI over lyric-core so the C# LyricIsland app can call the Rust lyric engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "lyric_ffi"
+# cdylib -> lyric_ffi.dll, the artifact the C# app P/Invokes.
+# (A staticlib variant would need a MinGW `ar`; the DLL is what the app ships.)
+crate-type = ["cdylib"]
+
+[dependencies]
+lyric-backend = { path = "../lyric-backend" }
+lyric-core = { path = "../lyric-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

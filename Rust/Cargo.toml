@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/lyric-core", "crates/lyric-cli", "crates/lyric-ffi", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
+
+[workspace.package]
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["LyricIsland Rust port"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+regex = "1"
+unicode-normalization = "0.1"
+sha2 = "0.10"
+base64 = "0.22"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

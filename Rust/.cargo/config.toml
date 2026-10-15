@@ -1,0 +1,8 @@
+# Project-local target configuration: keep it out of the global cargo config so the
+# user's other projects are unaffected.
+#
+# The Windows GNU toolchain links libgcc_s_seh-1.dll / libwinpthread-1.dll dynamically by
+# default. `+crt-static` folds them in so the produced .exe is a single self-contained
+# file that runs on a machine without any Rust or MinGW runtime installed.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

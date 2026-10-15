@@ -1,0 +1,28 @@
+# Local builds and generated packages
+**/bin/
+**/obj/
+**/target/
+**/target-native/
+**/artifacts/
+publish/
+outputs/
+TestResults/
+__pycache__/
+*.pyc
+# Local settings, logs and signing material
+**/Data/
+**/Logs/
+.vs/
+.idea/
+.env
+.env.*
+*.user
+*.suo
+*.pfx
+*.p12
+*.key
+*.pem
+Rust/dist/
+
+# Obtain OPPO Sans from its official source
+LyricIsland.App/Assets/Fonts/OPPOSans.ttf

@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <AssemblyName>LyricIsland.Settings</AssemblyName>
+    <ApplicationIcon>..\LyricIsland.App\Assets\LyricIsland-v2.ico</ApplicationIcon>
+    <Version>0.8.0</Version>
+  </PropertyGroup>
+  <ItemGroup><PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" /><PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" /><PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" /></ItemGroup>
+  <ItemGroup><Content Include="..\LyricIsland.App\Assets\LyricIsland-v2.ico" Link="Assets\LyricIsland-v2.ico" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Content Include="..\LyricIsland.App\Assets\Fonts\OPPOSans.ttf" Link="Assets\Fonts\OPPOSans.ttf" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Compile Include="..\LyricIsland.App\IslandSettings.cs" Link="IslandSettings.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="..\LyricIsland.App\SettingsProtocol.cs" Link="SettingsProtocol.cs" /></ItemGroup>
+  <Target Name="PublishWinUIResourceIndex" AfterTargets="ComputeFilesToPublish" Condition="Exists('$(TargetDir)$(TargetName).pri')">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(TargetDir)$(TargetName).pri">
+        <RelativePath>$(TargetName).pri</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <ItemGroup>
+    <Compile Include="..\LyricIsland.App\PlayerSourceRules.cs" Link="PlayerSourceRules.cs" />
+    <Compile Include="..\LyricIsland.App\ColorSettings.cs" Link="ColorSettings.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="..\LyricIsland.App\TrayMenuPlacement.cs" Link="TrayMenuPlacement.cs" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\LyricIsland.App\IslandMotionOptions.cs" Link="IslandMotionOptions.cs" />
+    <Compile Include="..\LyricIsland.App\IslandMaterials.cs" Link="IslandMaterials.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="..\TaskbarLyrics.Core\Utilities\Log.cs" Link="Log.cs" /></ItemGroup>
+</Project>

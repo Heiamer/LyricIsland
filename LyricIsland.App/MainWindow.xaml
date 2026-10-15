@@ -1,0 +1,119 @@
+<Window x:Class="LyricIsland.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Lyric Island" FontFamily="OPPO Sans 4.0" Width="280" Height="38" WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" ShowActivated="False" Topmost="True" UseLayoutRounding="True" KeyDown="OnKeyDown">
+  <Window.Resources>
+    <SolidColorBrush x:Key="IslandComponentBrush" Color="#B1E8D1"/>
+    <SolidColorBrush x:Key="IslandTrackBrush" Color="#343B45"/>
+    <Style x:Key="IslandKeyboardFocus" TargetType="Control">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Control"><Border BorderBrush="#CCFFFFFF" BorderThickness="1.5" CornerRadius="6" Margin="-2"/></ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="IslandButton" TargetType="Button">
+      <Setter Property="FocusVisualStyle" Value="{StaticResource IslandKeyboardFocus}"/>
+      <Setter Property="Foreground" Value="{DynamicResource IslandComponentBrush}"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/><Setter Property="Padding" Value="0"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FontFamily" Value="Segoe UI Symbol"/><Setter Property="FontSize" Value="14"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="40" RenderTransformOrigin="0.5,0.5">
+          <Border.RenderTransform><ScaleTransform/></Border.RenderTransform>
+          <Grid><Border x:Name="HoverFill" Background="#18FFFFFF" CornerRadius="40" Opacity="0"/><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HoverFill" Property="Opacity" Value="1"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.3"/></Trigger>
+          <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="RenderTransform"><Setter.Value><ScaleTransform ScaleX="0.94" ScaleY="0.94"/></Setter.Value></Setter><Setter TargetName="HoverFill" Property="Opacity" Value="1"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="IslandCover" TargetType="Button" BasedOn="{StaticResource IslandButton}">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Border x:Name="CoverFocus" Background="Transparent" CornerRadius="6"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+        <ControlTemplate.Triggers><Trigger Property="IsPressed" Value="True"><Setter Property="Opacity" Value="0.7"/></Trigger></ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="IslandProgress" TargetType="Slider">
+      <Setter Property="Minimum" Value="0"/><Setter Property="Maximum" Value="1"/><Setter Property="Focusable" Value="True"/>
+      <Setter Property="IsMoveToPointEnabled" Value="True"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Slider">
+        <Grid Background="Transparent">
+          <Border Height="4" Background="{DynamicResource IslandTrackBrush}" CornerRadius="2" VerticalAlignment="Center"/>
+          <Track x:Name="PART_Track" Margin="-10,0" Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}" Value="{TemplateBinding Value}">
+            <Track.DecreaseRepeatButton><RepeatButton Command="Slider.DecreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border x:Name="ProgressFill" Height="4" Margin="10,0,-10,0" Background="{DynamicResource IslandComponentBrush}" CornerRadius="2" VerticalAlignment="Center"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.DecreaseRepeatButton>
+            <Track.Thumb><Thumb Width="20" Height="20"><Thumb.Template><ControlTemplate TargetType="Thumb"><Grid Background="Transparent"><Ellipse x:Name="Knob" Width="10" Height="10" Fill="{DynamicResource IslandComponentBrush}"/></Grid><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Knob" Property="Width" Value="12"/><Setter TargetName="Knob" Property="Height" Value="12"/></Trigger><Trigger Property="IsDragging" Value="True"><Setter TargetName="Knob" Property="Width" Value="14"/><Setter TargetName="Knob" Property="Height" Value="14"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+            <Track.IncreaseRepeatButton><RepeatButton Command="Slider.IncreaseLarge" Focusable="False"><RepeatButton.Template><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate></RepeatButton.Template></RepeatButton></Track.IncreaseRepeatButton>
+          </Track>
+        </Grid>
+        <ControlTemplate.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Cursor" Value="Arrow"/></Trigger></ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+  <Grid x:Name="IslandRoot" MouseEnter="OnIslandEnter" MouseLeave="OnIslandLeave" PreviewMouseLeftButtonUp="OnIslandBodyClick">
+    <Grid x:Name="CompactLayer" Panel.ZIndex="10" HorizontalAlignment="Left" VerticalAlignment="Top">
+      <Path x:Name="CompactSurface" Fill="#E6090B0E" Stroke="#1FFFFFFF" StrokeThickness="1" MouseLeftButtonUp="OnCompactSurfaceClick"/>
+      <Grid x:Name="CompactView" HorizontalAlignment="Left" Margin="7,0" Height="40" VerticalAlignment="Top">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/><ColumnDefinition Width="22"/></Grid.ColumnDefinitions>
+        <Button Style="{StaticResource IslandCover}" x:Name="CoverButton" Width="24" Height="24" Background="#242A31" Click="OnCoverClick" ToolTip="点击展开并保持打开" AutomationProperties.Name="展开灵动岛">
+          <Grid Width="24" Height="24" Background="#242A31"><Grid.Clip><RectangleGeometry Rect="0,0,24,24" RadiusX="4" RadiusY="4"/></Grid.Clip><TextBlock Text="♫" Foreground="#C5F0DD" FontSize="13" VerticalAlignment="Center" HorizontalAlignment="Center"/><Image x:Name="CoverImage" Width="24" Height="24" Stretch="UniformToFill"/></Grid>
+        </Button>
+        <Grid x:Name="LyricViewport" Grid.Column="1" Margin="5,0,5,0" ClipToBounds="True" VerticalAlignment="Center">
+          <TextBlock x:Name="PreviousLyric" FontSize="12.5" Foreground="#F1F3F5" TextTrimming="CharacterEllipsis" Opacity="0"/>
+          <TextBlock x:Name="CurrentLyric" Text="打开播放器，开始一首音乐" FontSize="12.5" FontWeight="Medium" Foreground="#F1F3F5" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="HighlightLyric" FontSize="12.5" FontWeight="Medium" Foreground="#A9E6CD" TextTrimming="CharacterEllipsis" IsHitTestVisible="False"/>
+        </Grid>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center" ToolTip="播放状态">
+          <Rectangle x:Name="ActivityOne" Width="2" Height="10" Fill="#A9E6CD" RadiusX="1" RadiusY="1" Margin="1" RenderTransformOrigin="0.5,0.5"/>
+          <Rectangle x:Name="ActivityTwo" Width="2" Height="14" Fill="#A9E6CD" RadiusX="1" RadiusY="1" Margin="1" RenderTransformOrigin="0.5,0.5"/>
+          <Rectangle x:Name="ActivityThree" Width="2" Height="8" Fill="#A9E6CD" RadiusX="1" RadiusY="1" Margin="1" RenderTransformOrigin="0.5,0.5"/>
+        </StackPanel>
+      </Grid>
+    </Grid>
+    <Grid x:Name="CardLayer" HorizontalAlignment="Left" VerticalAlignment="Top">
+      <Path x:Name="CardShadow" Fill="#01000000" Stroke="#FF000000" StrokeThickness="1" IsHitTestVisible="False">
+        <Path.Effect><DropShadowEffect Color="Black" BlurRadius="22" ShadowDepth="5" Opacity="0.3" RenderingBias="Performance"/></Path.Effect>
+      </Path>
+      <Grid x:Name="CardMask">
+      <Path x:Name="IslandSurface" MouseLeftButtonUp="OnMorphSurfaceClick" Fill="#F510141A" Stroke="#22FFFFFF" StrokeThickness="1"/>
+      <Path x:Name="CardHighlight" StrokeThickness="1" IsHitTestVisible="False">
+        <Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#44FFFFFF" Offset="0"/><GradientStop Color="#00FFFFFF" Offset="0.32"/></LinearGradientBrush></Path.Stroke>
+      </Path>
+      <Grid x:Name="IslandContent" HorizontalAlignment="Left" VerticalAlignment="Top">
+      <Grid x:Name="ExpandedView" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="18,16" Visibility="Hidden" Opacity="0" IsHitTestVisible="False">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="96"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="6"/><RowDefinition Height="46"/><RowDefinition Height="4"/><RowDefinition Height="30"/><RowDefinition Height="40"/></Grid.RowDefinitions>
+        <Button x:Name="ExpandedCoverButton" Style="{StaticResource IslandCover}" Width="80" Height="80" HorizontalAlignment="Left" VerticalAlignment="Top" Grid.RowSpan="3" Background="#244B42" Click="OnCoverClick" ToolTip="点击收起" AutomationProperties.Name="收起灵动岛">
+            <Viewbox Width="80" Height="80"><Grid x:Name="ExpandedCoverVisual" Width="24" Height="24" Background="#244B42"><Grid.Clip><RectangleGeometry Rect="0,0,24,24" RadiusX="4" RadiusY="4"/></Grid.Clip><TextBlock Text="♫" Foreground="#C5F0DD" FontSize="13" VerticalAlignment="Center" HorizontalAlignment="Center"/><Image x:Name="ExpandedCoverImage" Width="24" Height="24" Stretch="UniformToFill"/></Grid></Viewbox>
+          </Button>
+        <StackPanel Orientation="Horizontal" Grid.Row="2" VerticalAlignment="Bottom" Margin="0,0,8,0"><Ellipse Width="4" Height="4" Fill="#A9E6CD" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock x:Name="PlaybackStatus" Text="等待播放" Foreground="#7F8C9A" FontSize="10" TextTrimming="CharacterEllipsis" MaxWidth="72"/></StackPanel>
+        <Grid Grid.Column="1"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="24"/></Grid.ColumnDefinitions><StackPanel VerticalAlignment="Center" Margin="0,0,8,0">
+            <TextBlock x:Name="SongTitle" Text="暂无播放" Foreground="#F4F6F8" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="ArtistName" Text="打开播放器，开始一首音乐" Foreground="#959FAE" FontSize="12.5" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
+
+          </StackPanel><Button Style="{StaticResource IslandButton}" Grid.Column="1" Width="24" Height="24" VerticalAlignment="Top" Click="OnCollapse" ToolTip="收起" AutomationProperties.Name="收起灵动岛"><Path Data="M 3,10 L 8,5 L 13,10" Stroke="#8C99A8" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="16" Height="16"/></Button></Grid>
+        <StackPanel Grid.Row="2" Grid.Column="1" VerticalAlignment="Center">
+          <TextBlock x:Name="ExpandedLyric" Text="打开播放器，开始一首音乐" Foreground="#DBF5E8" FontSize="15.5" FontWeight="Medium" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxHeight="24" LineHeight="20" LineStackingStrategy="BlockLineHeight"/>
+          <TextBlock x:Name="SecondaryLyric" Text="等待歌词" Foreground="#7D8896" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
+        </StackPanel>
+        <Grid Grid.Row="4" Grid.ColumnSpan="2">
+          <Grid.RowDefinitions><RowDefinition Height="20"/><RowDefinition Height="10"/></Grid.RowDefinitions>
+          <Slider x:Name="PlaybackProgress" Style="{StaticResource IslandProgress}" Height="20" VerticalAlignment="Top" Value="0" ValueChanged="OnSeekValueChanged" PreviewKeyDown="OnSeekKeyDown" KeyUp="OnSeekKeyUp" Thumb.DragStarted="OnSeekStart" Thumb.DragCompleted="OnSeekCompleted" PreviewMouseLeftButtonDown="OnSeekPointerDown" PreviewMouseLeftButtonUp="OnSeekPointerUp" ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="歌曲播放进度"/>
+          <TextBlock x:Name="ElapsedTime" Grid.Row="1" Text="00:00" Foreground="#718090" FontSize="10" VerticalAlignment="Center"/>
+          <TextBlock x:Name="TotalTime" Grid.Row="1" Text="--:--" Foreground="#718090" FontSize="10" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+        </Grid>
+        <Grid x:Name="Toolbar" Grid.Row="5" Grid.ColumnSpan="2" IsHitTestVisible="False">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+          <Button Style="{StaticResource IslandButton}" x:Name="MoveButton" Width="24" Height="24" HorizontalAlignment="Left" ToolTip="自由悬浮时按住拖动；方向键微调" PreviewMouseLeftButtonDown="OnDrag" KeyDown="OnMoveKey" AutomationProperties.Name="移动灵动岛"><Path Data="M8,1 L8,15 M1,8 L15,8 M5,4 L8,1 L11,4 M4,5 L1,8 L4,11 M5,12 L8,15 L11,12 M12,5 L15,8 L12,11" Stroke="{DynamicResource IslandComponentBrush}" StrokeThickness="1.2" Width="16" Height="16"/></Button>
+          <Button Style="{StaticResource IslandButton}" x:Name="FavoriteButton" Width="24" Height="24" HorizontalAlignment="Left" Margin="30,0,0,0" Click="OnFavorite" ToolTip="喜欢 / 取消喜欢当前歌曲" AutomationProperties.Name="喜欢或取消喜欢当前歌曲"><Path Data="M8,14 C4,11 1,8 1,5 C1,1 6,0 8,4 C10,0 15,1 15,5 C15,8 12,11 8,14 Z" Stroke="{DynamicResource IslandComponentBrush}" StrokeThickness="1.4" Width="16" Height="16"/></Button>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+            <Button Style="{StaticResource IslandButton}" x:Name="PreviousButton" Width="30" Height="30" Click="OnMediaAction" Tag="PreviousTrack" ToolTip="上一首" AutomationProperties.Name="上一首"><Path Data="M3,2 L3,14 M14,2 L5,8 L14,14 Z" Stroke="{DynamicResource IslandComponentBrush}" StrokeThickness="1.5" Width="16" Height="16"/></Button>
+            <Button Style="{StaticResource IslandButton}" x:Name="PlayButton" Click="OnMediaAction" Tag="TogglePlayPause" ToolTip="播放 / 暂停" Width="38" Height="38" Margin="12,0" Background="{DynamicResource IslandComponentBrush}" AutomationProperties.Name="播放或暂停"><Path x:Name="PlayGlyph" Data="M5,2 L5,14 M11,2 L11,14" Stroke="#12251D" StrokeThickness="2" Width="16" Height="16"/></Button>
+            <Button Style="{StaticResource IslandButton}" x:Name="NextButton" Width="30" Height="30" Click="OnMediaAction" Tag="NextTrack" ToolTip="下一首" AutomationProperties.Name="下一首"><Path Data="M13,2 L13,14 M2,2 L11,8 L2,14 Z" Stroke="{DynamicResource IslandComponentBrush}" StrokeThickness="1.5" Width="16" Height="16"/></Button>
+          </StackPanel>
+          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <Button Style="{StaticResource IslandButton}" Width="24" Height="24" FontFamily="{Binding FontFamily, RelativeSource={RelativeSource AncestorType=Window}}" FontSize="12" Content="译" Click="OnTranslation" ToolTip="切换翻译" AutomationProperties.Name="切换歌词翻译"/>
+            <Button Style="{StaticResource IslandButton}" Width="24" Height="24" FontFamily="Segoe Fluent Icons" FontSize="13" Content="&#xE713;" Margin="6,0,0,0" Click="OnSettings" ToolTip="设置" AutomationProperties.Name="打开设置"/>
+          </StackPanel>
+        </Grid>
+      </Grid>
+      </Grid>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>
+

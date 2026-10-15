@@ -1,0 +1,16 @@
+[package]
+name = "lyric-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lyric-core = { path = "../lyric-core" }
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+sha2.workspace = true
+base64.workspace = true
+aes = "0.8"
+md-5 = "0.10"
+windows = { version = "0.62", features = ["Foundation", "Media_Control", "Storage_Streams", "Win32_System_WinRT", "Win32_System_Com", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_Security", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_SystemInformation", "Win32_System_LibraryLoader"] }

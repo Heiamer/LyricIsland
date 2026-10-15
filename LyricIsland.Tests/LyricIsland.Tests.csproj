@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0-windows10.0.22621.0</TargetFramework><UseWPF>true</UseWPF><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <!-- These are the historical GUI/backend regressions written against the managed backend.
+       They need the app built with UseRustBackend=false so the C# SMTC/cache/duration/EF types
+       they reference exist. The property has to be global (command line), not AdditionalProperties
+       on the ProjectReference: restore ignores AdditionalProperties, so the app's package graph
+       would stay the production one and EF Core would be missing at compile time.
+       Production-mode GUI coverage is the app's own smoke and presence self-checks. -->
+  <ItemGroup><ProjectReference Include="..\LyricIsland.App\LyricIsland.App.csproj" /></ItemGroup>
+  <Target Name="RequireManagedBackend" BeforeTargets="BeforeBuild" Condition="'$(UseRustBackend)' != 'false'">
+    <Error Text="This suite covers the managed backend. Run: dotnet test LyricIsland.Tests -c Release -p:UseRustBackend=false" />
+  </Target>
+  <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1"/><PackageReference Include="xunit" Version="2.9.2"/><PackageReference Include="xunit.runner.visualstudio" Version="2.8.2"><PrivateAssets>all</PrivateAssets></PackageReference></ItemGroup>
+</Project>
