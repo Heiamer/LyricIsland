@@ -95,7 +95,9 @@ struct SettingsApp {
     pad_bounds: Rc<Cell<Bounds<Pixels>>>,
     hue_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Scroll state of the content column, so a self-check can bring the picker into view.
-    scroll: ScrollHandle,
+    /// One scroll handle per page. A single shared handle made every page inherit the previous
+    /// page's offset, so scrolling to the end of one page left the next one already at the bottom.
+    scrolls: Vec<ScrollHandle>,
     /// Whether the last frame asked DWM for a dark (or light) non-client frame.
     applied_dark: Option<bool>,
     /// Track rectangle of the slider named by `LYRICISLAND_SMOKE_SLIDER`, published so an automated
@@ -199,7 +201,7 @@ impl SettingsApp {
             slider: None,
             pad_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             hue_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
-            scroll: ScrollHandle::new(),
+            scrolls: (0..PAGES.len()).map(|_| ScrollHandle::new()).collect(),
             applied_dark: None,
             smoke_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             hex_field:picker.map(|p|make_hex_field(&t::to_hex(p.hsv.to_rgb()),cx)),
@@ -347,6 +349,8 @@ impl Render for SettingsApp {
             .child(div().mt_1().text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned()));
         column = column.child(div().mt_6().flex().flex_col().gap_3().children(page_rows(page, &state, self, cx)));
 
+        // Each page owns its offset, so switching pages always starts where that page was left.
+        let scroll = self.scrolls[page.min(self.scrolls.len() - 1)].clone();
         let footer = div().mt_6().pt_3().text_size(px(11.0)).text_color(t::text_faint())
             .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
 
@@ -357,7 +361,7 @@ impl Render for SettingsApp {
             .child(div().w(px(1.0)).flex_shrink_0().h_full().bg(t::hairline()))
             .child(
                 div().flex().flex_col().flex_1().min_w_0().h_full()
-                    .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&self.scroll).child(column))
+                    .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&scroll).child(column))
                     .child(hairline())
                     .child(div().px_7().py_3().min_w_0().children(if message.is_empty(){None}else{Some(div().text_size(px(12.)).text_color(if message.contains("失败")||message.contains("错误"){t::danger()}else{t::text()}).child(message))}).child(footer)),
             ))
@@ -567,7 +571,7 @@ fn legacy_page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Con
             action_row("checkUpdate", "在线更新", "同时请求国内源和 GitHub，检查最新正式版本。", "检查更新", view, cx),
             action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
             action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("DotIsle · 点屿 1.3.1", "原生胶囊 · GPUI 设置 · Rust 后台",
+            info_row("DotIsle · 点屿 1.3.2", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -737,6 +741,38 @@ fn small_button(
         .text_color(t::text_dim())
         .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
         .active(|style| style.opacity(0.85))
+        .child(label.to_owned())
+        .on_click(on_click)
+}
+
+/// A pill action sized to sit beside the round icon buttons.
+///
+/// The height is explicit on purpose: a plain padded button in a row whose sibling is a 36px
+/// circle stretches to that circle's height, which left the label small inside a tall box. Fixing
+/// the height and using half of it as the radius keeps the shape deliberate at any label length.
+fn pill_button(
+    id: SharedString,
+    label: &str,
+    filled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (background, foreground) = if filled { (t::accent(), t::on_accent()) } else { (t::field(), t::text()) };
+    let hover_background = if filled { t::accent() } else { t::surface_hi() };
+    div()
+        .id(id)
+        .h(px(36.0))
+        .px_4()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(18.0))
+        .bg(background)
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(foreground)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_background))
+        .active(|style| style.opacity(0.8))
         .child(label.to_owned())
         .on_click(on_click)
 }
@@ -1805,10 +1841,10 @@ fn main() {
         let window = match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3.1".into()),appears_transparent:true,..Default::default()}),
+                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3.2".into()),appears_transparent:true,..Default::default()}),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("点屿 · 设置 1.3.1");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("点屿 · 设置 1.3.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1839,9 +1875,9 @@ fn main() {
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_millis(900)).await;
                         let outcome = window.update(cx, |view, _, cx| {
-                            let max = view.scroll.max_offset();
+                            let max = view.scrolls[view.page.min(view.scrolls.len() - 1)].max_offset();
                             // Scroll to the end so the picker under the last colour row is visible.
-                            view.scroll.set_offset(point(px(0.0), -max.height));
+                            view.scrolls[view.page.min(view.scrolls.len() - 1)].set_offset(point(px(0.0), -max.height));
                             cx.notify();
                             f32::from(max.height)
                         });
@@ -1965,6 +2001,18 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
             view.close_todo_form(cx);
             collapsed>=3&&opened==collapsed+1&&filled
         }).unwrap_or(false);
+        // Every page must own its scroll offset. One shared handle made a page open already scrolled
+        // to wherever the previous page had been left, so the bottom of one page was the bottom of all.
+        let scroll_regression=window.update(cx,|view,_,_|{
+            let other=(PAGE_TODOS+1).min(PAGES.len()-1);
+            if view.scrolls.len()!=PAGES.len(){return false}
+            let first=view.scrolls[PAGE_TODOS].clone();let second=view.scrolls[other].clone();
+            second.set_offset(point(px(0.0),px(0.0)));
+            first.set_offset(point(px(0.0),px(-320.0)));
+            let moved=first.offset().y==px(-320.0)&&second.offset().y==px(0.0);
+            first.set_offset(point(px(0.0),px(0.0)));
+            moved
+        }).unwrap_or(false);
         let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
             let result=window.update(cx,|view,_,cx|{
                 view.page=0;view.picker=Some(Picker{key:"ExpandedComponentColor",hsv:Hsv::new(0.3,0.5,0.7),drag:Drag::None});
@@ -1981,7 +2029,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         }else{None};
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression&&todo_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"todoRegression":todo_regression,
+            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression&&todo_regression&&scroll_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"todoRegression":todo_regression,"scrollPerPage":scroll_regression,
             "pages": PAGES.len(),
             "settings": "GPUI",
             "ipc": "Rust",
