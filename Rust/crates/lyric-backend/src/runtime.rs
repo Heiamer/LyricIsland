@@ -11,7 +11,7 @@ impl Backend{
     pub fn new(settings:Value,data:PathBuf,local:PathBuf,logs:PathBuf)->Arc<Self>{
         let backend=Arc::new(Self{raw:Arc::new(JsonStore::new(data.join("database/lyric-pipeline-raw-v1.json"))),parsed:Arc::new(JsonStore::new(data.join("database/lyric-pipeline-parsed-v1.json"))),final_cache:FinalCache(Arc::new(JsonStore::new_enveloped(data.join("database/resolved-lyrics-v1.json")))),data,local,logs,
             state:Mutex::new(State{settings,playback:PlaybackSnapshot::idle(),clock:PlaybackClock::default(),sync:LyricSyncService::new(),active:None,events:0,cover:None,cover_version:0,cover_key:String::new(),artwork_identity:String::new(),duration_source:"等待歌曲信息".into(),native_status:"等待网易云".into(),native_error:None,track_key:String::new(),pending_weak:None,last_strong_track:None}),closed:AtomicBool::new(false),generation:AtomicU64::new(0),started:Instant::now(),search_cancel:Mutex::new(None)});
-        io::log(&backend.logs,"BUILD","Version=1.1; Backend=Rust; GUI=Direct2D; Settings=GPUI; HTTP=WinHTTP NO_PROXY");
+        io::log(&backend.logs,"BUILD","Version=1.2; Backend=Rust; GUI=Direct2D; Settings=GPUI; HTTP=WinHTTP NO_PROXY");
         let worker=backend.clone();std::thread::spawn(move||worker.run());backend
     }
     pub fn close(&self){self.closed.store(true,Ordering::Release);self.generation.fetch_add(1,Ordering::AcqRel);if let Ok(mut c)=self.search_cancel.lock(){if let Some(c)=c.take(){c.store(true,Ordering::Release)}}}
@@ -24,7 +24,7 @@ impl Backend{
         let frame=s.sync.get_display_frame(&lyric_playback);
         let track=playback.track.as_ref().map(|t|json!({"id":t.id,"title":t.title,"artist":t.artist,"album":t.album,"sourceApp":t.source_app,"durationSeconds":t.duration.as_secs_f64(),"songId":t.song_id}));
         let cover=if s.cover_version!=last_cover{s.cover.as_ref().map(|b|STANDARD.encode(b))}else{None};
-        json!({"version":"1.1","backend":"Rust","track":track,"isPlaying":playback.is_playing,"positionSeconds":playback.position.as_secs_f64(),"rawSeconds":playback.raw_position.map(|p|p.as_secs_f64()),"sourceId":playback.source_app_user_model_id,"canSeek":playback.can_seek,"isCoverLoading":playback.is_cover_loading,"coverVersion":s.cover_version,"cover":cover,"artworkIdentity":s.artwork_identity,"durationSource":s.duration_source,"nativeStatus":s.native_status,"nativeError":s.native_error,"events":s.events,"localClock":s.clock.local,"clockStatus":s.clock.status,"lyricSource":s.sync.current_lyric_source_app(),"frame":{"currentLine":frame.current_line,"nextLine":frame.next_line,"title":frame.title,"lineProgress":frame.line_progress,"currentLineIndex":frame.current_line_index,"isPureMusic":frame.is_pure_music,"wordScanProgress":frame.word_scan_progress,"currentTranslation":frame.current_translation,"nextTranslation":frame.next_translation,"hasTrackTranslation":frame.has_track_translation}})
+        json!({"version":"1.2","backend":"Rust","track":track,"isPlaying":playback.is_playing,"positionSeconds":playback.position.as_secs_f64(),"rawSeconds":playback.raw_position.map(|p|p.as_secs_f64()),"sourceId":playback.source_app_user_model_id,"canSeek":playback.can_seek,"isCoverLoading":playback.is_cover_loading,"coverVersion":s.cover_version,"cover":cover,"artworkIdentity":s.artwork_identity,"durationSource":s.duration_source,"nativeStatus":s.native_status,"nativeError":s.native_error,"events":s.events,"localClock":s.clock.local,"clockStatus":s.clock.status,"lyricSource":s.sync.current_lyric_source_app(),"frame":{"currentLine":frame.current_line,"nextLine":frame.next_line,"title":frame.title,"lineProgress":frame.line_progress,"currentLineIndex":frame.current_line_index,"isPureMusic":frame.is_pure_music,"wordScanProgress":frame.word_scan_progress,"currentTranslation":frame.current_translation,"nextTranslation":frame.next_translation,"hasTrackTranslation":frame.has_track_translation}})
     }
     pub fn command(&self,action:&str,seconds:f64)->Result<bool,String>{
         if action=="synchronize"{if let Ok(mut s)=self.state.lock(){s.clock.synchronize(seconds,self.started.elapsed().as_secs_f64());return Ok(true)}return Ok(false)}
@@ -60,9 +60,12 @@ impl Backend{
                             sample.playback.track=Some(TrackInfo::new(format!("Netease|{title}|{artist}"),title,artist,"","Netease",Duration::ZERO));sample.playback.source_app_user_model_id="cloudmusic.exe".into();
                         }
                     }
+                    if sample.playback.track.is_none(){if let Some(n)=netease.latest.as_ref().filter(|n|unix_ms()-n.captured_ms<800){
+                        let mut track=TrackInfo::new(format!("Netease|{}",n.song_id),&n.title,&n.artist,&n.album,"Netease",Duration::from_secs_f64(n.duration));track.song_id=Some(n.song_id.clone());sample.playback.track=Some(track);sample.playback.source_app_user_model_id="cloudmusic.exe".into();
+                    }}
                     let mut native=false;let mut cover_url=None;
                     if let Some(t)=sample.playback.track.as_mut(){if let Some(n)=netease.matching(t){
-                        cover_url=n.cover_url.clone();
+                        cover_url=n.cover_url.clone();if t.title.trim().is_empty()||t.title.eq_ignore_ascii_case("Unknown Title"){t.title=n.title.clone();}if t.artist.trim().is_empty(){t.artist=n.artist.clone();}if t.album.trim().is_empty(){t.album=n.album.clone();}
                         if sample.updated_ms<=0||sample.raw<=0.||sample.updated_ms>unix_ms()+5000{
                             let age=((unix_ms()-n.captured_ms) as f64/1000.).max(0.);t.song_id=Some(n.song_id);t.duration=Duration::from_secs_f64(n.duration);sample.playback.is_playing=n.playing;sample.playback.raw_position=Some(Duration::from_secs_f64(n.position));sample.playback.position=Duration::from_secs_f64((n.position+if n.playing{age}else{0.}).min(n.duration));sample.updated_ms=n.captured_ms;sample.raw=n.position;native=true;
                         }else{t.song_id=Some(n.song_id);}

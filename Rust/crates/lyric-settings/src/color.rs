@@ -114,3 +114,7 @@ mod tests {
         assert!(close(wrapped.r, expected.r) && close(wrapped.g, expected.g) && close(wrapped.b, expected.b));
     }
 }
+
+/// Accept RGB hex with an optional hash; keep the persistence format canonical.
+pub fn normalize_hex(value:&str)->Option<String>{let v=value.trim().strip_prefix('#').unwrap_or(value.trim());if v.len()==6&&v.bytes().all(|c|c.is_ascii_hexdigit()){Some(format!("#{}",v.to_ascii_uppercase()))}else{None}}
+#[cfg(test)]mod hex_tests{use super::*;#[test]fn validates_hex(){assert_eq!(normalize_hex(" a9e6cd ").as_deref(),Some("#A9E6CD"));for v in ["#fff","#12345G","1234567",""]{assert!(normalize_hex(v).is_none());}}}

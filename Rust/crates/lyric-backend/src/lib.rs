@@ -1,3 +1,4 @@
+pub mod updates;
 pub mod http;
 pub mod providers;
 pub mod storage;

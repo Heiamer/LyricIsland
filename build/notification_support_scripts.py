@@ -70,5 +70,16 @@ $UserCertificate='Cert:\CurrentUser\TrustedPeople\__THUMBPRINT__'
 if (Test-Path -LiteralPath $UserCertificate) { Remove-Item -LiteralPath $UserCertificate -ErrorAction Stop }
 Write-Host '通知支持与本版开发证书已移除，便携音乐显示仍可使用。'
 '''
-    for name,script in [('Certificate-Trust.ps1',trust),('Install-Notifications.ps1',install),('Uninstall-Notifications.ps1',uninstall)]:
+    setup=r'''param([Parameter(Mandatory=$true)][string]$ResultFile)
+$ErrorActionPreference='Stop'
+try {
+ & (Join-Path $PSScriptRoot 'Install-Notifications.ps1') -ConfirmInstall
+ @{success=$true;message='通知组件已准备好'} | ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+ exit 0
+} catch {
+ @{success=$false;message=('通知准备失败：'+$_.Exception.Message)} | ConvertTo-Json | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+ exit 1
+}
+'''
+    for name,script in [('Certificate-Trust.ps1',trust),('Install-Notifications.ps1',install),('Uninstall-Notifications.ps1',uninstall),('Setup-Notifications.ps1',setup)]:
         (support/name).write_text(script.replace('__THUMBPRINT__',thumbprint).replace('__IDENTITY__',identity),encoding='utf-8-sig')

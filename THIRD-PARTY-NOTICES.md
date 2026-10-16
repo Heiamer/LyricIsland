@@ -1,6 +1,6 @@
 # 第三方组件与许可
 
-歌词岛 1.1 使用以下第三方组件与移植来源。
+歌词岛 1.2 使用以下第三方组件与移植来源。
 本文件列出项目来源、移植参考与主要随包组件。原作者版权及许可声明保持有效；许可全文见根目录 `LICENSE`、本文件与 `licenses/`。其他依赖的具体版本见 `Rust/Cargo.lock`，其许可及 NOTICE 以对应上游包所附文件为准。
 
 ## 1. Lyric Island / TaskbarLyrics（本项目与其原始项目）
@@ -88,3 +88,7 @@ Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Sour
 - 资源位置：`Assets/Fonts/NotoSansSC.ttf`、`Assets/Fonts/NotoSansJP.ttf`
 
 具体使用说明见 `FONT-NOTICE.md`。
+
+## roxmltree（通知 XML 解析）
+
+https://github.com/RazrFalcon/roxmltree · 0.20.0 · MIT OR Apache-2.0。采用 MIT 许可副本，见 licenses/roxmltree-MIT.txt。

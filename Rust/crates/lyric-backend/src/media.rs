@@ -61,6 +61,7 @@ pub struct Media {
     manager:GlobalSystemMediaTransportControlsSessionManager,
     pub active:Option<GlobalSystemMediaTransportControlsSession>,
     pub events:Arc<AtomicU64>,manager_tokens:(i64,i64),session_tokens:Option<(GlobalSystemMediaTransportControlsSession,i64,i64,i64)>,
+    cached_properties:Option<GlobalSystemMediaTransportControlsSessionMediaProperties>,properties_at:Instant,properties_events:u64,
     cached_cover:Option<Vec<u8>>,cover_key:String,cover_retry:Instant,
 }
 impl Media{
@@ -69,7 +70,7 @@ impl Media{
         let manager=wait!(GlobalSystemMediaTransportControlsSessionManager::RequestAsync());let events=Arc::new(AtomicU64::new(0));
         let count=events.clone();let a=manager.SessionsChanged(&TypedEventHandler::new(move|_,_|{count.fetch_add(1,Ordering::Relaxed);Ok(())}))?;
         let count=events.clone();let b=manager.CurrentSessionChanged(&TypedEventHandler::new(move|_,_|{count.fetch_add(1,Ordering::Relaxed);Ok(())}))?;
-        Ok(Self{manager,active:None,events,manager_tokens:(a,b),session_tokens:None,cached_cover:None,cover_key:String::new(),cover_retry:Instant::now()})
+        Ok(Self{manager,active:None,events,manager_tokens:(a,b),session_tokens:None,cached_properties:None,properties_at:Instant::now(),properties_events:u64::MAX,cached_cover:None,cover_key:String::new(),cover_retry:Instant::now()})
     }
     pub fn read(&mut self,allowed:&[String])->Result<MediaSample>{
         let sessions=self.manager.GetSessions()?;let current=self.manager.GetCurrentSession().ok();let mut best=None;let mut priority=(true,usize::MAX,true);
@@ -82,7 +83,11 @@ impl Media{
         let Some(session)=best else{self.set_active(None);return Ok(MediaSample{playback:PlaybackSnapshot::idle(),updated_ms:0,raw:0.,status:"Closed".into(),rate:1.,cover_identity:String::new()})};
         self.set_active(Some(session.clone()));
         let source_id=session.SourceAppUserModelId()?.to_string();let source=normalize_source(&source_id);
-        let props=wait!(session.TryGetMediaPropertiesAsync());
+        let events=self.events.load(Ordering::Relaxed);
+        if self.cached_properties.is_none() || events!=self.properties_events || self.properties_at.elapsed()>=Duration::from_secs(5){
+            self.cached_properties=Some(wait!(session.TryGetMediaPropertiesAsync()));self.properties_at=Instant::now();self.properties_events=events;
+        }
+        let props=self.cached_properties.as_ref().unwrap();
         let mut title=props.Title()?.to_string();let mut artist=props.Artist()?.to_string();
         if artist.trim().is_empty(){artist=props.AlbumArtist().map(|s|s.to_string()).unwrap_or_default()}
         if source=="Netease"&&(title.trim().is_empty()||title.eq_ignore_ascii_case("Unknown Title")){if let Some((name,singer))=netease_window_metadata(allowed){title=name;artist=singer;}}
@@ -114,6 +119,7 @@ impl Media{
     fn set_active(&mut self,active:Option<GlobalSystemMediaTransportControlsSession>){
         if self.active==active{return}
         if let Some((s,p,m,t))=self.session_tokens.take(){let _=s.RemovePlaybackInfoChanged(p);let _=s.RemoveMediaPropertiesChanged(m);let _=s.RemoveTimelinePropertiesChanged(t);}
+        self.cached_properties=None;self.cached_cover=None;self.cover_key.clear();self.cover_retry=Instant::now();
         self.active=active.clone();
         if let Some(s)=active{
             let c=self.events.clone();let p=s.PlaybackInfoChanged(&TypedEventHandler::new(move|_,_|{c.fetch_add(1,Ordering::Relaxed);Ok(())})).unwrap_or(0);

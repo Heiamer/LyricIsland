@@ -1,7 +1,7 @@
 //! Windows supplies notification data only. All presentation remains Direct2D.
-use std::{collections::{HashSet,HashMap},ffi::c_void,sync::{Arc,Mutex,mpsc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant}};
+use std::{collections::{HashSet,HashMap},sync::{Arc,Mutex,mpsc,atomic::{AtomicBool,Ordering}},time::{Duration,Instant}};
 use serde_json::{Value,json};
-use windows::{core::{Result,HSTRING,PCSTR},UI::Notifications::{Management::*,NotificationKinds},Win32::System::{LibraryLoader::{GetModuleHandleW,GetProcAddress},WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED}}};
+use windows::{core::{Result,HSTRING},UI::Notifications::{Management::*,NotificationKinds},Win32::System::{WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED}}};
 
 #[derive(Clone,Debug,Default)]
 pub struct Notice {pub app_id:String,pub app_name:String,pub title:String,pub body:String,pub icon:Option<Vec<u8>>}
@@ -9,10 +9,11 @@ impl Notice {
     pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"歌词岛".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v2.png")).ok()}}
 }
 #[derive(Clone,Default)]
-pub struct Policy {pub enabled:bool,pub follow_dnd:bool,pub allowed:Vec<String>}
+pub struct Policy {pub enabled:bool,pub paused:bool,pub compatibility:bool,pub whitelist_enabled:bool,pub allowed:Vec<String>}
 impl Policy {
-    pub fn from_settings(v:&Value)->Self {Self{enabled:v["NotificationsEnabled"].as_bool().unwrap_or(false),follow_dnd:v["FollowWindowsDnd"].as_bool().unwrap_or(true),allowed:v["NotificationAllowedApps"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_else(||vec!["QQNT".into(),"QQ".into()])}}
+    pub fn from_settings(v:&Value)->Self {Self{enabled:v["NotificationsEnabled"].as_bool().unwrap_or(false),paused:v["PauseNotifications"].as_bool().unwrap_or(false),compatibility:v["NotificationCompatibility"].as_bool().unwrap_or(true),whitelist_enabled:v["NotificationWhitelistEnabled"].as_bool().unwrap_or(false),allowed:v["NotificationAllowedApps"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_else(||vec!["QQNT".into(),"QQ".into()])}}
     pub fn permits(&self,id:&str,name:&str)->bool {
+        if !self.whitelist_enabled{return true}
         self.allowed.iter().any(|rule| {
             if rule.eq_ignore_ascii_case(id) {return true}
             let id=id.to_lowercase();let name=name.trim().to_lowercase();let r=rule.trim().to_lowercase();
@@ -23,7 +24,7 @@ impl Policy {
             false // Custom applications are matched by exact AUMID, never substring.
         })
     }
-    pub fn should_show(&self,dnd:Option<bool>)->bool{self.enabled&&(!self.follow_dnd||dnd==Some(false))}
+    pub fn should_show(&self)->bool{self.enabled&&!self.paused}
 }
 pub enum Event { Notice(Notice), State(Value) }
 pub struct Listener {pub events:mpsc::Receiver<Event>,policy:Arc<Mutex<Policy>>,stop:Arc<AtomicBool>}
@@ -35,23 +36,34 @@ impl Listener {
         std::thread::spawn(move||{
             let initialized=unsafe{RoInitialize(RO_INIT_MULTITHREADED)}.is_ok();
             let mut seen=HashSet::new();let mut icon_cache=HashMap::new();let mut seeded=false;let mut last_state=Value::Null;let mut last_enabled=false;
-            let changed=Arc::new(AtomicBool::new(true));let mut subscription:Option<(UserNotificationListener,i64)>=None;let mut apps_cache=json!([]);
+            let changed=Arc::new(AtomicBool::new(true));let mut subscription:Option<(UserNotificationListener,i64)>=None;let mut apps_cache=json!([]);let mut last_paused=false;let mut store=crate::notification_store::Store::new();let mut last_compatibility=false;
             while !stopping.load(Ordering::Acquire) {
                 let p=shared.lock().map(|p|p.clone()).unwrap_or_default();
-                if p.enabled!=last_enabled {seeded=false;seen.clear();last_enabled=p.enabled;if !p.enabled{if let Some((listener,token))=subscription.take(){let _=listener.RemoveNotificationChanged(token);}}}
-                let dnd=dnd_active();
-                let mut state=json!({"enabled":p.enabled,"dnd":dnd,"followDnd":p.follow_dnd,"access":"disabled","message":"通知提醒已关闭","apps":[]});
-                if p.enabled {
+                if p.paused!=last_paused{if !p.paused{seeded=false;store.reset();}last_paused=p.paused;}
+                if p.compatibility!=last_compatibility{store.reset();seeded=false;last_compatibility=p.compatibility;}
+                if p.enabled!=last_enabled {store.reset();seeded=false;seen.clear();last_enabled=p.enabled;if !p.enabled{if let Some((listener,token))=subscription.take(){let _=listener.RemoveNotificationChanged(token);}}}
+                let mut state=json!({"enabled":p.enabled,"paused":p.paused,"access":"disabled","message":"通知提醒已关闭","apps":[]});
+                if p.enabled && p.compatibility {
+                    state["source"]=json!("database");
+                    match store.poll(&p){
+                        Ok(notices)=>{state["access"]=json!("compatible");state["message"]=json!(if p.paused{"通知已暂停；恢复后只提醒新消息"}else if p.whitelist_enabled{"免证书兼容模式已连接，按白名单提醒新通知"}else{"免证书兼容模式已连接，提醒各应用的新通知"});
+                            for notice in notices{if !apps_cache.as_array().is_some_and(|a|a.iter().any(|a|a["id"]==notice.app_id)){if apps_cache.as_array().is_none_or(|a|a.len()>=32){apps_cache=json!([]);}apps_cache.as_array_mut().unwrap().push(json!({"id":notice.app_id,"name":notice.app_name}));}let _=tx.send(Event::Notice(notice));}
+                            state["apps"]=apps_cache.clone();
+                        },Err(error)=>{state["access"]=json!("unavailable");state["message"]=json!(error);}
+                    }
+                }
+                if p.enabled && !p.compatibility {
+                    state["source"]=json!("system");
                     match UserNotificationListener::Current() {
                         Err(e)=> {state["access"]=json!("unavailable");state["message"]=json!(format!("系统通知访问不可用（{}）。请使用带通知能力的安装版，并在此授权。",e.code()));seeded=false;},
                         Ok(listener)=>match listener.GetAccessStatus() {
                             Ok(s) if s==UserNotificationListenerAccessStatus::Allowed => {
                                 if subscription.is_none(){let changed=changed.clone();let handler=windows::Foundation::TypedEventHandler::<UserNotificationListener,windows::UI::Notifications::UserNotificationChangedEventArgs>::new(move|_,_|{changed.store(true,Ordering::Release);Ok(())});if let Ok(token)=listener.NotificationChanged(&handler){subscription=Some((listener.clone(),token));}}
                                 state["access"]=json!("allowed");
-                                state["message"]=json!(if p.follow_dnd&&dnd==Some(true){"Windows 勿扰已开启，通知横幅暂停"}else if p.follow_dnd&&dnd.is_none(){"无法读取系统勿扰状态；跟随已开启，暂不弹出横幅"}else{"系统通知已连接，仅提醒白名单应用"});
+                                state["message"]=json!(if p.paused{"通知已暂停；关闭“暂停通知”后继续提醒"}else if p.whitelist_enabled{"系统通知已连接，按白名单提醒"}else{"系统通知已连接，提醒各应用的新通知"});
                                 let dirty=changed.swap(false,Ordering::AcqRel);
                                 if !seeded||subscription.is_none()||dirty{
-                                    match read_notifications(&listener,&p,&mut seen,&mut icon_cache,seeded,p.follow_dnd&&dnd!=Some(false)) {
+                                    match read_notifications(&listener,&p,&mut seen,&mut icon_cache,seeded,p.paused) {
                                         Ok((apps,notices))=>{apps_cache=apps;for notice in notices{let _=tx.send(Event::Notice(notice));}seeded=true;},
                                         Err(e)=>{state["message"]=json!(format!("读取系统通知失败（{}），稍后重试",e.code()));seeded=false;}
                                     }
@@ -63,7 +75,7 @@ impl Listener {
                         }
                     }
                 }
-                if state["access"]!="allowed"{if let Some((listener,token))=subscription.take(){let _=listener.RemoveNotificationChanged(token);}apps_cache=json!([]);}
+                if state["access"]!="allowed"{if let Some((listener,token))=subscription.take(){let _=listener.RemoveNotificationChanged(token);}if !p.compatibility{apps_cache=json!([]);}}
                 if state!=last_state {let _=tx.send(Event::State(state.clone()));last_state=state;}
                 for _ in 0..8 {if stopping.load(Ordering::Acquire)||(p.enabled&&seeded&&subscription.is_some()&&changed.load(Ordering::Acquire)){break}std::thread::sleep(Duration::from_millis(50));}
             }
@@ -108,32 +120,27 @@ fn read_notifications(listener:&UserNotificationListener,p:&Policy,seen:&mut Has
 }
 
 /// Must be called by an explicit user action on the native UI thread.
+pub fn access_status()->Result<UserNotificationListenerAccessStatus>{UserNotificationListener::Current()?.GetAccessStatus()}
 pub fn request_access()->Result<()> {
     let op=UserNotificationListener::Current()?.RequestAccessAsync()?;
     std::thread::spawn(move||{let _=op.join();});Ok(())
 }
 
-/// Read-only compatibility adapter for the Windows shell's active quiet-hours
-/// profile (not an official public contract). Unknown stays unknown; do not
-/// equate SHQueryUserNotificationState/FocusSession with manual DND.
-pub fn dnd_active()->Option<bool>{unsafe{
-    type Query=unsafe extern "system" fn(*const u64,*const c_void,*const c_void,*mut u32,*mut u32,*mut u32)->i32;
-    let module=GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
-    let address=GetProcAddress(module,PCSTR(c"NtQueryWnfStateData".as_ptr().cast()))?;
-    let query:Query=std::mem::transmute(address);let name=0x0D83063EA3BF1C75_u64;let mut stamp=0;let mut data=0;let mut size=4;
-    if query(&name,std::ptr::null(),std::ptr::null(),&mut stamp,&mut data,&mut size)<0||size!=4{return None}
-    match data{0=>Some(false),1|2=>Some(true),_=>None}
-}}
-pub fn diagnostics()->Value {let access=UserNotificationListener::Current().and_then(|l|l.GetAccessStatus());json!({"readOnly":true,"dnd":dnd_active(),"access":access.map(|a|a.0).map_err(|e|e.code().to_string()),"rendering":"Direct2D/DirectWrite/DirectComposition"})}
+pub fn diagnostics()->Value {let access=UserNotificationListener::Current().and_then(|l|l.GetAccessStatus());json!({"packaged":windows::ApplicationModel::Package::Current().is_ok(),"readOnly":true,"access":access.map(|a|a.0).map_err(|e|e.code().to_string()),"rendering":"Direct2D/DirectWrite/DirectComposition"})}
 
 #[cfg(test)] mod tests {
     use super::*;
     #[test] fn qq_rules_do_not_admit_qq_music_or_lookalikes(){
-        let p=Policy{allowed:vec!["QQ".into(),"QQNT".into()],..Default::default()};
+        let p=Policy{whitelist_enabled:true,allowed:vec!["QQ".into(),"QQNT".into()],..Default::default()};
         assert!(p.permits("Tencent.QQ.NT","QQ"));assert!(p.permits("QQNT","QQNT"));assert!(p.permits("C:\\QQ\\QQ.exe","QQ"));
         assert!(!p.permits("Tencent.QQMusic","QQ音乐"));assert!(!p.permits("FakeQQ","NotQQ"));
     }
-    #[test] fn custom_apps_use_exact_identifiers(){let p=Policy{allowed:vec!["Example.App_123!Main".into()],..Default::default()};assert!(p.permits("Example.App_123!Main","Example"));assert!(!p.permits("Example.App_123!Other","Example"));}
-    #[test] fn follow_dnd_is_independent_and_unknown_does_not_interrupt(){let mut p=Policy{enabled:true,follow_dnd:true,..Default::default()};assert!(p.should_show(Some(false)));assert!(!p.should_show(Some(true)));assert!(!p.should_show(None));p.follow_dnd=false;assert!(p.should_show(Some(true)));assert!(p.should_show(None));p.enabled=false;assert!(!p.should_show(Some(false)));}
-    #[test] fn disabling_qqnt_does_not_leave_it_allowed_by_legacy_rule(){let p=Policy{allowed:vec!["QQ".into()],..Default::default()};assert!(!p.permits("Tencent.QQ.NT","QQ"));assert!(p.permits("Tencent.QQ","QQ"));}
+    #[test] fn custom_apps_use_exact_identifiers(){let p=Policy{whitelist_enabled:true,allowed:vec!["Example.App_123!Main".into()],..Default::default()};assert!(p.permits("Example.App_123!Main","Example"));assert!(!p.permits("Example.App_123!Other","Example"));}
+    #[test] fn pause_defaults_off_and_is_independent_of_removed_dnd_option(){
+        let mut p=Policy::from_settings(&json!({"NotificationsEnabled":true,"FollowWindowsDnd":true}));assert!(!p.paused);assert!(p.should_show());p.paused=true;assert!(!p.should_show());p.paused=false;assert!(p.should_show());p.enabled=false;assert!(!p.should_show());
+    }
+
+    #[test] fn disabling_qqnt_does_not_leave_it_allowed_by_legacy_rule(){let p=Policy{whitelist_enabled:true,allowed:vec!["QQ".into()],..Default::default()};assert!(!p.permits("Tencent.QQ.NT","QQ"));assert!(p.permits("Tencent.QQ","QQ"));}
 }
+
+#[cfg(test)]mod whitelist_option_tests{use super::*;#[test]fn defaults_off_and_filters_only_when_enabled(){let mut p=Policy::from_settings(&json!({}));assert!(!p.whitelist_enabled);assert!(p.permits("Example.Other","Other"));p.whitelist_enabled=true;assert!(!p.permits("Example.Other","Other"));assert!(p.permits("QQNT","QQNT"));}}

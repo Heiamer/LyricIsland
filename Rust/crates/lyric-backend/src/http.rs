@@ -36,7 +36,7 @@ pub fn request(url:&str,method:&str,body:&[u8],content_type:&str,refer:&str,ctx:
     let (authority,path)=rest.split_once('/').map(|(a,p)|(a,format!("/{p}"))).unwrap_or((rest,"/".into()));
     if authority.contains('@') || authority.is_empty(){return Err("invalid host".into())}
     let (host,port)=authority.split_once(':').map(|(h,p)|Ok::<_,String>((h,p.parse::<u16>().map_err(|_|"invalid port")?))).transpose()?.unwrap_or((authority,if scheme=="https"{443}else{80}));
-    let agent=wide("Mozilla/5.0 (Windows NT 10.0; Win64; x64) LyricIsland/1.0");
+    let agent=wide("Mozilla/5.0 (Windows NT 10.0; Win64; x64) LyricIsland/1.2");
     unsafe{
         let session=Owned::new(WinHttpOpen(agent.as_ptr(),1,null(),null(),0))?; // NO_PROXY = 1
         let remaining=ctx.deadline.saturating_duration_since(Instant::now()).as_millis().clamp(1,5000) as i32;

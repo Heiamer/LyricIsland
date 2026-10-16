@@ -106,6 +106,7 @@ struct SettingsApp {
     smoke_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Text fields are created once and reused: building them inside `render` would replace the
     /// entity every frame and the field would lose its contents and focus.
+    hex_field:Option<Entity<TextField>>,
     calibrate: Entity<TextField>,
     custom_sources: Entity<TextField>,
     notification_apps: Entity<TextField>,
@@ -165,6 +166,7 @@ impl SettingsApp {
             scroll: ScrollHandle::new(),
             applied_dark: None,
             smoke_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
+            hex_field:picker.map(|p|make_hex_field(&t::to_hex(p.hsv.to_rgb()),cx)),
             calibrate,
             custom_sources,
             notification_apps,
@@ -290,7 +292,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                 toggle_row("WordHighlight", "歌词进度涂色", "按照演唱进度高亮歌词。", flag(state, "WordHighlight", true), view),
                 toggle_row("HideWhenPaused", "暂停后隐藏", "暂停时收起淡出，恢复播放时显示胶囊。", flag(state, "HideWhenPaused", true), view),
                 toggle_row("HoverExpand", "悬停展开", "点击封面可保持展开；移开鼠标自动收起。", flag(state, "HoverExpand", false), view),
-                toggle_row("ClickAnywhereExpand", "点击任意区域展开", "开启后点击收起状态的任意位置即可展开；关闭时仅封面响应。", flag(state, "ClickAnywhereExpand", false), view),
+                toggle_row("ClickAnywhereExpand", "点击任意区域展开", "开启后点击收起状态的任意位置即可展开；关闭时仅封面响应。", flag(state, "ClickAnywhereExpand", true), view),
                 slider_row("CompactWidth", "胶囊宽度", "调整收起时的歌词空间。", 140.0, 480.0, "px", slider_value(state, "CompactWidth", view, 260.0), view, cx),
                 slider_row("FontSize", "歌词字号", "文字大小即时生效。", 11.0, 17.0, "px", slider_value(state, "FontSize", view, 12.5), view, cx),
                 toggle_row("Floating", "自由悬浮", "按住移动按钮拖动，方向键可微调。", flag(state, "Floating", false), view),
@@ -307,6 +309,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                     rows.push(picker_panel(view, cx));
                 }
             }
+            rows.push(toggle_row("CoverBackground", "封面取色背景", "默认关闭。开启后根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", false), view));
             rows.push(info_row("胶囊材质", "深色渐变表面", "使用单一默认材质，兼容旧配置；已移除亚克力和云母。"));
             rows.push(action_row("resetAppearance", "恢复紧凑尺寸", "恢复宽度、字号与固定位置。", "恢复紧凑尺寸", view, cx));
             rows
@@ -427,7 +430,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                 "OnlineSongInfo",
                 "在线补全网易云歌曲信息",
                 "本地信息缺失时直连 music.163.com 补全封面和歌名，不发送账号或令牌。",
-                flag(state, "OnlineSongInfo", false),
+                flag(state, "OnlineSongInfo", true),
                 view,
             ));
             rows.push(info_row(
@@ -438,7 +441,10 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
             rows
         }
         4 => vec![
-            info_row("Lyric Island · 歌词岛 1.1", "原生胶囊 · GPUI 设置 · Rust 后台",
+            action_row("checkUpdate", "在线更新", "从 GitHub 检查最新正式版本。", "检查更新", view, cx),
+            action_row("openUpdate", "GitHub 下载", "下载新版后退出旧版，再运行新版完成升级。", "前往下载", view, cx),
+            action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
+            info_row("Lyric Island · 歌词岛 1.2", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -449,22 +455,26 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
         _ => {
             let notifications = &state["notificationState"];
             let mut rows = vec![
-                toggle_row("NotificationsEnabled", "通知提醒", "仅显示通知白名单内的应用；不会改变 Windows 自身的提醒设置。", flag(state, "NotificationsEnabled", false), view),
-                toggle_row("FollowWindowsDnd", "跟随 Windows 勿扰模式", "开启时，系统勿扰期间暂停横幅；无法读取勿扰状态时也暂停。关闭后只按通知总开关和白名单提醒。", flag(state, "FollowWindowsDnd", true), view),
+                toggle_row("NotificationsEnabled", "通知提醒", "默认使用免证书兼容模式，开启后接收新通知；可选择启用白名单过滤。", flag(state, "NotificationsEnabled", false), view),
+                toggle_row("NotificationWhitelistEnabled", "启用通知白名单", "默认关闭。开启后仅提醒选中应用；关闭时接收各应用的新通知。", flag(state,"NotificationWhitelistEnabled",false),view),
+                toggle_row("NotificationCompatibility", "免证书兼容模式", "默认开启。只读本机新通知，无需安装证书；关闭后使用需授权的系统接口。", flag(state, "NotificationCompatibility", true), view),
+                toggle_row("PauseNotifications", "暂停通知", "默认关闭。开启后暂时停止通知横幅，关闭后继续提醒，不补弹暂停期间的消息。", flag(state, "PauseNotifications", false), view),
                 info_row(
                     "通知访问",
                     notifications["access"].as_str().unwrap_or("未连接"),
                     notifications["message"].as_str().unwrap_or("请开启通知提醒，并授权 Windows 通知访问。"),
                 ),
             ];
+            rows.push(info_row("通知准备状态", text(state,"notificationSetup",""), if flag(state,"NotificationCompatibility",true){"免证书兼容模式读取当前用户的通知存储，仅处理启用后的新消息。系统更新可能影响兼容性；读取失败时会提示。"}else{"系统接口需要应用身份和 Windows 授权。当前自签名通知包可用一键启用准备；首次可能出现系统确认。"}));
             for (command, title, detail, label) in [
-                ("notificationSupport", "安装通知支持", "首次使用：为当前用户注册通知能力，需要在安装窗口确认，然后重新启动歌词岛。", "安装"),
-                ("notificationAccess", "授权系统通知", "由 Windows 询问通知访问权限。首次使用需通知安装版。", "授权"),
+                ("notificationSetup", "一键启用通知", "兼容模式直接启用；系统接口模式自动准备组件并请求 Windows 授权。", "一键启用"),
                 ("notificationSettings", "Windows 通知权限", "授权被拒绝时，可在系统设置中重新允许。", "打开设置"),
                 ("notificationPreview", "预览通知横幅", "使用本地示例检查形变、字体和显示样式，不读取真实通知。", "预览"),
             ] {
+                if flag(state,"NotificationCompatibility",true)&&["notificationAccess","notificationSettings"].contains(&command){continue}
                 rows.push(action_row(command, title, detail, label, view, cx));
             }
+            if !flag(state,"NotificationWhitelistEnabled",false){return rows}
             for (id, title) in [("QQNT", "QQNT"), ("QQ", "QQ（旧版及系统通知）")] {
                 let allowed = notification_allowed(state, id);
                 rows.push(check_row(
@@ -850,9 +860,26 @@ fn color_row(key: &'static str, title: &str, state: &Value, view: &SettingsApp, 
         .on_click(cx.listener(move |view, _, _, cx| {
             let already_open = view.picker.as_ref().is_some_and(|picker| picker.key == key);
             view.picker = (!already_open).then(|| Picker { key, hsv: Hsv::from_rgb(t::parse(&opening)), drag: Drag::None });
+            view.hex_field=(!already_open).then(||make_hex_field(&opening,cx));
             cx.notify();
         }))
         .into_any_element()
+}
+
+fn make_hex_field(initial:&str,cx:&mut Context<SettingsApp>)->Entity<TextField>{
+    let weak=cx.entity().downgrade();
+    cx.new(|cx|TextField::new("field-hex","#RRGGBB，Enter 应用",initial,Rc::new(move |value,app|{
+        let _=weak.update(app,|view,cx|{view.apply_hex(value,cx);});
+    }),cx))
+}
+impl SettingsApp {
+    fn apply_hex(&mut self,value:&str,cx:&mut Context<Self>)->bool{
+        let Some(hex)=color::normalize_hex(value)else{
+            if let Ok(mut s)=self.shared.lock(){s.message="色号格式应为 #RRGGBB，例如 #A9E6CD".into();}cx.notify();return false;
+        };
+        if let Some(p)=self.picker.as_mut(){p.hsv=Hsv::from_rgb(t::parse(&hex));p.drag=Drag::None;}else{return false}
+        self.commit(cx);cx.notify();true
+    }
 }
 
 const PAD_WIDTH: f32 = 268.0;
@@ -1019,6 +1046,7 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
         .border_color(t::hairline())
         // A drag may leave the pad; tracking continues on the panel and the value is clamped.
         .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button != Some(MouseButton::Left) {view.end_drag(cx);return;}
             if view.picker.as_ref().is_some_and(|picker| picker.drag != Drag::None) {
                 view.drag_to(event.position);
                 cx.notify();
@@ -1028,6 +1056,7 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
             view.end_drag(cx);
             cx.notify();
         }))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|view, _: &MouseUpEvent, _, cx| {view.end_drag(cx);cx.notify();}))
         .child(
             div().flex().flex_col().gap_3()
                 .child(pad)
@@ -1041,7 +1070,7 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
         .child(
             div().flex().flex_col().gap_3().w(px(168.0))
                 .child(preview)
-                .child(div().text_size(px(15.0)).text_color(t::text()).child(hex.clone()))
+                .child(view.hex_field.clone().map(|field|field.into_any_element()).unwrap_or_else(||div().child(hex.clone()).into_any_element()))
                 .child(div().text_size(px(11.0)).text_color(t::text_faint()).child("拖动圆点取色，松手即保存。"))
                 .child(div().flex_1())
                 .child(
@@ -1159,6 +1188,7 @@ impl SettingsApp {
         let Some((key, hex)) = self.picker.as_ref().map(|picker| (picker.key, t::to_hex(picker.hsv.to_rgb()))) else {
             return;
         };
+        if let Some(field)=&self.hex_field {field.update(cx,|field,cx|field.set_text(&hex,cx));}
         let shared = Rc::clone(&self.shared);
         let outcome = send(&shared, key, &hex, cx);
         log("PICKER", &format!("commit {key}={hex} -> {outcome:?}"));
@@ -1185,6 +1215,13 @@ fn switch(checked: bool) -> impl IntoElement {
 
 /// Send one edit and fold the reply back into the shared state.
 fn send(shared: &Rc<Mutex<Shared>>, key: &str, value: &str, cx: &mut App) -> Result<(), String> {
+    if key=="openUpdate" {cx.open_url(lyric_backend::updates::RELEASES);return Ok(())}
+    if key=="openGitHub" {cx.open_url("https://github.com/Heiamer/LyricIsland");return Ok(())}
+    if key=="checkUpdate" {
+        if let Ok(mut s)=shared.lock(){s.message="正在检查 GitHub 更新…".into();}
+        let shared=Rc::clone(shared);let job=cx.background_executor().spawn(async {lyric_backend::updates::check()});
+        cx.spawn(async move |cx|{let result=job.await;if let Ok(mut s)=shared.lock(){s.message=match result{Ok(v)=>v["message"].as_str().unwrap_or("检查完成").to_owned(),Err(e)=>e};}let _=cx.update(|cx|cx.refresh_windows());}).detach();return Ok(())
+    }
     let key=key.to_owned();let value=value.to_owned();
     let job=cx.background_executor().spawn(async move {pipe::edit(&key,&value)});
     let shared=Rc::clone(shared);
@@ -1285,7 +1322,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("歌词岛 · 设置 1.1");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1361,12 +1398,16 @@ fn main() {
     });
 }
 
+fn ui_state(state:&Value)->Value {let mut state=state.clone();if let Some(map)=state.as_object_mut(){for key in ["renderFrames"]{map.remove(key);}}state}
+
 /// The 750 ms refresh loop, mirroring the Slint frontend so the native side keeps one client.
 fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<Shared>>) {
     cx.spawn(async move |cx| loop {
         cx.background_executor().timer(Duration::from_millis(750)).await;
         let reply = cx.background_executor().spawn(async {pipe::request("state", Value::Null)}).await;
+        let mut changed=true;
         if let Ok(mut state) = shared.lock() {
+            let before=(ui_state(&state.state),state.notice.clone(),state.message.clone(),state.connection_error);
             match reply {
                 Ok(value) => {
                     state.state = value;
@@ -1376,8 +1417,9 @@ fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<S
                 }
                 Err(error) => {state.notice=error;state.connection_error=true;},
             }
+            changed=before!=(ui_state(&state.state),state.notice.clone(),state.message.clone(),state.connection_error);
         }
-        if window.update(cx, |_, _, cx| cx.notify()).is_err() {
+        if changed && window.update(cx, |_, _, cx| cx.notify()).is_err() {
             break;
         }
     })
@@ -1394,9 +1436,23 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
             }
             cx.background_executor().timer(Duration::from_millis(240)).await;
         }
+        let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
+            let result=window.update(cx,|view,_,cx|{
+                view.page=0;view.picker=Some(Picker{key:"ExpandedComponentColor",hsv:Hsv::new(0.3,0.5,0.7),drag:Drag::None});
+                view.hex_field=Some(make_hex_field("#123456",cx));
+                view.pad_bounds.set(Bounds::new(point(px(10.),px(10.)),size(px(268.),px(150.))));
+                view.begin_drag(Drag::Pad,point(px(130.),px(70.)));view.drag_to(point(px(900.),px(900.)));view.end_drag(cx);
+                let stopped=view.picker.unwrap();view.drag_to(point(px(20.),px(20.)));
+                let released=stopped.drag==Drag::None&&stopped.hsv==view.picker.unwrap().hsv;
+                let accepted=view.apply_hex("123456",cx);let colour=t::to_hex(view.picker.unwrap().hsv.to_rgb());
+                let rejected=!view.apply_hex("#badvalue",cx)&&t::to_hex(view.picker.unwrap().hsv.to_rgb())==colour;
+                released&&accepted&&rejected&&colour=="#123456"
+            }).unwrap_or(false);
+            cx.background_executor().timer(Duration::from_millis(1200)).await;Some(result)
+        }else{None};
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected,
+            "success": connected&&picker_regression.unwrap_or(true),"pickerRegression":picker_regression,
             "pages": PAGES.len(),
             "settings": "GPUI",
             "ipc": "Rust",
@@ -1488,7 +1544,7 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
             saved=shared.lock().is_ok_and(|s|s.state["settings"]["CompactWidth"].as_f64()==Some(278.)&&s.message.is_empty());
             if saved{break}
         }
-        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.1"});
+        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2"});
         let _=std::fs::write(directory.join("report.json"),report.to_string());
         std::process::exit(if report["success"]==true{0}else{1});
     }).detach();

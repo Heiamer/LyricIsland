@@ -14,7 +14,7 @@ fn point(x:f64,y:f64)->Vector2{Vector2{X:x as f32,Y:y as f32}}
 fn identity()->Matrix3x2{Matrix3x2{M11:1.,M12:0.,M21:0.,M22:1.,M31:0.,M32:0.}}
 fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:x as f32,M32:y as f32,..Default::default()}}
 pub struct Scene<'a>{
-    pub demo:bool,
+    pub cover_background:bool,pub demo:bool,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
     pub lyric:&'a str,pub previous_lyric:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
@@ -27,6 +27,8 @@ pub struct Scene<'a>{
     pub outgoing_opacity:f64,pub outgoing_y:f64,
 }
 pub struct Renderer{
+    surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
+    cover_tint:u32,shadow_shape:Option<(Rect,f64)>,
     notification_icon:Option<ID2D1Bitmap1>,
     factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
     _device:ID3D11Device,_composition:IDCompositionDevice,_target:IDCompositionTarget,_visual:IDCompositionVisual,
@@ -91,11 +93,11 @@ impl Renderer{
         let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),cover:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
         use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
-        self.cover=None;if let Some(bytes)=bytes{
+        self.cover=None;self.cover_tint=0x1b1f25;if let Some(bytes)=bytes{
             let factory:IWICImagingFactory=CoCreateInstance(&CLSID_WICImagingFactory,None,CLSCTX_INPROC_SERVER)?;
             let stream=factory.CreateStream()?;stream.InitializeFromMemory(bytes)?;
             let decoder=factory.CreateDecoderFromStream(&stream,std::ptr::null(),WICDecodeMetadataCacheOnLoad)?;let frame=decoder.GetFrame(0)?;
@@ -104,6 +106,8 @@ impl Renderer{
             let scaled_height=((height as f64/width as f64)*192.).round().clamp(1.,16384.)as u32;
             let scaler=factory.CreateBitmapScaler()?;scaler.Initialize(&frame,192,scaled_height,WICBitmapInterpolationModeFant)?;
             let converter=factory.CreateFormatConverter()?;converter.Initialize(&scaler,&GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,None,0.,WICBitmapPaletteTypeCustom)?;
+            let mut pixels=vec![0u8;192*scaled_height as usize*4];converter.CopyPixels(std::ptr::null(),192*4,&mut pixels)?;
+            self.cover_tint=crate::cover_color::dominant(&pixels);
             self.cover=Some(self.dc.CreateBitmapFromWicBitmap(&converter,None)?);
         }Ok(())
     }
@@ -246,9 +250,9 @@ impl Renderer{
         let (base_shape,base_radius)=s.layout.shape(s.frame.card_reveal,s.radius);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else{1.};
-        self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());self.compact_content(s)?;self.dc.EndDraw(None,None)?;
-        self.dc.SetTarget(&self.expanded);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&matrix(1.,0.,s.frame.content_offset_y));self.expanded_content(s)?;self.dc.EndDraw(None,None)?;
-        self.dc.SetTarget(&self.shadow);self.dc.BeginDraw();self.dc.SetTransform(&identity());self.dc.Clear(Some(&color(0)));self.fill(shape,radius,0x01000000);self.brush.SetColor(&color(0xff000000));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);self.dc.EndDraw(None,None)?;
+        if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());self.compact_content(s)?;self.dc.EndDraw(None,None)?;}
+        if s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha>0.001 {self.dc.SetTarget(&self.expanded);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&matrix(1.,0.,s.frame.content_offset_y));self.expanded_content(s)?;self.dc.EndDraw(None,None)?;}
+        if self.shadow_shape!=Some((shape,radius)){self.dc.SetTarget(&self.shadow);self.dc.BeginDraw();self.dc.SetTransform(&identity());self.dc.Clear(Some(&color(0)));self.fill(shape,radius,0x01000000);self.brush.SetColor(&color(0xff000000));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);self.dc.EndDraw(None,None)?;self.shadow_shape=Some((shape,radius));}
         self.dc.SetTarget(&self.screen);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());
         // One opacity layer for pause/show fades. Geometry remains fixed.
         self.clip(Rect::new(0.,0.,s.layout.host.w,s.layout.host.h),0.,s.opacity)?;
@@ -256,11 +260,22 @@ impl Renderer{
         let shadow_color=[0_f32,0.,0.,0.3];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
         self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
         let alpha=if s.transparent{0xf5000000}else{0xff000000};
-        let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(alpha|0x1b1f25)},D2D1_GRADIENT_STOP{position:1.,color:color(alpha|0x0c0f14)}];
-        let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
-        let gradient=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
-        self.dc.FillRoundedRectangle(&rounded(shape,radius),&gradient);self.brush.SetColor(&color(0x22ffffff));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
-        let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(0x44ffffff)},D2D1_GRADIENT_STOP{position:0.32,color:color(0x00ffffff)}];let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;let highlight=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;self.dc.DrawRoundedRectangle(&rounded(shape,radius),&highlight,1.,None);
+        let top=alpha|crate::cover_color::mix(0x1b1f25,self.cover_tint,if s.cover_background{p*music_alpha}else{0.});
+        let bottom=alpha|crate::cover_color::mix(0x0c0f14,self.cover_tint,if s.cover_background{p*music_alpha*0.65}else{0.});
+        if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
+            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(top)},D2D1_GRADIENT_STOP{position:1.,color:color(bottom)}];
+            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
+            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
+            self.surface_brush=Some((top,bottom,shape,brush));
+        }
+        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);self.brush.SetColor(&color(0x22ffffff));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
+        if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
+            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(0x44ffffff)},D2D1_GRADIENT_STOP{position:0.32,color:color(0x00ffffff)}];
+            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
+            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
+            self.highlight_brush=Some((shape,brush));
+        }
+        self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.highlight_brush.as_ref().unwrap().1,1.,None);
         let content_scale=(base_shape.w/s.layout.card.w).min(base_shape.h/s.layout.card.h);
         let tx=base_shape.x+(base_shape.w-s.layout.card.w*content_scale)/2.;let ty=base_shape.y+(base_shape.h-s.layout.card.h*content_scale)/2.;
         let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;

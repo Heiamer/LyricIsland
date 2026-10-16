@@ -8,8 +8,9 @@ const SCHEDULE:&str="66 0F 2E 0D ? ? ? ? 7A ? 75 ? 66 0F 2E 15";
 struct Owned(HANDLE);impl Drop for Owned{fn drop(&mut self){unsafe{let _=CloseHandle(self.0);}}}unsafe impl Send for Owned{}
 fn wide(s:&[u16])->String{String::from_utf16_lossy(&s[..s.iter().position(|c|*c==0).unwrap_or(s.len())])}
 #[derive(Clone,serde::Serialize)]#[serde(rename_all="camelCase")]
-pub struct TimingSample{pub song_id:String,pub title:String,pub position:f64,pub duration:f64,pub playing:bool,pub captured_ms:i64,pub cover_url:Option<String>}
-struct Reader{process:Owned,player:usize,schedule:usize,metadata_id:String,title:String,cover:Option<String>,next_metadata:Instant,remote:Option<mpsc::Receiver<(String,String,Option<String>)>>,next_remote:Instant}
+pub struct TimingSample{pub song_id:String,pub title:String,pub artist:String,pub album:String,pub position:f64,pub duration:f64,pub playing:bool,pub captured_ms:i64,pub cover_url:Option<String>}
+#[derive(Default)]struct SongMetadata{title:String,artist:String,album:String,cover:Option<String>}
+struct Reader{process:Owned,player:usize,schedule:usize,metadata_id:String,title:String,artist:String,album:String,cover:Option<String>,next_metadata:Instant,remote:Option<mpsc::Receiver<(String,SongMetadata)>>,next_remote:Instant}
 impl Reader{
     fn attach()->Result<Self,String>{unsafe{
         let snapshot=Owned(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0).map_err(|e|e.to_string())?);
@@ -46,7 +47,7 @@ impl Reader{
             let value=|at|u32::from_le_bytes(section[at..at+4].try_into().unwrap());let rva=value(12);let length=value(16);let offset=value(20);
             let p=lyric_core::memory_scan::scan_rip(&path,offset as u64,length as u64,rva as i64,PLAYER,3).map_err(|e|e.to_string())?;
             let s=lyric_core::memory_scan::scan_rip(&path,offset as u64,length as u64,rva as i64,SCHEDULE,4).map_err(|e|e.to_string())?;
-            return Ok(Self{process,player:(base as i64+p) as usize,schedule:(base as i64+s) as usize,metadata_id:String::new(),title:String::new(),cover:None,next_metadata:Instant::now(),remote:None,next_remote:Instant::now()})
+            return Ok(Self{process,player:(base as i64+p) as usize,schedule:(base as i64+s) as usize,metadata_id:String::new(),title:String::new(),artist:String::new(),album:String::new(),cover:None,next_metadata:Instant::now(),remote:None,next_remote:Instant::now()})
         }
         Err("missing executable section".into())
     }
@@ -68,19 +69,19 @@ impl Reader{
         let state=i32::from_le_bytes(self.bytes::<4>(self.player+0x60)?);if state!=1&&state!=2{return Ok(None)}
         let id=self.id()?;let position=f64::from_le_bytes(self.bytes::<8>(self.schedule)?);let duration=f64::from_le_bytes(self.bytes::<8>(self.player+0xA8)?);
         if self.metadata_id!=id || self.title.is_empty()&&Instant::now()>=self.next_metadata{
-            if self.metadata_id!=id{self.title.clear();self.cover=None;self.remote=None;self.next_remote=Instant::now()}
+            if self.metadata_id!=id{self.title.clear();self.artist.clear();self.album.clear();self.cover=None;self.remote=None;self.next_remote=Instant::now()}
             self.metadata_id=id.clone();self.next_metadata=Instant::now()+Duration::from_secs(1);
             let (title,cover)=local_metadata(local,&id);if !title.is_empty(){self.title=title}if cover.is_some(){self.cover=cover}
         }
-        if online&&(self.title.is_empty()||self.cover.is_none()){
-            if let Some(r)=self.remote.as_ref(){if let Ok((remote_id,title,cover))=r.try_recv(){if remote_id==id{if !title.is_empty(){self.title=title}if cover.is_some(){self.cover=cover}}self.remote=None;}}
+        if online&&(self.title.is_empty()||self.artist.is_empty()||self.cover.is_none()){
+            if let Some(r)=self.remote.as_ref(){if let Ok((remote_id,metadata))=r.try_recv(){if remote_id==id{if !metadata.title.is_empty(){self.title=metadata.title}self.artist=metadata.artist;self.album=metadata.album;if metadata.cover.is_some(){self.cover=metadata.cover}}self.remote=None;}}
             if self.remote.is_none()&&Instant::now()>=self.next_remote{
                 let (tx,rx)=mpsc::channel();self.remote=Some(rx);self.next_remote=Instant::now()+Duration::from_secs(10);let id=id.clone();
-                std::thread::spawn(move||{let (title,cover)=remote_metadata(&id).unwrap_or_default();let _=tx.send((id,title,cover));});
+                std::thread::spawn(move||{let metadata=remote_metadata(&id).unwrap_or_default();let _=tx.send((id,metadata));});
             }
         }
         if self.title.is_empty()||self.id()?!=id||!valid(position,duration){return Ok(None)}
-        Ok(Some(TimingSample{song_id:id,title:self.title.clone(),position,duration,playing:state==1,captured_ms:unix_ms(),cover_url:self.cover.clone()}))
+        Ok(Some(TimingSample{song_id:id,title:self.title.clone(),artist:self.artist.clone(),album:self.album.clone(),position,duration,playing:state==1,captured_ms:unix_ms(),cover_url:self.cover.clone()}))
     }
 }
 fn valid(p:f64,d:f64)->bool{p.is_finite()&&d.is_finite()&&p>=0.&&d>0.&&d<86400.&&p<=d+0.5}
@@ -93,9 +94,15 @@ fn local_metadata(local:&PathBuf,id:&str)->(String,Option<String>){
     }
     (String::new(),None)
 }
-fn remote_metadata(id:&str)->Result<(String,Option<String>),String>{
+fn remote_metadata(id:&str)->Result<SongMetadata,String>{
     let ctx=RequestContext::new(Duration::from_secs(4));let response=http::get(&format!("https://music.163.com/api/song/detail/?id={id}&ids=%5B{id}%5D"),&ctx)?;
-    let song=&response["songs"][0];if text(song,"id")!=id{return Err("metadata ID mismatch".into())}let cover=text(&song["album"],"picUrl");Ok((text(song,"name"),if cover.is_empty(){None}else{Some(cover)}))
+    parse_metadata(&response,id)
+}
+fn parse_metadata(response:&serde_json::Value,id:&str)->Result<SongMetadata,String>{
+    let song=&response["songs"][0];if text(song,"id")!=id{return Err("metadata ID mismatch".into())}
+    let album=song.get("album").unwrap_or(&song["al"]);let cover=text(album,"picUrl");
+    let artists=song.get("artists").or_else(||song.get("ar")).and_then(|v|v.as_array()).map(|a|a.iter().map(|v|text(v,"name")).filter(|s|!s.is_empty()).collect::<Vec<_>>().join(" / ")).unwrap_or_default();
+    Ok(SongMetadata{title:text(song,"name"),artist:artists,album:text(album,"name"),cover:if cover.is_empty(){None}else{Some(cover)}})
 }
 pub struct NeteaseTimeline{reader:Option<Reader>,pub latest:Option<TimingSample>,pub status:String,pub error:Option<String>,retry:Instant,local:PathBuf}
 impl NeteaseTimeline{
@@ -106,8 +113,12 @@ impl NeteaseTimeline{
     }
     pub fn matching(&self,track:&lyric_core::models::TrackInfo)->Option<TimingSample>{
         let s=self.latest.as_ref()?;let age=unix_ms()-s.captured_ms;
-        if track.source_app!="Netease"||!(0..800).contains(&age)||track.title.trim().to_lowercase()!=s.title.trim().to_lowercase()||track.song_id.as_ref().is_some_and(|id|id!=&s.song_id){return None}Some(s.clone())
+        if track.source_app!="Netease"||!(0..800).contains(&age)||track.song_id.as_ref().map(|id|id!=&s.song_id).unwrap_or_else(||track.title.trim().to_lowercase()!=s.title.trim().to_lowercase()){return None}Some(s.clone())
     }
 }
 #[cfg(test)]mod tests{use super::*;#[test]fn invalid_timelines_are_rejected(){assert!(valid(0.,180.));assert!(!valid(f64::NAN,180.));assert!(!valid(182.,180.));assert!(!valid(0.,0.));}}
 
+
+#[cfg(test)]mod metadata_tests{use super::*;use serde_json::json;
+ #[test]fn details_match_song_id_and_include_artist_album(){let response=json!({"songs":[{"id":123,"name":"Song","artists":[{"name":"Artist"}],"album":{"name":"Album","picUrl":"https://p1.music.126.net/cover.jpg"}}]});let m=parse_metadata(&response,"123").unwrap();assert_eq!(m.artist,"Artist");assert_eq!(m.album,"Album");assert!(m.cover.is_some());assert!(parse_metadata(&response,"124").is_err());}
+}

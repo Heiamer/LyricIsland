@@ -20,8 +20,9 @@ pub const PLAYERS: [(&str, &str); 10] = [
 ];
 
 /// Notification commands that take no value.
-const NOTIFICATION_COMMANDS: [&str; 4] = [
+const NOTIFICATION_COMMANDS: [&str; 5] = [
     "notificationSupport",
+    "notificationSetup",
     "notificationAccess",
     "notificationPreview",
     "notificationSettings",
@@ -48,6 +49,7 @@ pub fn edit(key:&str,value:&str)->Result<(Value,Value),String>{
 /// Translate one UI edit into a pipe request. Returns a user-facing error message instead when
 /// the input is rejected locally.
 pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
+    if key=="NotificationsEnabled"&&text=="true"{return request("notificationSetup",Value::Null)}
     if NOTIFICATION_COMMANDS.contains(&key) {
         return request(key, Value::Null);
     }

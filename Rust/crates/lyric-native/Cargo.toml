@@ -13,6 +13,7 @@ lyric-backend = { path = "../lyric-backend" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
+roxmltree = "=0.20.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 windows-core = "0.62"
 windows-numerics = "0.3"

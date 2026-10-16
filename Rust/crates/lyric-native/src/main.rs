@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
+mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
 use std::{cell::RefCell,path::{Path,PathBuf},sync::{Arc,Mutex,OnceLock,mpsc},time::{Instant,Duration},ffi::{c_char,CStr}};
 use serde_json::{Value,json};
 use base64::Engine;
@@ -32,6 +32,7 @@ struct App {
     start:Instant,last_poll:Instant,lyric:String,previous_lyric:String,lyric_start:Instant,
     cursor_inside:bool,leave_at:Option<Instant>,last_left:bool,user_hidden:bool,display_wanted:bool,missing_since:Option<Instant>,
     opacity:f64,fade_from:f64,fade_to:f64,fade_start:Instant,hide_at:Option<Instant>,dirty:bool,
+    notification_setup:Option<std::process::Child>,notification_setup_message:String,
     settings_process:Option<std::process::Child>,render_frames:u64,error:Option<String>,transparent:bool,activity:motion::Activity,cover_start:Instant,progress:progress::PlaybackProgress,outgoing_opacity:f64,outgoing_y:f64,
 }
 impl App {
@@ -40,7 +41,7 @@ impl App {
         let backend=if demo{None}else{Some(Backend::new(settings.clone(),data.clone(),PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()),data.join("Logs")))};
         let now=Instant::now();let snapshot=if demo{json!({"track":{"id":"demo","title":"晚风电台","artist":"Lyric Island","sourceApp":"演示","durationSeconds":236.},"isPlaying":true,"positionSeconds":83.,"canSeek":true,"frame":{"currentLine":"晚风轻轻，音乐刚好","nextLine":"让这一刻慢下来","wordScanProgress":0.4}})}else{Value::Null};
         let notification_listener=if demo{None}else{Some(notifications::Listener::new(notifications::Policy::from_settings(&settings)))};
-        Self{banner:banner::Banner::default(),notification_preview:false,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout:Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.)),settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),lyric_start:now-Duration::from_secs(2),cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.}
+        Self{banner:banner::Banner::default(),notification_preview:false,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout:Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.)),settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),lyric_start:now-Duration::from_secs(2),cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,notification_setup:None,notification_setup_message:String::new(),settings_process:None,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.}
     }
     fn flag(&self,k:&str,default:bool)->bool{self.settings[k].as_bool().unwrap_or(default)}
     fn options(&self)->Options{serde_json::from_value(self.settings["Motion"].clone()).unwrap_or_default()}
@@ -86,7 +87,7 @@ impl App {
                 else{self.held=false;self.retarget(false);if !self.banner.visible(){self.hide_at=Some(Instant::now()+Duration::from_millis(if self.flag("Animation",true){220}else{0}));}}
             }
         }
-        self.dirty=true;
+        self.dirty |= previous["track"]!=self.snapshot["track"] || previous["isPlaying"]!=self.snapshot["isPlaying"] || previous["frame"]!=self.snapshot["frame"] || previous["coverVersion"]!=self.snapshot["coverVersion"];
     }
     fn hit(&self,x:f64,y:f64)->i32{
         if self.opacity<0.01{return -1}
@@ -130,7 +131,7 @@ impl App {
         let elapsed=self.progress.seconds(self.start.elapsed().as_secs_f64());let duration=self.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);let track=&self.snapshot["track"];let f=&self.snapshot["frame"];
         let col=|k:&str,default:u32|self.settings[k].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).map(|v|0xff000000|v).unwrap_or(default);
         let (notice_rect,notice_radius,notice_mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());
-        Scene{demo:self.demo,notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
+        Scene{cover_background:self.flag("CoverBackground",false),demo:self.demo,notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
     }
     unsafe fn draw(&mut self)->Result<()>{// Take the renderer to split immutable scene data from mutable graphics state.
         if let Some(mut r)=self.renderer.take(){let result=r.render(&self.scene(),true);self.renderer=Some(r);result?;self.render_frames+=1;}self.dirty=false;Ok(())
@@ -144,12 +145,18 @@ impl App {
         self.hide_at=None;self.fade(1.);self.dirty=true;
     }
     unsafe fn tick(&mut self)->Result<()> {
+        if let Some(status)=self.notification_setup.as_mut().and_then(|child|child.try_wait().ok().flatten()){
+            self.notification_setup=None;
+            if status.success(){self.notification_setup_message="通知组件已准备好，正在重启并请求 Windows 授权".into();self.request(json!({"version":1,"command":"restart","notificationOnboarding":true}));}
+            else{self.notification_setup_message=std::fs::read_to_string(self.data.join("notification-setup.json")).ok().and_then(|s|serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok()).and_then(|v|v["message"].as_str().map(str::to_owned)).unwrap_or_else(||"通知准备未完成，可点击一键启用重试".into());}
+        }
+
         let events=self.notification_listener.as_ref().map(|l|l.events.try_iter().collect::<Vec<_>>()).unwrap_or_default();
         for event in events{match event{
             notifications::Event::State(state)=>{self.notification_state=state;},
-            notifications::Event::Notice(notice)=>{let policy=notifications::Policy::from_settings(&self.settings);if !self.user_hidden&&policy.should_show(notifications::dnd_active())&&policy.permits(&notice.app_id,&notice.app_name){self.show_notice(notice,false);}}
+            notifications::Event::Notice(notice)=>{let policy=notifications::Policy::from_settings(&self.settings);if !self.user_hidden&&policy.should_show()&&policy.permits(&notice.app_id,&notice.app_name){self.show_notice(notice,false);}}
         }}
-        if !self.notification_preview&&self.banner.visible()&&self.flag("FollowWindowsDnd",true)&&self.notification_state["dnd"].as_bool()!=Some(false) {let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+        if self.banner.visible()&&self.flag("PauseNotifications",false) {let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
         if self.last_poll.elapsed()>=Duration::from_millis(90){self.poll()}
         if let Some(t)=self.transition{self.sampled_ms=self.transition_start.elapsed().as_secs_f64()*1000.;self.frame=t.sample(self.sampled_ms);self.dirty=true;if self.sampled_ms>=t.duration_ms{self.transition=None;self.frame=t.end;}}
         if !self.banner.visible()&&self.hide_at.is_some_and(|t|Instant::now()>=t){self.hide_at=None;self.fade(0.);}
@@ -168,18 +175,49 @@ impl App {
             if !self.banner.visible(){self.last_poll=Instant::now()-Duration::from_secs(1);if !self.display_wanted&&!self.demo{self.fade(0.);}}
         }
         if let Some((start,bounds))=self.dragging{if left{let dx=pt.x-start.x;let dy=pt.y-start.y;for hwnd in [self.visual_hwnd,self.hwnd]{SetWindowPos(hwnd,None,bounds.left+dx,bounds.top+dy,0,0,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOSIZE)?;}}else{self.dragging=None;let _=ReleaseCapture();self.remember_position();}}
-        self.sync_input_region()?;if self.dirty{self.draw()?;}Ok(())
+        self.sync_input_region()?;if self.dirty{if self.opacity>0.001 || self.fade_from>0.001 {self.draw()?;if self.opacity<=0.001{self.fade_from=0.;}}else{self.dirty=false;}}Ok(())
     }
     unsafe fn request(&mut self,r:Value)->Value {
         if r["version"]!=1{return json!({"success":false,"message":"请求版本无效"})}let command=r["command"].as_str().unwrap_or("");
         match command {
-            "state"=>{let t=&self.snapshot["track"];json!({"success":true,"version":"1.1","settings":self.settings,"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible()})},
+            "state"=>{let t=&self.snapshot["track"];json!({"success":true,"version":"1.2","settings":self.settings,"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationSetup":self.notification_setup_message,"notificationVisible":self.banner.visible()})},
             "expand"=>{self.user_hidden=false;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true})},
             "toggleVisibility"=>{self.user_hidden=!self.user_hidden;self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
-            "notificationPreview"=>{self.show_notice(notifications::Notice::example(&self.base),true);json!({"success":true,"message":"通知横幅预览"})},
+            "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true);json!({"success":true,"message":"通知横幅预览"})},
             "notificationSupport"=>{let script=self.base.join("notification-support/Install-Notifications.ps1");if !script.exists(){json!({"success":false,"message":"通知支持组件缺失，请完整解压新版运行包"})}else{use std::os::windows::process::CommandExt;match std::process::Command::new("powershell.exe").args(["-NoProfile","-ExecutionPolicy","Bypass","-File"]).arg(script).creation_flags(0x10).spawn(){Ok(_)=>json!({"success":true,"message":"请在安装窗口确认。安装完成后重新启动歌词岛，再授权通知访问。"}),Err(e)=>json!({"success":false,"message":e.to_string()})}}},
-            "notificationAccess"=>{match notifications::request_access(){Ok(())=>json!({"success":true,"message":"请在 Windows 授权窗口允许通知访问"}),Err(e)=>json!({"success":false,"message":format!("无法申请通知权限（{}），请使用通知安装版",e.code())})}},
+            "toggleNotifications"=>{
+                if !self.flag("NotificationsEnabled",false){return self.request(json!({"version":1,"command":"notificationSetup"}))}
+                let paused=!self.flag("PauseNotifications",false);
+                self.request(json!({"version":1,"command":"update","value":{"key":"PauseNotifications","value":paused}}))
+            },
+            "notificationSetup"=>{
+                if self.notification_setup.is_some(){return json!({"success":true,"message":"正在准备通知组件，请完成系统提示"})}
+                let old=self.settings.clone();self.settings["NotificationsEnabled"]=json!(true);self.settings["PauseNotifications"]=json!(false);
+                if let Err(e)=self.save(){self.settings=old;return json!({"success":false,"message":e})}
+                if let Some(listener)=&self.notification_listener{listener.configure(notifications::Policy::from_settings(&self.settings));}
+                if self.flag("NotificationCompatibility",true){self.notification_setup_message="免证书兼容通知已启用，无需安装证书或注册组件".into();return json!({"success":true,"message":self.notification_setup_message})}
+                if notifications::access_status().is_ok(){return self.request(json!({"version":1,"command":"notificationAccess"}))}
+                let script=self.base.join("notification-support/Setup-Notifications.ps1");
+                if !script.is_file(){return json!({"success":false,"message":"通知组件缺失，请完整解压新版运行包"})}
+                use std::os::windows::process::CommandExt;
+                let _=std::fs::create_dir_all(&self.data);
+                match std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File"]).arg(script).arg("-ResultFile").arg(self.data.join("notification-setup.json")).creation_flags(0x08000000).spawn(){
+                    Ok(child)=>{self.notification_setup=Some(child);self.notification_setup_message="正在自动准备通知组件，请确认 Windows 系统提示；完成后会自动重启".into();json!({"success":true,"message":self.notification_setup_message})},
+                    Err(e)=>json!({"success":false,"message":format!("无法准备通知组件：{e}")})
+                }
+            },
+            "notificationAccess"=>{if notifications::access_status().ok()==Some(windows::UI::Notifications::Management::UserNotificationListenerAccessStatus::Denied){return self.request(json!({"version":1,"command":"notificationSettings"}))}match notifications::request_access(){Ok(())=>json!({"success":true,"message":"请在 Windows 授权窗口允许通知访问"}),Err(e)=>json!({"success":false,"message":format!("无法申请通知权限（{}），请使用通知安装版",e.code())})}},
             "notificationSettings"=>{let uri=windows::core::HSTRING::from("ms-settings:privacy-notifications");let _=std::process::Command::new("explorer.exe").arg(uri.to_string()).spawn();json!({"success":true,"message":"已打开 Windows 通知访问设置"})},
+            "restart"=>{
+                let result=(||->std::io::Result<()>{
+                    let exe=std::env::current_exe()?;let mut command=std::process::Command::new(exe);
+                    command.args(["--restart-after",&std::process::id().to_string(),"--data-dir"]).arg(&self.data);
+                    if r["notificationOnboarding"]==true{command.arg("--notification-onboarding");}
+                    if self.demo{command.arg("--demo");}
+                    command.current_dir(&self.base).spawn()?;Ok(())
+                })();
+                match result{Ok(())=>{let _=self.save();if let Some(mut settings)=self.settings_process.take(){let _=settings.kill();let _=settings.wait();}let _=PostMessageW(Some(self.hwnd),WM_CLOSE,WPARAM(0),LPARAM(0));json!({"success":true,"message":"正在重启歌词岛"})},Err(e)=>json!({"success":false,"message":format!("重启失败：{e}")})}
+            },
             "settings"=>{self.show_settings();json!({"success":true})},"exit"=>{let _=PostMessageW(Some(self.hwnd),WM_CLOSE,WPARAM(0),LPARAM(0));json!({"success":true})},
             "synchronize"=>{if let Some(n)=r["value"].as_f64().filter(|n|n.is_finite()&&(0.0..=86400.).contains(n)){self.command("synchronize",n);json!({"success":true})}else{json!({"success":false,"message":"请输入有效的播放秒数"})}},
             "update"|"resetAppearance"=>{
@@ -188,7 +226,7 @@ impl App {
                 let saved=if !self.demo&&r["value"]["key"]=="AutoStart"{shell::set_startup(self.flag("AutoStart",false),&self.base.join("LyricIsland.exe").to_string_lossy(),&self.data.join("settings.json"),&self.settings,None)}else{self.save()};
                 if let Err(e)=saved{self.settings=old;return json!({"success":false,"message":e})}
                 if let Some(listener)=&self.notification_listener{listener.configure(notifications::Policy::from_settings(&self.settings));}
-                if !self.notification_preview&&self.banner.visible()&&(!self.flag("NotificationsEnabled",false)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+                if !self.notification_preview&&self.banner.visible()&&(!self.flag("NotificationsEnabled",false)||self.flag("PauseNotifications",false)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
                 if let Some(b)=&self.backend{b.apply(self.settings.clone());}if let Err(e)=self.position(){self.error=Some(e.to_string());return json!({"success":false,"message":e.to_string()})}
                 self.transition=None;self.frame=if self.expanded{Frame::expanded()}else{Frame::hidden(self.options())};json!({"success":true,"message":"已保存"})
             },_=>json!({"success":false,"message":"不支持的操作"})
@@ -209,7 +247,10 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
         WM_CAPTURECHANGED=>{a.seeking=false;a.pressed=0;a.dirty=true;return LRESULT(0)},
         WM_DPICHANGED|WM_DISPLAYCHANGE=>{if let Err(e)=a.position(){a.error=Some(e.to_string());}return LRESULT(0)},
         WM_SETTINGS=>{let requests=REQUESTS.get_or_init(Default::default).lock().map(|mut q|std::mem::take(&mut *q)).unwrap_or_default();for (r,tx) in requests{let response=a.request(r);let _=tx.send(response);}return LRESULT(0)},
-        WM_TRAY=>{if lparam.0 as u32==WM_RBUTTONUP{let mut p=POINT::default();let _=GetCursorPos(&mut p);let menu=CreatePopupMenu();if let Ok(menu)=menu{for (id,text) in [(1,w!("展开灵动岛")),(2,w!("显示 / 隐藏灵动岛")),(3,w!("设置")),(4,w!("退出"))]{let _=AppendMenuW(menu,MF_STRING,id,text);}let _=SetForegroundWindow(hwnd);let selected=TrackPopupMenuEx(menu,(TPM_RETURNCMD|TPM_RIGHTBUTTON).0,p.x,p.y,hwnd,None).0;let _=DestroyMenu(menu);let command=match selected{1=>"expand",2=>"toggleVisibility",3=>"settings",4=>"exit",_=>""};if !command.is_empty(){a.request(json!({"version":1,"command":command}));}}}else if lparam.0 as u32==WM_LBUTTONDBLCLK{a.request(json!({"version":1,"command":"expand"}));}return LRESULT(0)},
+        WM_TRAY=>{if lparam.0 as u32==WM_RBUTTONUP{let mut p=POINT::default();let _=GetCursorPos(&mut p);let menu=CreatePopupMenu();if let Ok(menu)=menu{for (id,text) in [(1,w!("展开灵动岛")),(2,w!("显示 / 隐藏灵动岛")),(3,w!("设置")),(5,w!("重启歌词岛")),(4,w!("退出"))]{let _=AppendMenuW(menu,MF_STRING,id,text);}let active=a.flag("NotificationsEnabled",false)&&!a.flag("PauseNotifications",false);
+            let label=if !a.flag("NotificationsEnabled",false){w!("开启通知")}else if a.flag("PauseNotifications",false){w!("恢复通知（已暂停）")}else{w!("暂停通知（已开启）")};
+            let flags=if active{MF_STRING|MF_CHECKED}else{MF_STRING|MF_UNCHECKED};let _=InsertMenuW(menu,3,flags|MF_BYPOSITION,6,label);
+            let _=SetForegroundWindow(hwnd);let selected=TrackPopupMenuEx(menu,(TPM_RETURNCMD|TPM_RIGHTBUTTON).0,p.x,p.y,hwnd,None).0;let _=DestroyMenu(menu);let command=match selected{1=>"expand",2=>"toggleVisibility",3=>"settings",5=>"restart",6=>"toggleNotifications",4=>"exit",_=>""};if !command.is_empty(){a.request(json!({"version":1,"command":command}));}}}else if lparam.0 as u32==WM_LBUTTONDBLCLK{a.request(json!({"version":1,"command":"expand"}));}return LRESULT(0)},
         WM_CLOSE=>{let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
     }}}DefWindowProcW(hwnd,msg,wparam,lparam)
 }
@@ -275,6 +316,13 @@ unsafe fn icon_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<d
 }
 fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let args=std::env::args().collect::<Vec<_>>();
+    if let Some(i)=args.iter().position(|s|s=="--restart-after"){
+        let pid=args.get(i+1).and_then(|s|s.parse::<u32>().ok()).ok_or("invalid restart PID")?;
+        if let Ok(parent)=OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000),false,pid){let result=WaitForSingleObject(parent,15000);let _=CloseHandle(parent);if result!=WAIT_OBJECT_0{return Err("等待旧实例退出超时".into())}}
+    }
+    if args.get(1).is_some_and(|s|s=="--check-update"){
+        let report=lyric_backend::updates::check().unwrap_or_else(|e|json!({"success":false,"message":e}));std::fs::write(args.get(2).ok_or("missing report")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())
+    }
     if args.get(1).is_some_and(|s|s=="--app-icon"){
         let id=args.get(2).ok_or("missing app id")?;let path=args.get(3).ok_or("missing output path")?;
         std::thread::spawn({let id=id.clone();let path=path.clone();move||->std::result::Result<(),String>{
@@ -287,13 +335,24 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     // The identity-bearing twin uses exactly this renderer and backend. Keep
     // the portable entry point runnable while optional identity is absent.
     let executable=std::env::current_exe()?;let directory=executable.parent().unwrap();
-    if executable.file_name().is_some_and(|name|name.to_string_lossy().eq_ignore_ascii_case("LyricIsland.exe"))&&directory.join("notification-support/identity-enabled").is_file(){
+    let startup_data=args.iter().position(|s|s=="--data-dir").and_then(|i|args.get(i+1)).map(PathBuf::from).unwrap_or_else(||directory.join("Data"));
+    let compatibility=io::read_settings(&startup_data.join("settings.json"))["NotificationCompatibility"].as_bool().unwrap_or(true);
+    if !compatibility&&executable.file_name().is_some_and(|name|name.to_string_lossy().eq_ignore_ascii_case("LyricIsland.exe"))&&directory.join("notification-support/identity-enabled").is_file(){
         if std::process::Command::new(directory.join("LyricIsland.NotificationHost.exe")).args(args.iter().skip(1)).spawn().is_ok(){return Ok(())}
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
-    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let preview_mode=icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else{base.join("Data")};
+    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let preview_mode=cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else{base.join("Data")};
     let owner=Box::new(RefCell::new(App::new(base,data,demo)));let owner_ptr=&*owner as *const RefCell<App>;let mut app=owner.borrow_mut();create(&mut app,owner_ptr,preview_mode)?;
+    if cover_mode{
+        let dir=Path::new(args.get(2).ok_or("missing directory")?);std::fs::create_dir_all(dir)?;
+        app.poll();app.opacity=1.;app.frame=Frame::expanded();let mut r=app.renderer.take().unwrap();
+        for name in ["red","blue","white"]{
+            r.set_cover(Some(&std::fs::read(dir.join(format!("{name}.png")))?))?;
+            for enabled in [false,true]{let mut scene=app.scene();scene.cover_background=enabled;scene.lyric_age_ms=1000.;r.render(&scene,false)?;r.snapshot(&dir.join(format!("{name}-{enabled}.png")))?;}
+        }
+        let _=DestroyWindow(app.hwnd);return Ok(())
+    }
     if icon_mode{icon_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if font_mode{let report=app.renderer.as_mut().unwrap().verify_font()?;std::fs::write(args.get(2).ok_or("missing font report path")?,serde_json::to_vec_pretty(&report)?)?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if notice_mode{notification_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
@@ -302,6 +361,7 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let mutex_name=if test_pipe.starts_with("LyricIsland.Settings.test."){format!("Local.LyricIsland.Native.Test.{test_pipe}")}else{"Local.LyricIsland.Native.Direct2D.v1".into()};let mutex_name=mutex_name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let mutex=CreateMutexW(None,true,PCWSTR(mutex_name.as_ptr()))?;if GetLastError()==ERROR_ALREADY_EXISTS{let _=CloseHandle(mutex);return Ok(())}
     tray(&app)?;let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());app._server=Some(Server::new(&pipe,settings_callback));
+    if args.iter().any(|s|s=="--notification-onboarding"){app.show_settings();app.request(json!({"version":1,"command":"notificationAccess"}));}
     if args.iter().any(|s|s=="--expanded"){app.held=true;app.retarget(true)}
     let until=args.iter().position(|s|s=="--run-ms").and_then(|i|args.get(i+1)).and_then(|s|s.parse::<u64>().ok()).map(|ms|Instant::now()+Duration::from_millis(ms));
     drop(app);let mut msg=MSG::default();'events:loop{
@@ -319,8 +379,8 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
 #[cfg(test)]mod interaction_tests{
     use super::*;
     fn app()->App{App::new(PathBuf::new(),PathBuf::new(),true)}
-    #[test]fn default_body_click_does_not_expand_but_cover_does(){unsafe{
-        let mut a=app();let c=a.layout.capsule;
+    #[test]fn disabled_body_click_does_not_expand_but_cover_does(){unsafe{
+        let mut a=app();a.settings["ClickAnywhereExpand"]=json!(false);let c=a.layout.capsule;
         assert_eq!(a.hit(c.x+22.,c.y+20.),1);
         assert_eq!(a.hit(c.x+75.,c.y+20.),0);
         a.activate(0);assert!(!a.expanded);a.activate(1);assert!(a.expanded&&a.held);
@@ -333,7 +393,7 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         a.activate(4);assert!(a.expanded);assert_eq!(a.snapshot["isPlaying"],false);
     }}
     #[test]fn body_click_option_is_boolean_and_preserves_other_settings(){
-        let original=config::defaults();assert_eq!(original["ClickAnywhereExpand"],false);
+        let original=config::defaults();assert_eq!(original["PauseNotifications"],false);assert!(original.get("FollowWindowsDnd").is_none());assert_eq!(original["ClickAnywhereExpand"],true);assert_eq!(original["CoverBackground"],false);assert_eq!(original["OnlineSongInfo"],true);
         let updated=config::validate_setting(json!({"key":"ClickAnywhereExpand","value":true,"settings":original})).unwrap();
         assert_eq!(updated["ClickAnywhereExpand"],true);assert_eq!(updated["Motion"],original["Motion"]);
         assert!(config::validate_setting(json!({"key":"ClickAnywhereExpand","value":"true","settings":original})).is_err());

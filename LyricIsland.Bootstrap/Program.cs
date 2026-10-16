@@ -72,8 +72,13 @@ internal static class Program
     {
         string destination = Path.Combine(root, Folder, "Data");
         if (File.Exists(Path.Combine(destination, "settings.json"))) return;
-        string previous = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LyricIsland", "Runtime", "1.0", "LyricIsland-1.0", "Data");
-        if (!File.Exists(Path.Combine(previous, "settings.json"))) return;
+        string previous = null;
+        foreach (string version in new[] { "1.1", "1.0" })
+        {
+            string candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LyricIsland", "Runtime", version, "LyricIsland-" + version, "Data");
+            if (File.Exists(Path.Combine(candidate, "settings.json"))) { previous = candidate; break; }
+        }
+        if (previous == null) return;
         Directory.CreateDirectory(destination);
         File.Copy(Path.Combine(previous, "settings.json"), Path.Combine(destination, "settings.json"), false);
         string maps = Path.Combine(previous, "database");

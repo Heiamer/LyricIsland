@@ -147,6 +147,8 @@ impl TextField {
         }
     }
 
+    pub fn set_text(&mut self,text:&str,cx:&mut Context<Self>){self.text=text.to_owned();self.selected=self.text.len()..self.text.len();self.marked=None;cx.notify();}
+
     /// Where the caret is: the moving end of the selection.
     fn caret(&self) -> usize {
         if self.reversed {
