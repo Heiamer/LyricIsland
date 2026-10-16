@@ -1,4 +1,4 @@
-# 歌词岛 1.2.1
+# 歌词岛 1.2.2
 
 胶囊：Rust、Win32、Direct2D、DirectWrite、DirectComposition。设置：GPUI 0.2.2（DirectX 后端）。后台：Rust。
 

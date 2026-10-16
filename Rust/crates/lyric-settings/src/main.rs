@@ -444,7 +444,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
             action_row("checkUpdate", "在线更新", "检查最新正式版本。", "检查更新", view, cx),
             action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
             action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("Lyric Island · 歌词岛 1.2.1", "原生胶囊 · GPUI 设置 · Rust 后台",
+            info_row("Lyric Island · 歌词岛 1.2.2", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -1311,7 +1311,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2.1");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1536,7 +1536,7 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
             saved=shared.lock().is_ok_and(|s|s.state["settings"]["CompactWidth"].as_f64()==Some(278.)&&s.message.is_empty());
             if saved{break}
         }
-        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2.1"});
+        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2.2"});
         let _=std::fs::write(directory.join("report.json"),report.to_string());
         std::process::exit(if report["success"]==true{0}else{1});
     }).detach();

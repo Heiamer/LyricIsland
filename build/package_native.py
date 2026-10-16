@@ -11,7 +11,7 @@ args=argparse.ArgumentParser()
 args.add_argument('--binary-dir',type=Path,required=True)
 args.add_argument('--output',type=Path,required=True)
 args.add_argument('--sqlite',type=Path,default=Path.home()/'.nuget/packages/sqlitepclraw.lib.e_sqlite3/2.1.6/runtimes/win-x64/native/e_sqlite3.dll')
-args.add_argument('--version',default='1.2.1')
+args.add_argument('--version',default='1.2.2')
 options=args.parse_args()
 root=Path(__file__).resolve().parents[1]
 version=options.version
