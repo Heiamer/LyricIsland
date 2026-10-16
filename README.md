@@ -8,7 +8,7 @@
 
 音乐歌词 · 通知提醒 · 待办清单 · 番茄钟 · 倒计时 · 秒表 · 设备连接
 
-[国内下载](https://gitee.com/heiamer/abc/releases) · [GitHub 下载](https://github.com/Heiamer/LyricIsland/releases/latest) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
+[GitHub 下载](https://github.com/Heiamer/LyricIsland/releases/latest) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
 
 </div>
 
@@ -44,9 +44,9 @@
 
 程序随包提供中文、日文字体和 SQLite，无需另行安装字体或通知证书。分享应用时请发送完整启动包或便携 ZIP。
 
-### 国内与 GitHub 双源更新
+### 双源在线更新
 
-1.3.1 的更新按钮会同时请求 Gitee 国内源和 GitHub；一个失败时使用另一个可用源。下载失败也会切换来源，更新包经过 SHA256 校验后才会替换原程序。更新请求使用 Windows 系统代理设置，检查状态固定显示在设置窗口底部。
+1.3.1 的更新按钮会同时请求两个更新源；一个失败时使用另一个可用源。下载失败也会切换来源，更新包经过 SHA256 校验后才会替换原程序。更新请求使用 Windows 系统代理设置，检查状态固定显示在设置窗口底部。
 
 ### 老版本 OTA 更新
 
