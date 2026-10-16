@@ -51,7 +51,7 @@ try:
         if state['notificationState'].get('access')=='compatible':break
         time.sleep(.1)
     assert state['notificationState'].get('access')=='compatible',state['notificationState']
-    assert state['settings']['NotificationCompatibility'] and not state['settings']['PauseNotifications']
+    assert state['settings']['NotificationClickOpenApp'] and not state['settings']['MusicClickOpenApp'] and not state['settings']['PauseNotifications']
     time.sleep(.7);assert not request()['notificationVisible']
     assert before==fingerprints(),'Reader changed the database or WAL'
     report.update(defaultCompatibility=True,noHistoryReplay=True,readOnlyMainAndWal=True)

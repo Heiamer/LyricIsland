@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
+mod activation;mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
 use std::{cell::RefCell,path::{Path,PathBuf},sync::{Arc,Mutex,OnceLock,mpsc},time::{Instant,Duration},ffi::{c_char,CStr}};
 use serde_json::{Value,json};
 use base64::Engine;
@@ -32,7 +32,6 @@ struct App {
     start:Instant,last_poll:Instant,lyric:String,previous_lyric:String,lyric_start:Instant,
     cursor_inside:bool,leave_at:Option<Instant>,last_left:bool,user_hidden:bool,display_wanted:bool,missing_since:Option<Instant>,
     opacity:f64,fade_from:f64,fade_to:f64,fade_start:Instant,hide_at:Option<Instant>,dirty:bool,
-    notification_setup:Option<std::process::Child>,notification_setup_message:String,
     settings_process:Option<std::process::Child>,render_frames:u64,error:Option<String>,transparent:bool,activity:motion::Activity,cover_start:Instant,progress:progress::PlaybackProgress,outgoing_opacity:f64,outgoing_y:f64,
 }
 impl App {
@@ -41,7 +40,7 @@ impl App {
         let backend=if demo{None}else{Some(Backend::new(settings.clone(),data.clone(),PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()),data.join("Logs")))};
         let now=Instant::now();let snapshot=if demo{json!({"track":{"id":"demo","title":"晚风电台","artist":"Lyric Island","sourceApp":"演示","durationSeconds":236.},"isPlaying":true,"positionSeconds":83.,"canSeek":true,"frame":{"currentLine":"晚风轻轻，音乐刚好","nextLine":"让这一刻慢下来","wordScanProgress":0.4}})}else{Value::Null};
         let notification_listener=if demo{None}else{Some(notifications::Listener::new(notifications::Policy::from_settings(&settings)))};
-        Self{banner:banner::Banner::default(),notification_preview:false,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout:Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.)),settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),lyric_start:now-Duration::from_secs(2),cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,notification_setup:None,notification_setup_message:String::new(),settings_process:None,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.}
+        Self{banner:banner::Banner::default(),notification_preview:false,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout:Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.)),settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),lyric_start:now-Duration::from_secs(2),cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.}
     }
     fn flag(&self,k:&str,default:bool)->bool{self.settings[k].as_bool().unwrap_or(default)}
     fn options(&self)->Options{serde_json::from_value(self.settings["Motion"].clone()).unwrap_or_default()}
@@ -98,6 +97,7 @@ impl App {
         if self.expanded&&self.frame.content_opacity*motion::blend(self.frame.card_reveal,0.25,0.88)>0.01{
             let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let ty=shape.y+(shape.h-self.layout.card.h*scale)/2.;let x=(x-tx)/scale;let y=(y-ty)/scale-self.frame.content_offset_y;let w=self.layout.card.w;
             if Rect::new(18.,16.,80.,80.).contains(x,y){return 1}
+            if self.flag("MusicClickOpenApp",false)&&Rect::new(110.,16.,w-154.,64.).contains(x,y){return 13}
             if Rect::new(8.,115.,w-16.,20.).contains(x,y){return 10}
             for (id,r) in layout::buttons(w,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.}){if r.contains(x,y){return id}}
         }0
@@ -117,9 +117,9 @@ impl App {
     }
     unsafe fn remember_position(&mut self){let mut bounds=RECT::default();let _=GetWindowRect(self.hwnd,&mut bounds);let monitor=MonitorFromWindow(self.hwnd,MONITOR_DEFAULTTONEAREST);let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>()as u32,..Default::default()};let _=GetMonitorInfoW(monitor,&mut info);let w=info.rcWork;let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;self.settings["CenterX"]=json!(((bounds.left+bounds.right)as f64/2.-w.left as f64)/(w.right-w.left).max(1)as f64);self.settings["TopFraction"]=json!(((bounds.top-w.top)as f64+24.*scale)/((w.bottom-w.top)as f64-40.*scale).max(1.));let _=self.save();}
     unsafe fn activate(&mut self,id:i32){match id {
-        11|12=>{let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
+        11|12=>{if id==12&&!self.notification_preview&&self.flag("NotificationClickOpenApp",true){if let Some(n)=&self.banner.notice{if let Err(e)=activation::open(&n.app_id){self.error=Some(e);}}}let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
         0=>{if self.expanded{self.held=false;self.retarget(false)}else if self.flag("ClickAnywhereExpand",false){self.held=true;self.retarget(true)}},
-        1=>{self.held=!self.held;self.retarget(self.held)},2=>{if self.flag("Floating",false){let mut cursor=POINT::default();let mut bounds=RECT::default();let _=GetCursorPos(&mut cursor);let _=GetWindowRect(self.hwnd,&mut bounds);self.dragging=Some((cursor,bounds));SetCapture(self.hwnd);}},
+        1|13=>{if self.flag("MusicClickOpenApp",false){if let Err(e)=activation::open(self.snapshot["sourceId"].as_str().unwrap_or("")){self.error=Some(e);}}else if id==1{self.held=!self.held;self.retarget(self.held)}},2=>{if self.flag("Floating",false){let mut cursor=POINT::default();let mut bounds=RECT::default();let _=GetCursorPos(&mut cursor);let _=GetWindowRect(self.hwnd,&mut bounds);self.dragging=Some((cursor,bounds));SetCapture(self.hwnd);}},
         3=>self.command("previous",0.),4=>{if self.demo{self.snapshot["isPlaying"]=json!(self.snapshot["isPlaying"]!=true)}else{self.command("toggle",0.)}},5=>self.command("next",0.),
         6=>{self.settings["Translation"]=json!(!self.flag("Translation",true));let _=self.save();},7=>self.show_settings(),8=>{self.held=false;self.retarget(false)},
         9=>{let title=self.snapshot["track"]["title"].as_str().unwrap_or("").to_string();let source=self.snapshot["track"]["sourceApp"].as_str().unwrap_or("").to_string();std::thread::spawn(move||{shell::favorite(&title,&source,true);});},_=>{}}
@@ -131,7 +131,7 @@ impl App {
         let elapsed=self.progress.seconds(self.start.elapsed().as_secs_f64());let duration=self.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);let track=&self.snapshot["track"];let f=&self.snapshot["frame"];
         let col=|k:&str,default:u32|self.settings[k].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).map(|v|0xff000000|v).unwrap_or(default);
         let (notice_rect,notice_radius,notice_mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());
-        Scene{cover_background:self.flag("CoverBackground",false),demo:self.demo,notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
+        Scene{cover_background:self.flag("CoverBackground",true),demo:self.demo,notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
     }
     unsafe fn draw(&mut self)->Result<()>{// Take the renderer to split immutable scene data from mutable graphics state.
         if let Some(mut r)=self.renderer.take(){let result=r.render(&self.scene(),true);self.renderer=Some(r);result?;self.render_frames+=1;}self.dirty=false;Ok(())
@@ -145,12 +145,6 @@ impl App {
         self.hide_at=None;self.fade(1.);self.dirty=true;
     }
     unsafe fn tick(&mut self)->Result<()> {
-        if let Some(status)=self.notification_setup.as_mut().and_then(|child|child.try_wait().ok().flatten()){
-            self.notification_setup=None;
-            if status.success(){self.notification_setup_message="通知组件已准备好，正在重启并请求 Windows 授权".into();self.request(json!({"version":1,"command":"restart","notificationOnboarding":true}));}
-            else{self.notification_setup_message=std::fs::read_to_string(self.data.join("notification-setup.json")).ok().and_then(|s|serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok()).and_then(|v|v["message"].as_str().map(str::to_owned)).unwrap_or_else(||"通知准备未完成，可点击一键启用重试".into());}
-        }
-
         let events=self.notification_listener.as_ref().map(|l|l.events.try_iter().collect::<Vec<_>>()).unwrap_or_default();
         for event in events{match event{
             notifications::Event::State(state)=>{self.notification_state=state;},
@@ -180,39 +174,20 @@ impl App {
     unsafe fn request(&mut self,r:Value)->Value {
         if r["version"]!=1{return json!({"success":false,"message":"请求版本无效"})}let command=r["command"].as_str().unwrap_or("");
         match command {
-            "state"=>{let t=&self.snapshot["track"];json!({"success":true,"version":"1.2","settings":self.settings,"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationSetup":self.notification_setup_message,"notificationVisible":self.banner.visible()})},
+            "state"=>{let t=&self.snapshot["track"];json!({"success":true,"version":"1.2.1","settings":self.settings,"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible()})},
             "expand"=>{self.user_hidden=false;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true})},
             "toggleVisibility"=>{self.user_hidden=!self.user_hidden;self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
             "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true);json!({"success":true,"message":"通知横幅预览"})},
-            "notificationSupport"=>{let script=self.base.join("notification-support/Install-Notifications.ps1");if !script.exists(){json!({"success":false,"message":"通知支持组件缺失，请完整解压新版运行包"})}else{use std::os::windows::process::CommandExt;match std::process::Command::new("powershell.exe").args(["-NoProfile","-ExecutionPolicy","Bypass","-File"]).arg(script).creation_flags(0x10).spawn(){Ok(_)=>json!({"success":true,"message":"请在安装窗口确认。安装完成后重新启动歌词岛，再授权通知访问。"}),Err(e)=>json!({"success":false,"message":e.to_string()})}}},
             "toggleNotifications"=>{
-                if !self.flag("NotificationsEnabled",false){return self.request(json!({"version":1,"command":"notificationSetup"}))}
+                if !self.flag("NotificationsEnabled",false){return self.request(json!({"version":1,"command":"update","value":{"key":"NotificationsEnabled","value":true}}))}
                 let paused=!self.flag("PauseNotifications",false);
                 self.request(json!({"version":1,"command":"update","value":{"key":"PauseNotifications","value":paused}}))
             },
-            "notificationSetup"=>{
-                if self.notification_setup.is_some(){return json!({"success":true,"message":"正在准备通知组件，请完成系统提示"})}
-                let old=self.settings.clone();self.settings["NotificationsEnabled"]=json!(true);self.settings["PauseNotifications"]=json!(false);
-                if let Err(e)=self.save(){self.settings=old;return json!({"success":false,"message":e})}
-                if let Some(listener)=&self.notification_listener{listener.configure(notifications::Policy::from_settings(&self.settings));}
-                if self.flag("NotificationCompatibility",true){self.notification_setup_message="免证书兼容通知已启用，无需安装证书或注册组件".into();return json!({"success":true,"message":self.notification_setup_message})}
-                if notifications::access_status().is_ok(){return self.request(json!({"version":1,"command":"notificationAccess"}))}
-                let script=self.base.join("notification-support/Setup-Notifications.ps1");
-                if !script.is_file(){return json!({"success":false,"message":"通知组件缺失，请完整解压新版运行包"})}
-                use std::os::windows::process::CommandExt;
-                let _=std::fs::create_dir_all(&self.data);
-                match std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File"]).arg(script).arg("-ResultFile").arg(self.data.join("notification-setup.json")).creation_flags(0x08000000).spawn(){
-                    Ok(child)=>{self.notification_setup=Some(child);self.notification_setup_message="正在自动准备通知组件，请确认 Windows 系统提示；完成后会自动重启".into();json!({"success":true,"message":self.notification_setup_message})},
-                    Err(e)=>json!({"success":false,"message":format!("无法准备通知组件：{e}")})
-                }
-            },
-            "notificationAccess"=>{if notifications::access_status().ok()==Some(windows::UI::Notifications::Management::UserNotificationListenerAccessStatus::Denied){return self.request(json!({"version":1,"command":"notificationSettings"}))}match notifications::request_access(){Ok(())=>json!({"success":true,"message":"请在 Windows 授权窗口允许通知访问"}),Err(e)=>json!({"success":false,"message":format!("无法申请通知权限（{}），请使用通知安装版",e.code())})}},
-            "notificationSettings"=>{let uri=windows::core::HSTRING::from("ms-settings:privacy-notifications");let _=std::process::Command::new("explorer.exe").arg(uri.to_string()).spawn();json!({"success":true,"message":"已打开 Windows 通知访问设置"})},
+            "prepareUpdateExit"=>{if let Err(e)=self.save(){return json!({"success":false,"message":e})}if let Some(mut child)=self.settings_process.take(){let _=child.kill();let _=child.wait();}let _=PostMessageW(Some(self.hwnd),WM_CLOSE,WPARAM(0),LPARAM(0));json!({"success":true})},
             "restart"=>{
                 let result=(||->std::io::Result<()>{
                     let exe=std::env::current_exe()?;let mut command=std::process::Command::new(exe);
                     command.args(["--restart-after",&std::process::id().to_string(),"--data-dir"]).arg(&self.data);
-                    if r["notificationOnboarding"]==true{command.arg("--notification-onboarding");}
                     if self.demo{command.arg("--demo");}
                     command.current_dir(&self.base).spawn()?;Ok(())
                 })();
@@ -332,13 +307,11 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
         }}).join().map_err(|_|"icon worker failed")??;return Ok(())
     }
 
-    // The identity-bearing twin uses exactly this renderer and backend. Keep
-    // the portable entry point runnable while optional identity is absent.
-    let executable=std::env::current_exe()?;let directory=executable.parent().unwrap();
-    let startup_data=args.iter().position(|s|s=="--data-dir").and_then(|i|args.get(i+1)).map(PathBuf::from).unwrap_or_else(||directory.join("Data"));
-    let compatibility=io::read_settings(&startup_data.join("settings.json"))["NotificationCompatibility"].as_bool().unwrap_or(true);
-    if !compatibility&&executable.file_name().is_some_and(|name|name.to_string_lossy().eq_ignore_ascii_case("LyricIsland.exe"))&&directory.join("notification-support/identity-enabled").is_file(){
-        if std::process::Command::new(directory.join("LyricIsland.NotificationHost.exe")).args(args.iter().skip(1)).spawn().is_ok(){return Ok(())}
+    if args.get(1).is_some_and(|s|s=="--activation-check"){
+        let title=w!("LyricIsland activation test");let h=CreateWindowExW(WINDOW_EX_STYLE(0),w!("STATIC"),title,WS_OVERLAPPEDWINDOW|WS_VISIBLE,0,0,200,100,None,None,None,None)?;
+        let _=ShowWindow(h,SW_MINIMIZE);let result=activation::open(&std::env::current_exe()?.to_string_lossy());
+        let success=result.is_ok()&&!IsIconic(h).as_bool()&&GetForegroundWindow()==h;
+        std::fs::write(args.get(2).ok_or("missing report")?,serde_json::to_vec_pretty(&json!({"success":success,"restoredMinimizedWindow":!IsIconic(h).as_bool(),"error":result.err()}))?)?;let _=DestroyWindow(h);return Ok(())
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
@@ -361,7 +334,6 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let mutex_name=if test_pipe.starts_with("LyricIsland.Settings.test."){format!("Local.LyricIsland.Native.Test.{test_pipe}")}else{"Local.LyricIsland.Native.Direct2D.v1".into()};let mutex_name=mutex_name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let mutex=CreateMutexW(None,true,PCWSTR(mutex_name.as_ptr()))?;if GetLastError()==ERROR_ALREADY_EXISTS{let _=CloseHandle(mutex);return Ok(())}
     tray(&app)?;let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());app._server=Some(Server::new(&pipe,settings_callback));
-    if args.iter().any(|s|s=="--notification-onboarding"){app.show_settings();app.request(json!({"version":1,"command":"notificationAccess"}));}
     if args.iter().any(|s|s=="--expanded"){app.held=true;app.retarget(true)}
     let until=args.iter().position(|s|s=="--run-ms").and_then(|i|args.get(i+1)).and_then(|s|s.parse::<u64>().ok()).map(|ms|Instant::now()+Duration::from_millis(ms));
     drop(app);let mut msg=MSG::default();'events:loop{
@@ -393,7 +365,7 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         a.activate(4);assert!(a.expanded);assert_eq!(a.snapshot["isPlaying"],false);
     }}
     #[test]fn body_click_option_is_boolean_and_preserves_other_settings(){
-        let original=config::defaults();assert_eq!(original["PauseNotifications"],false);assert!(original.get("FollowWindowsDnd").is_none());assert_eq!(original["ClickAnywhereExpand"],true);assert_eq!(original["CoverBackground"],false);assert_eq!(original["OnlineSongInfo"],true);
+        let original=config::defaults();assert_eq!(original["PauseNotifications"],false);assert!(original.get("FollowWindowsDnd").is_none());assert_eq!(original["ClickAnywhereExpand"],true);assert_eq!(original["CoverBackground"],true);assert_eq!(original["OnlineSongInfo"],true);
         let updated=config::validate_setting(json!({"key":"ClickAnywhereExpand","value":true,"settings":original})).unwrap();
         assert_eq!(updated["ClickAnywhereExpand"],true);assert_eq!(updated["Motion"],original["Motion"]);
         assert!(config::validate_setting(json!({"key":"ClickAnywhereExpand","value":"true","settings":original})).is_err());
@@ -410,3 +382,12 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
 
 
 
+
+#[cfg(test)]mod v121_tests{use super::*;
+#[test]fn independent_click_defaults_and_retired_options(){let s=config::defaults();assert_eq!(s["NotificationClickOpenApp"],true);assert_eq!(s["MusicClickOpenApp"],false);for key in ["NotificationCompatibility","CardMaterial"]{assert!(s.get(key).is_none());assert!(config::validate_setting(json!({"key":key,"value":true,"settings":s})).is_err());}let s=config::validate_setting(json!({"key":"MusicClickOpenApp","value":true,"settings":s})).unwrap();assert_eq!(s["NotificationClickOpenApp"],true);assert_eq!(s["MusicClickOpenApp"],true);}
+#[test]fn preview_and_close_do_not_launch_app(){let mut app=App::new(PathBuf::new(),PathBuf::new(),true);app.notification_preview=true;app.banner.notice=Some(notifications::Notice{app_id:"".into(),..Default::default()});unsafe{app.activate(12)}assert!(app.error.is_none());app.notification_preview=false;unsafe{app.activate(11)}assert!(app.error.is_none());unsafe{app.activate(12)}assert!(app.error.is_some());app.error=None;app.settings["NotificationClickOpenApp"]=json!(false);unsafe{app.activate(12)}assert!(app.error.is_none());}
+}
+
+#[cfg(test)]mod music_jump_tests{use super::*;
+#[test]fn music_title_and_cover_follow_independent_switch(){unsafe{let mut a=App::new(PathBuf::new(),PathBuf::new(),true);a.opacity=1.;a.expanded=true;a.frame=Frame::expanded();a.transition=None;let c=a.layout.card;assert_eq!(a.hit(c.x+120.,c.y+30.),0);a.settings["MusicClickOpenApp"]=json!(true);assert_eq!(a.hit(c.x+120.,c.y+30.),13);assert_eq!(a.hit(c.x+30.,c.y+30.),1);let expanded=a.expanded;a.activate(13);assert_eq!(a.expanded,expanded);assert!(a.error.is_some());let before=a.snapshot["isPlaying"].clone();a.activate(4);assert_ne!(a.snapshot["isPlaying"],before);}}
+}

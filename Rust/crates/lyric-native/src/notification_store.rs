@@ -48,10 +48,10 @@ type Row=((i64,i64,i64),String,Vec<u8>);
 unsafe fn read(api:&Api,path:&Path,since:i64,policy:&Policy)->Result<Vec<Row>,String>{
     let file=CString::new(path.to_string_lossy().as_bytes()).map_err(|_|"通知数据库路径无效")?;let mut raw=std::ptr::null_mut();
     // SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX. Never CREATE, READWRITE, backup or checkpoint.
-    if (api.open)(file.as_ptr(),&mut raw,1|0x8000,std::ptr::null())!=0{if !raw.is_null(){(api.close)(raw);}return Err("兼容通知数据库暂不可读，请稍后重试或选择系统接口".into())}
+    if (api.open)(file.as_ptr(),&mut raw,1|0x8000,std::ptr::null())!=0{if !raw.is_null(){(api.close)(raw);}return Err("通知数据库暂不可读，请稍后重试或反馈错误".into())}
     let db=Db(api,raw);(api.busy)(db.1,100);
     let sql=CString::new(format!("SELECT n.Id,n.HandlerId,n.ArrivalTime,h.PrimaryId,n.Payload FROM Notification n JOIN NotificationHandler h ON n.HandlerId=h.RecordId WHERE n.Type='toast' AND n.ArrivalTime>={since} AND n.ArrivalTime<={} ORDER BY n.ArrivalTime,n.[Order] LIMIT 256",filetime()+300000000)).unwrap();
-    let mut raw=std::ptr::null_mut();if (api.prepare)(db.1,sql.as_ptr(),-1,&mut raw,std::ptr::null_mut())!=0{if !raw.is_null(){(api.finalize)(raw);}return Err("此 Windows 版本的通知格式尚不兼容，可选择系统接口".into())}
+    let mut raw=std::ptr::null_mut();if (api.prepare)(db.1,sql.as_ptr(),-1,&mut raw,std::ptr::null_mut())!=0{if !raw.is_null(){(api.finalize)(raw);}return Err("此 Windows 版本的通知格式尚不兼容，请稍后重试或反馈错误".into())}
     let statement=Statement(api,raw);let mut rows=vec![];
     loop{match (api.step)(statement.1){
         100=>{

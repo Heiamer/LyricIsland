@@ -73,7 +73,7 @@ internal static class Program
         string destination = Path.Combine(root, Folder, "Data");
         if (File.Exists(Path.Combine(destination, "settings.json"))) return;
         string previous = null;
-        foreach (string version in new[] { "1.1", "1.0" })
+        foreach (string version in new[] { "1.2", "1.1", "1.0" })
         {
             string candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LyricIsland", "Runtime", version, "LyricIsland-" + version, "Data");
             if (File.Exists(Path.Combine(candidate, "settings.json"))) { previous = candidate; break; }
@@ -95,7 +95,7 @@ internal static class Program
     }
     private static bool Complete(string root)
     {
-        string[] required = { "LyricIsland.exe", "LyricIsland.NotificationHost.exe", "LyricIsland.Settings.exe", "e_sqlite3.dll", "Assets/Fonts/NotoSansSC.ttf", "Assets/Fonts/NotoSansJP.ttf" };
+        string[] required = { "LyricIsland.exe", "LyricIsland.Settings.exe", "e_sqlite3.dll", "Assets/Fonts/NotoSansSC.ttf", "Assets/Fonts/NotoSansJP.ttf" };
 
         foreach (string name in required)
             if (!File.Exists(Path.Combine(root, Folder, name.Replace('/', Path.DirectorySeparatorChar)))) return false;

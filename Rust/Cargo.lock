@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-backend"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "aes",
  "base64",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-core"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-native"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "base64",
  "image",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-settings"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "embed-manifest",
  "gpui",

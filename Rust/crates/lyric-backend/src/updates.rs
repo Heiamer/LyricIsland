@@ -1,4 +1,4 @@
-//! GitHub Releases is the update source. Downloads are opened for the user to install.
+//! GitHub Releases is the update source; installation is performed in place.
 use serde_json::{json,Value};
 use std::time::Duration;
 pub const RELEASES:&str="https://github.com/Heiamer/LyricIsland/releases/latest";
@@ -12,7 +12,7 @@ pub fn describe(release:&Value,current:&str)->Result<Value,String>{
     let tag=release["tag_name"].as_str().ok_or("更新响应缺少版本号")?;
     let latest=version(tag).ok_or("更新版本号格式无效")?;
     let newer=latest>version(current).ok_or("当前版本号无效")?;
-    Ok(json!({"success":true,"message":if newer{format!("发现新版本 {tag}，点击“前往下载”在 GitHub 下载并安装。升级前请退出旧版。")}else{format!("当前已是最新版本（{current}）")},"newer":newer,"version":tag,"url":RELEASES}))
+    Ok(json!({"success":true,"message":if newer{format!("发现新版本 {tag}，点击“下载并更新”自动安装，保留现有设置。")}else{format!("当前已是最新版本（{current}）")},"newer":newer,"version":tag,"url":RELEASES}))
 }
 pub fn check()->Result<Value,String>{
     let ctx=crate::http::RequestContext::new(Duration::from_secs(10));
@@ -23,7 +23,7 @@ pub fn check()->Result<Value,String>{
             // resolves only to a stable release; read its own canonical metadata as fallback.
             let ctx=crate::http::RequestContext::new(Duration::from_secs(10));
             let bytes=crate::http::request(RELEASES,"GET",&[],"text/html","",&ctx,4*1024*1024)
-                .map_err(|_|format!("检查更新失败：{api_error}。可点击“前往下载”访问 GitHub。"))?;
+                .map_err(|_|format!("检查更新失败：{api_error}，请稍后重试。"))?;
             page_release(&String::from_utf8_lossy(&bytes))?
         }
     };
@@ -31,8 +31,23 @@ pub fn check()->Result<Value,String>{
 }
 fn page_release(html:&str)->Result<Value,String>{
     let pattern=regex::Regex::new(r#"<meta\s+property="og:url"\s+content="(?:https://github\.com)?/Heiamer/LyricIsland/releases/tag/(v?[0-9]+\.[0-9]+(?:\.[0-9]+)?)""#).unwrap();
-    let tag=pattern.captures(html).and_then(|c|c.get(1)).ok_or("GitHub 页面未提供正式版本号，请点击“前往下载”查看。")?.as_str();
+    let tag=pattern.captures(html).and_then(|c|c.get(1)).ok_or("GitHub 页面未提供正式版本号，请稍后重试。")?.as_str();
     Ok(json!({"tag_name":tag}))
+}
+/// The helper runs from a unique temporary directory so it can replace its installed copy.
+pub fn install()->Result<Value,String>{
+    let release=check()?;if release["newer"]!=true{return Ok(release)}
+    let version=release["version"].as_str().ok_or("missing version")?.trim_start_matches('v');
+    let base=std::env::current_exe().map_err(|e|e.to_string())?.parent().ok_or("missing directory")?.to_path_buf();
+    let data=std::env::var_os("LYRICISLAND_NATIVE_DATA").map(std::path::PathBuf::from).unwrap_or_else(||base.join("Data"));
+    let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());
+    let state=crate::io::pipe_request(&pipe,&json!({"version":1,"command":"state"}))?;
+    let pid=state["processId"].as_u64().ok_or("无法确认正在运行的应用")?;
+    let temp=std::env::temp_dir().join(format!("LyricIsland.UpdateHelper.{}.{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+    std::fs::create_dir(&temp).map_err(|e|e.to_string())?;let helper=temp.join("LyricIsland.Updater.exe");
+    std::fs::copy(base.join("LyricIsland.Updater.exe"),&helper).map_err(|e|e.to_string())?;
+    std::process::Command::new(helper).arg(version).arg(base).arg(data).arg(pid.to_string()).arg(std::process::id().to_string()).arg(pipe).spawn().map_err(|e|e.to_string())?;
+    Ok(json!({"success":true,"message":"正在下载并校验更新，完成后会自动重启；下载失败时保留当前版本。"}))
 }
 #[cfg(test)]mod tests{use super::*;
     #[test]fn compares_numeric_versions_and_never_downgrades(){

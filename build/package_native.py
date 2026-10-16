@@ -11,7 +11,7 @@ args=argparse.ArgumentParser()
 args.add_argument('--binary-dir',type=Path,required=True)
 args.add_argument('--output',type=Path,required=True)
 args.add_argument('--sqlite',type=Path,default=Path.home()/'.nuget/packages/sqlitepclraw.lib.e_sqlite3/2.1.6/runtimes/win-x64/native/e_sqlite3.dll')
-args.add_argument('--version',default='1.2')
+args.add_argument('--version',default='1.2.1')
 options=args.parse_args()
 root=Path(__file__).resolve().parents[1]
 version=options.version
@@ -32,6 +32,13 @@ copy(options.binary_dir/'lyric-island-settings.exe','LyricIsland.Settings.exe')
 from embed_icon import embed_icon
 embed_icon(stage/'LyricIsland.Settings.exe',root/'Assets/LyricIsland-v2.ico')
 embed_icon(stage/'LyricIsland.exe',root/'Assets/LyricIsland-v2.ico')
+framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
+updater=root/'publish'/'LyricIsland.Updater.exe'
+subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+',
+    '/out:'+str(updater),'/reference:'+str(framework/'System.IO.Compression.dll'),
+    '/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll',
+    str(root/'LyricIsland.Bootstrap/Updater.cs')],check=True)
+copy(updater,'LyricIsland.Updater.exe')
 copy(options.sqlite,'e_sqlite3.dll')
 font=root/'Assets/Fonts/NotoSansSC.ttf'
 font_hash='a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da'
@@ -47,11 +54,6 @@ for doc in docs: copy(root/doc,doc)
 for path in sorted((root/'licenses').rglob('*')):
     if path.is_file():copy(path,path.relative_to(root))
 copy(root/'NATIVE-README.md','README.md')
-import sys
-subprocess.run([sys.executable,str(root/'build/notification_identity.py'),'--runtime',str(stage),'--reuse-signature'],check=True)
-files.extend(p for p in sorted((stage/'notification-support').rglob('*')) if p.is_file())
-files.append(stage/'LyricIsland.NotificationHost.exe')
-files.append(stage/'安装通知支持.cmd')
 
 payload=out/(name+'-Portable.zip')
 with zipfile.ZipFile(payload,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:

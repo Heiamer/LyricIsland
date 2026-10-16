@@ -309,9 +309,9 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                     rows.push(picker_panel(view, cx));
                 }
             }
-            rows.push(toggle_row("CoverBackground", "封面取色背景", "默认关闭。开启后根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", false), view));
-            rows.push(info_row("胶囊材质", "深色渐变表面", "使用单一默认材质，兼容旧配置；已移除亚克力和云母。"));
+            rows.push(toggle_row("CoverBackground", "封面取色背景", "默认开启。根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view));
             rows.push(action_row("resetAppearance", "恢复紧凑尺寸", "恢复宽度、字号与固定位置。", "恢复紧凑尺寸", view, cx));
+            rows.push(toggle_row("MusicClickOpenApp", "点击封面或歌名跳转播放器", "默认关闭。开启后点击音乐封面或歌名打开当前播放器。", flag(state,"MusicClickOpenApp",false),view));
             rows
         }
         1 => {
@@ -441,10 +441,10 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
             rows
         }
         4 => vec![
-            action_row("checkUpdate", "在线更新", "从 GitHub 检查最新正式版本。", "检查更新", view, cx),
-            action_row("openUpdate", "GitHub 下载", "下载新版后退出旧版，再运行新版完成升级。", "前往下载", view, cx),
+            action_row("checkUpdate", "在线更新", "检查最新正式版本。", "检查更新", view, cx),
+            action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
             action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("Lyric Island · 歌词岛 1.2", "原生胶囊 · GPUI 设置 · Rust 后台",
+            info_row("Lyric Island · 歌词岛 1.2.1", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -455,26 +455,12 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
         _ => {
             let notifications = &state["notificationState"];
             let mut rows = vec![
-                toggle_row("NotificationsEnabled", "通知提醒", "默认使用免证书兼容模式，开启后接收新通知；可选择启用白名单过滤。", flag(state, "NotificationsEnabled", false), view),
-                toggle_row("NotificationWhitelistEnabled", "启用通知白名单", "默认关闭。开启后仅提醒选中应用；关闭时接收各应用的新通知。", flag(state,"NotificationWhitelistEnabled",false),view),
-                toggle_row("NotificationCompatibility", "免证书兼容模式", "默认开启。只读本机新通知，无需安装证书；关闭后使用需授权的系统接口。", flag(state, "NotificationCompatibility", true), view),
-                toggle_row("PauseNotifications", "暂停通知", "默认关闭。开启后暂时停止通知横幅，关闭后继续提醒，不补弹暂停期间的消息。", flag(state, "PauseNotifications", false), view),
-                info_row(
-                    "通知访问",
-                    notifications["access"].as_str().unwrap_or("未连接"),
-                    notifications["message"].as_str().unwrap_or("请开启通知提醒，并授权 Windows 通知访问。"),
-                ),
+                toggle_row("NotificationsEnabled", "通知提醒", "接收当前用户的新通知，无需额外安装通知组件。", flag(state,"NotificationsEnabled",false),view),
+                toggle_row("NotificationClickOpenApp", "点击通知跳转应用", "默认开启。点击通知横幅打开消息来源应用；关闭按钮只收起通知。", flag(state,"NotificationClickOpenApp",true),view),
+                toggle_row("PauseNotifications", "暂停通知", "暂停期间不弹出通知，恢复后只提醒新消息。", flag(state,"PauseNotifications",false),view),
+                toggle_row("NotificationWhitelistEnabled", "启用通知白名单", "默认关闭。开启后展开应用列表，仅提醒选中的应用。", flag(state,"NotificationWhitelistEnabled",false),view),
             ];
-            rows.push(info_row("通知准备状态", text(state,"notificationSetup",""), if flag(state,"NotificationCompatibility",true){"免证书兼容模式读取当前用户的通知存储，仅处理启用后的新消息。系统更新可能影响兼容性；读取失败时会提示。"}else{"系统接口需要应用身份和 Windows 授权。当前自签名通知包可用一键启用准备；首次可能出现系统确认。"}));
-            for (command, title, detail, label) in [
-                ("notificationSetup", "一键启用通知", "兼容模式直接启用；系统接口模式自动准备组件并请求 Windows 授权。", "一键启用"),
-                ("notificationSettings", "Windows 通知权限", "授权被拒绝时，可在系统设置中重新允许。", "打开设置"),
-                ("notificationPreview", "预览通知横幅", "使用本地示例检查形变、字体和显示样式，不读取真实通知。", "预览"),
-            ] {
-                if flag(state,"NotificationCompatibility",true)&&["notificationAccess","notificationSettings"].contains(&command){continue}
-                rows.push(action_row(command, title, detail, label, view, cx));
-            }
-            if !flag(state,"NotificationWhitelistEnabled",false){return rows}
+            if flag(state,"NotificationWhitelistEnabled",false){
             for (id, title) in [("QQNT", "QQNT"), ("QQ", "QQ（旧版及系统通知）")] {
                 let allowed = notification_allowed(state, id);
                 rows.push(check_row(
@@ -508,6 +494,9 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                     .child(div().w(px(300.0)).child(view.notification_apps.clone()))
                     .into_any_element(),
             );
+            }
+            rows.push(info_row("通知接收状态",notifications["access"].as_str().unwrap_or("未开启"),notifications["message"].as_str().unwrap_or("请开启通知提醒。")));
+            rows.push(action_row("notificationPreview","预览通知横幅","显示本地示例，预览通知外观。","预览",view,cx));
             rows
         }
     }
@@ -1215,11 +1204,11 @@ fn switch(checked: bool) -> impl IntoElement {
 
 /// Send one edit and fold the reply back into the shared state.
 fn send(shared: &Rc<Mutex<Shared>>, key: &str, value: &str, cx: &mut App) -> Result<(), String> {
-    if key=="openUpdate" {cx.open_url(lyric_backend::updates::RELEASES);return Ok(())}
     if key=="openGitHub" {cx.open_url("https://github.com/Heiamer/LyricIsland");return Ok(())}
-    if key=="checkUpdate" {
+    if key=="checkUpdate"||key=="installUpdate" {
+        let install=key=="installUpdate";
         if let Ok(mut s)=shared.lock(){s.message="正在检查 GitHub 更新…".into();}
-        let shared=Rc::clone(shared);let job=cx.background_executor().spawn(async {lyric_backend::updates::check()});
+        let shared=Rc::clone(shared);let job=cx.background_executor().spawn(async move {if install{lyric_backend::updates::install()}else{lyric_backend::updates::check()}});
         cx.spawn(async move |cx|{let result=job.await;if let Ok(mut s)=shared.lock(){s.message=match result{Ok(v)=>v["message"].as_str().unwrap_or("检查完成").to_owned(),Err(e)=>e};}let _=cx.update(|cx|cx.refresh_windows());}).detach();return Ok(())
     }
     let key=key.to_owned();let value=value.to_owned();
@@ -1322,7 +1311,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2.1");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1436,6 +1425,9 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
             }
             cx.background_executor().timer(Duration::from_millis(240)).await;
         }
+        let whitelist_regression=window.update(cx,|view,_,cx|{
+            let mut state=view.shared.lock().unwrap().state.clone();state["settings"]["NotificationWhitelistEnabled"]=json!(false);let collapsed=page_rows(6,&state,view,cx).len();state["settings"]["NotificationWhitelistEnabled"]=json!(true);let expanded=page_rows(6,&state,view,cx).len();collapsed==6&&expanded>=collapsed+3
+        }).unwrap_or(false);
         let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
             let result=window.update(cx,|view,_,cx|{
                 view.page=0;view.picker=Some(Picker{key:"ExpandedComponentColor",hsv:Hsv::new(0.3,0.5,0.7),drag:Drag::None});
@@ -1452,7 +1444,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         }else{None};
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&picker_regression.unwrap_or(true),"pickerRegression":picker_regression,
+            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,
             "pages": PAGES.len(),
             "settings": "GPUI",
             "ipc": "Rust",
@@ -1544,7 +1536,7 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
             saved=shared.lock().is_ok_and(|s|s.state["settings"]["CompactWidth"].as_f64()==Some(278.)&&s.message.is_empty());
             if saved{break}
         }
-        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2"});
+        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2.1"});
         let _=std::fs::write(directory.join("report.json"),report.to_string());
         std::process::exit(if report["success"]==true{0}else{1});
     }).detach();
