@@ -37,7 +37,7 @@ framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
 updater=root/'publish'/'LyricIsland.Updater.exe'
 subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+',
     '/out:'+str(updater),'/reference:'+str(framework/'System.IO.Compression.dll'),
-    '/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll',
+    '/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll','/reference:System.Web.Extensions.dll',
     str(root/'LyricIsland.Bootstrap/Updater.cs')],check=True)
 copy(updater,'LyricIsland.Updater.exe')
 copy(options.sqlite,'e_sqlite3.dll')
@@ -48,7 +48,7 @@ copy(font,'Assets/Fonts/NotoSansSC.ttf')
 japanese=root/'Assets/Fonts/NotoSansJP.ttf'
 assert hashlib.sha256(japanese.read_bytes()).hexdigest()=='c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f','Japanese font differs from verified source'
 copy(japanese,'Assets/Fonts/NotoSansJP.ttf')
-for icon in ['LyricIsland-v2.ico','LyricIsland-v2.png','LyricIsland-v3.svg']:
+for icon in ['LyricIsland-v2.ico','LyricIsland-v2.png','LyricIsland-v3.svg','UpdateSources.json']:
     copy(root/'Assets'/icon,'Assets/'+icon)
 docs=['NATIVE-README.md','CHANGELOG.md','LICENSE','FONT-NOTICE.md','THIRD-PARTY-NOTICES.md']
 for doc in docs: copy(root/doc,doc)

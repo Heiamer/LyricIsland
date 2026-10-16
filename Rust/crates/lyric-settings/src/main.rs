@@ -346,9 +346,7 @@ impl Render for SettingsApp {
             .child(div().text_size(px(26.0)).text_color(t::text()).child(title.to_owned()))
             .child(div().mt_1().text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned()));
         column = column.child(div().mt_6().flex().flex_col().gap_3().children(page_rows(page, &state, self, cx)));
-        if !message.is_empty() {
-            column = column.child(div().mt_4().text_size(px(12.0)).text_color(t::danger()).child(message));
-        }
+
         let footer = div().mt_6().pt_3().text_size(px(11.0)).text_color(t::text_faint())
             .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
 
@@ -361,7 +359,7 @@ impl Render for SettingsApp {
                 div().flex().flex_col().flex_1().min_w_0().h_full()
                     .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&self.scroll).child(column))
                     .child(hairline())
-                    .child(div().px_7().py_3().child(footer)),
+                    .child(div().px_7().py_3().min_w_0().children(if message.is_empty(){None}else{Some(div().text_size(px(12.)).text_color(if message.contains("失败")||message.contains("错误"){t::danger()}else{t::text()}).child(message))}).child(footer)),
             ))
     }
 }
@@ -564,10 +562,12 @@ fn legacy_page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Con
             rows
         }
         4 => vec![
-            action_row("checkUpdate", "在线更新", "检查最新正式版本。", "检查更新", view, cx),
+            info_row("更新来源", "Gitee 国内源 + GitHub", "同时检查两个源；一个不可用时使用另一个。下载校验完成后才替换原程序。"),
+            action_row("openGitee", "国内发布页", "点屿的 Gitee 国内镜像与下载。", "Gitee", view, cx),
+            action_row("checkUpdate", "在线更新", "同时请求国内源和 GitHub，检查最新正式版本。", "检查更新", view, cx),
             action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
             action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("DotIsle · 点屿 1.3", "原生胶囊 · GPUI 设置 · Rust 后台",
+            info_row("DotIsle · 点屿 1.3.1", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -1699,10 +1699,11 @@ fn switch(checked: bool) -> impl IntoElement {
 
 /// Send one edit and fold the reply back into the shared state.
 fn send(shared: &Rc<Mutex<Shared>>, key: &str, value: &str, cx: &mut App) -> Result<(), String> {
+    if key=="openGitee" {cx.open_url("https://gitee.com/heiamer/abc");return Ok(())}
     if key=="openGitHub" {cx.open_url("https://github.com/Heiamer/LyricIsland");return Ok(())}
     if key=="checkUpdate"||key=="installUpdate" {
         let install=key=="installUpdate";
-        if let Ok(mut s)=shared.lock(){s.message="正在检查 GitHub 更新…".into();}
+        if let Ok(mut s)=shared.lock(){s.message="正在同时检查 Gitee 国内源和 GitHub…".into();}
         let shared=Rc::clone(shared);let job=cx.background_executor().spawn(async move {if install{lyric_backend::updates::install()}else{lyric_backend::updates::check()}});
         cx.spawn(async move |cx|{let result=job.await;if let Ok(mut s)=shared.lock(){s.message=match result{Ok(v)=>v["message"].as_str().unwrap_or("检查完成").to_owned(),Err(e)=>e};}let _=cx.update(|cx|cx.refresh_windows());}).detach();return Ok(())
     }
@@ -1804,10 +1805,10 @@ fn main() {
         let window = match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3".into()),appears_transparent:true,..Default::default()}),
+                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3.1".into()),appears_transparent:true,..Default::default()}),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("点屿 · 设置 1.3");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("点屿 · 设置 1.3.1");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {

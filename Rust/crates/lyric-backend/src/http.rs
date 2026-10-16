@@ -1,4 +1,4 @@
-//! Windows native HTTP, always WINHTTP_ACCESS_TYPE_NO_PROXY. No PAC/environment fallback.
+//! Windows native HTTP. Music uses direct access; update requests use the system proxy.
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -30,6 +30,12 @@ impl RequestContext {
 }
 pub fn encode(s:&str)->String { s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {(b as char).to_string()}else{format!("%{b:02X}")}).collect() }
 pub fn request(url:&str,method:&str,body:&[u8],content_type:&str,refer:&str,ctx:&RequestContext,limit:usize)->Result<Vec<u8>,String>{
+    request_access(url,method,body,content_type,refer,ctx,limit,1)
+}
+/// Update requests follow system/user proxy settings; music providers retain direct requests.
+pub fn request_system(url:&str,ctx:&RequestContext,limit:usize)->Result<Vec<u8>,String>{request_access(url,"GET",&[],"application/json","",ctx,limit,4)}
+pub fn get_system(url:&str,ctx:&RequestContext)->Result<serde_json::Value,String>{serde_json::from_slice(&request_system(url,ctx,8*1024*1024)?).map_err(|e|e.to_string())}
+fn request_access(url:&str,method:&str,body:&[u8],content_type:&str,refer:&str,ctx:&RequestContext,limit:usize,access:u32)->Result<Vec<u8>,String>{
     ctx.check()?;
     let (scheme,rest)=url.split_once("://").ok_or("invalid URL")?;
     if scheme!="https" && scheme!="http"{return Err("unsupported URL".into())}
@@ -38,7 +44,7 @@ pub fn request(url:&str,method:&str,body:&[u8],content_type:&str,refer:&str,ctx:
     let (host,port)=authority.split_once(':').map(|(h,p)|Ok::<_,String>((h,p.parse::<u16>().map_err(|_|"invalid port")?))).transpose()?.unwrap_or((authority,if scheme=="https"{443}else{80}));
     let agent=wide("Mozilla/5.0 (Windows NT 10.0; Win64; x64) LyricIsland/1.2");
     unsafe{
-        let session=Owned::new(WinHttpOpen(agent.as_ptr(),1,null(),null(),0))?; // NO_PROXY = 1
+        let session=Owned::new(WinHttpOpen(agent.as_ptr(),access,null(),null(),0))?; // 1: direct; 4: system/user proxy
         let remaining=ctx.deadline.saturating_duration_since(Instant::now()).as_millis().clamp(1,5000) as i32;
         WinHttpSetTimeouts(session.0,remaining.min(2000),remaining.min(2000),remaining.min(2000),remaining.min(1500));
         let decompression=3u32;WinHttpSetOption(session.0,118,&decompression as *const _ as _,4);

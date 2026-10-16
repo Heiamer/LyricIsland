@@ -1,3 +1,5 @@
+> 1.3.1：更新同时检查 Gitee 国内源与 GitHub，失败自动切换；保留设置、原目录安装与 SHA256 校验。
+
 # 点屿 · DotIsle 1.3
 
 胶囊：Rust、Win32、Direct2D、DirectWrite、DirectComposition。设置：GPUI 0.2.2（DirectX 后端）。后台：Rust。

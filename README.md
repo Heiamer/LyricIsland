@@ -8,7 +8,7 @@
 
 音乐歌词 · 通知提醒 · 待办清单 · 番茄钟 · 倒计时 · 秒表 · 设备连接
 
-[下载正式版](https://github.com/Heiamer/LyricIsland/releases/latest) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
+[国内下载](https://gitee.com/heiamer/abc/releases) · [GitHub 下载](https://github.com/Heiamer/LyricIsland/releases/latest) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
 
 </div>
 
@@ -34,9 +34,9 @@
 
 | 文件 | 使用方式 |
 | --- | --- |
-| [DotIsle-1.3.exe](https://github.com/Heiamer/LyricIsland/releases/download/v1.3/DotIsle-1.3.exe) | 单文件启动包，运行后自动释放完整组件并启动。 |
-| [DotIsle-1.3-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3/DotIsle-1.3-Portable.zip) | 完整解压到可写目录，再运行其中的 `LyricIsland.exe`。 |
-| [DotIsle-1.3-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3/DotIsle-1.3-Source.zip) | 对应 1.3 正式版提交的源码。 |
+| [DotIsle-1.3.1.exe](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.1/DotIsle-1.3.1.exe) | 单文件启动包，运行后自动释放完整组件并启动。 |
+| [DotIsle-1.3.1-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.1/DotIsle-1.3.1-Portable.zip) | 完整解压到可写目录，再运行其中的 `LyricIsland.exe`。 |
+| [DotIsle-1.3.1-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.1/DotIsle-1.3.1-Source.zip) | 对应 1.3.1 正式版提交的源码。 |
 
 1. 启动后，通过系统托盘打开设置。
 2. 打开播放器并播放音乐，胶囊会显示当前歌词；点击胶囊可展开。
@@ -44,11 +44,15 @@
 
 程序随包提供中文、日文字体和 SQLite，无需另行安装字体或通知证书。分享应用时请发送完整启动包或便携 ZIP。
 
+### 国内与 GitHub 双源更新
+
+1.3.1 的更新按钮会同时请求 Gitee 国内源和 GitHub；一个失败时使用另一个可用源。下载失败也会切换来源，更新包经过 SHA256 校验后才会替换原程序。更新请求使用 Windows 系统代理设置，检查状态固定显示在设置窗口底部。
+
 ### 老版本 OTA 更新
 
-**1.2.1 / 1.2.2 用户**可以在「设置 → 关于与更新」检查版本，点击「下载并更新」。程序会下载并校验更新包，在原运行目录替换文件、保留 `Data` 和 `Logs`，随后自动重启。写入失败时会尝试恢复备份。
+**1.2.1 / 1.2.2 用户**的旧更新器仅连接 GitHub；旧版无法通过服务器自动增加国内源。如果所在网络无法访问 GitHub，需要先下载新版便携包，退出旧程序后将完整内容覆盖到旧运行目录，保留 `Data` 和 `Logs`。完成首次升级后即可使用双源 OTA。GitHub 可访问时，可以在「设置 → 关于与更新」检查版本，点击「下载并更新」。程序会下载并校验更新包，在原运行目录替换文件、保留 `Data` 和 `Logs`，随后自动重启。写入失败时会尝试恢复备份。
 
-发行页保留的 `LyricIsland-1.3-Portable.zip` 和 `LyricIsland-1.3-SHA256.txt` 专供旧更新器使用，与 DotIsle 便携包内容一致。产品已更名，内部程序文件名、配置与更新标识继续兼容旧版本，因此仓库地址暂时沿用 LyricIsland。
+发行页保留的 `LyricIsland-1.3.1-Portable.zip` 和 `LyricIsland-1.3.1-SHA256.txt` 专供旧更新器使用，与 DotIsle 便携包内容一致。产品已更名，内部程序文件名、配置与更新标识继续兼容旧版本，因此仓库地址暂时沿用 LyricIsland。
 
 如果正在使用同为 **1.3** 的早期测试包，版本比较不会发现变化，请先退出测试版，再运行正式启动包。从 1.2 升级时需先运行一次支持 OTA 的版本。
 

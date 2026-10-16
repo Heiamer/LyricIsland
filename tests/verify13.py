@@ -302,13 +302,13 @@ def check_tools(runtime):
     return {"concurrentTimers":True,"pauseResetResume":True,"cycleWithSwipeDisabled":True,"adaptiveMaximum":True,"pastelColor":True,"pausedSessionRestore":True,"devicePreview":True,"realHardwareTested":False}
 
 
-def check_bootstrap(share, workspace):
+def check_bootstrap(share, workspace, version="1.3"):
     """The single-file launcher must extract the payload and report 1.3."""
     directory = workspace / "bootstrap"
     directory.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run([str(share), "--verify-package", str(directory)], timeout=60)
     report = json.loads((directory / "verification.json").read_text(encoding="utf-8-sig"))
-    assert completed.returncode == 0 and report["version"] == "1.3", (completed.returncode, report)
+    assert completed.returncode == 0 and report["version"] == version, (completed.returncode, report)
     return report
 
 
@@ -320,9 +320,10 @@ RELEASE_FILES = [
 ]
 
 
-def digests(directory):
+def digests(directory, version):
     rows = {}
-    for name in RELEASE_FILES:
+    for original in RELEASE_FILES:
+        name = original.replace("1.3", version)
         path = directory / name
         if path.is_file():
             rows[name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -334,6 +335,7 @@ def main():
     parser.add_argument("runtime", type=Path, help="the packaged runtime directory, e.g. publish/LyricIsland-1.3")
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--artifacts", type=Path, default=None, help="directory holding the packaged release files")
+    parser.add_argument("--version",default="1.3")
     options = parser.parse_args()
 
     runtime_directory = options.runtime.resolve()
@@ -342,12 +344,12 @@ def main():
     data = workspace / "Data"
     data.mkdir(parents=True, exist_ok=True)
 
-    report = {"success": False, "version": "1.3", "runtime": str(runtime_directory), "testOverrides":{"AllowedSources":["LyricIsland.Verify13"],"OnlineSongInfo":False}}
+    report = {"success": False, "version": options.version, "runtime": str(runtime_directory), "testOverrides":{"AllowedSources":["LyricIsland.Verify13"],"OnlineSongInfo":False}}
     runtime = Runtime(runtime_directory, data, 60000)
     try:
         (data / "settings.json").write_text(json.dumps({"AllowedSources":["LyricIsland.Verify13"],"OnlineSongInfo":False}),encoding="utf8")
         state = runtime.start()
-        assert state["version"] == "1.3", state["version"]
+        assert state["version"] == options.version, state["version"]
         report["nativeReportsVersion"] = True
         report["defaults"] = check_defaults(state)
         assert isinstance(state["todos"], list) and state["pendingPage"] is None
@@ -367,10 +369,10 @@ def main():
 
         if options.artifacts:
             artifacts = options.artifacts.resolve()
-            report["digests"] = digests(artifacts)
-            share = artifacts / "DotIsle-1.3.exe"
+            report["digests"] = digests(artifacts, options.version)
+            share = artifacts / ("DotIsle-"+options.version+".exe")
             if share.is_file():
-                report["bootstrap"] = check_bootstrap(share, workspace)
+                report["bootstrap"] = check_bootstrap(share, workspace, options.version)
         report["success"] = True
     finally:
         runtime.stop()

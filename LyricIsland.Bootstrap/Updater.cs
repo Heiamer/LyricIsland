@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Collections.Generic;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 internal static class Updater {
@@ -57,6 +58,22 @@ internal static class Updater {
     static void StopApp(string pipe){using(var p=new NamedPipeClientStream(".",pipe,PipeDirection.InOut,PipeOptions.Asynchronous)){p.Connect(5000);byte[] b=Encoding.UTF8.GetBytes("{\"version\":1,\"command\":\"prepareUpdateExit\"}\n");p.Write(b,0,b.Length);p.Flush();using(var reader=new StreamReader(p)){var reply=reader.ReadLineAsync();if(!reply.Wait(5000)||reply.Result==null||!Regex.IsMatch(reply.Result,@"""success""\s*:\s*true"))throw new IOException("应用未确认保存设置，已取消更新");}}}
     static void Wait(int id){try{using(var p=Process.GetProcessById(id)){if(!p.WaitForExit(15000))throw new IOException("应用尚未退出，更新已取消");}}catch(ArgumentException){}}
     static void Start(string target,string data){Process.Start(new ProcessStartInfo(Path.Combine(target,"LyricIsland.exe"),"--data-dir \""+data+"\""){UseShellExecute=false,WorkingDirectory=target});}
+    static bool OfficialUrl(string url){Uri uri;return Uri.TryCreate(url,UriKind.Absolute,out uri)&&uri.Scheme=="https"&&(uri.Host=="github.com"||uri.Host=="gitee.com")&&string.IsNullOrEmpty(uri.UserInfo);}
+    static string[] DomesticPair(string target,string version){
+        string config=Path.Combine(target,"Assets/UpdateSources.json");if(!File.Exists(config))return null;
+        var json=new JavaScriptSerializer();var settings=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(config));object value;if(!settings.TryGetValue("giteeRepository",out value))return null;
+        var match=Regex.Match(Convert.ToString(value).TrimEnd('/'),@"^https://gitee\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$");if(!match.Success)return null;
+        string api="https://gitee.com/api/v5/repos/"+match.Groups[1].Value+"/"+match.Groups[2].Value;
+        using(var client=new Client()){var release=json.Deserialize<Dictionary<string,object>>(client.DownloadString(api+"/releases/tags/v"+version));long id=Convert.ToInt64(release["id"]);if(id<=0)throw new IOException("国内发行标识无效");var list=json.Deserialize<List<Dictionary<string,object>>>(client.DownloadString(api+"/releases/"+id+"/attach_files?per_page=100"));string manifest=null,zip=null;foreach(var file in list){object name;file.TryGetValue("name",out name);if(name==null)file.TryGetValue("file_name",out name);long fileId=Convert.ToInt64(file["id"]);if(fileId<=0)continue;string url=api+"/releases/"+id+"/attach_files/"+fileId+"/download";if(Convert.ToString(name)=="LyricIsland-"+version+"-SHA256.txt")manifest=url;if(Convert.ToString(name)=="LyricIsland-"+version+"-Portable.zip")zip=url;}if(manifest==null||zip==null)throw new IOException("国内源缺少更新附件");return new[]{manifest,zip};}
+    }
+    static void DownloadBundle(string target,string version,string scratch,string[] preferred){
+        string name="LyricIsland-"+version,github="https://github.com/Heiamer/LyricIsland/releases/download/v"+version+"/";var errors=new List<string>();var tried=new HashSet<string>();
+        // Resolve the other source on failure, even when the first checker selected GitHub.
+        for(int step=0;step<3;step++){string[] pair=null;if(step==0){pair=preferred;}else if(step==1){try{pair=DomesticPair(target,version);}catch(Exception e){errors.Add("Gitee："+e.Message);continue;}}else{pair=new[]{github+name+"-SHA256.txt",github+name+"-Portable.zip"};}
+            if(pair==null||!tried.Add(pair[0]))continue;
+            try{if(!OfficialUrl(pair[0])||!OfficialUrl(pair[1]))throw new IOException("更新下载地址无效");string manifest=Path.Combine(scratch,"SHA256.txt"),zip=Path.Combine(scratch,"update.zip");Download(pair[0],manifest,65536);string expected=null;foreach(string line in File.ReadAllLines(manifest)){var m=Regex.Match(line,@"^([0-9a-fA-F]{64})\s+"+Regex.Escape(name+"-Portable.zip")+"$");if(m.Success)expected=m.Groups[1].Value.ToLowerInvariant();}if(expected==null)throw new IOException("校验清单缺少更新包");Download(pair[1],zip,256L*1024*1024);Verify(zip,expected);return;}catch(Exception e){errors.Add("更新源："+e.Message);File.WriteAllText(Path.Combine(scratch,"download-errors.txt"),string.Join(Environment.NewLine,errors));}
+        }throw new IOException("国内源与 GitHub 均未能完成更新下载："+string.Join("；",errors));
+    }
     static void SelfTest(string report){
         string root=Path.Combine(Path.GetTempPath(),"LyricIsland.UpdateTest."+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         try{
@@ -72,7 +89,7 @@ internal static class Updater {
         string target=null,data=null;bool stopped=false;string scratch=null;
         try{
             if(args.Length==2&&args[0]=="--self-test"){SelfTest(args[1]);return 0;}
-            if(args.Length!=6)throw new ArgumentException("更新参数无效");
+            if(args.Length!=6&&args.Length!=8)throw new ArgumentException("更新参数无效");
             string version=args[0];if(!Regex.IsMatch(version,@"^\d+\.\d+(\.\d+)?$"))throw new ArgumentException("版本号无效");
             target=Path.GetFullPath(args[1]).TrimEnd(Path.DirectorySeparatorChar);data=Path.GetFullPath(args[2]);int pid=int.Parse(args[3]),settings=int.Parse(args[4]);string pipe=args[5];
             if(!File.Exists(Path.Combine(target,"LyricIsland.exe")))throw new IOException("找不到原应用");
@@ -80,12 +97,8 @@ internal static class Updater {
                 if(!gate.WaitOne(0))throw new IOException("已有更新正在进行");
                 scratch=Path.Combine(Path.GetTempPath(),"LyricIsland.Update."+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(scratch);
                 ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
-                string name="LyricIsland-"+version,url="https://github.com/Heiamer/LyricIsland/releases/download/v"+version+"/";
-                string manifest=Path.Combine(scratch,"SHA256.txt"),zip=Path.Combine(scratch,"update.zip");
-                Download(url+name+"-SHA256.txt",manifest,65536);
-                string expected=null;foreach(string line in File.ReadAllLines(manifest)){var m=Regex.Match(line,@"^([0-9a-fA-F]{64})\s+"+Regex.Escape(name+"-Portable.zip")+"$");if(m.Success)expected=m.Groups[1].Value.ToLowerInvariant();}
-                if(expected==null)throw new IOException("发布校验清单缺少更新包");
-                Download(url+name+"-Portable.zip",zip,256L*1024*1024);Verify(zip,expected);
+                DownloadBundle(target,version,scratch,args.Length==8?new[]{args[6],args[7]}:null);
+                string zip=Path.Combine(scratch,"update.zip");
                 string stage=Extract(zip,Path.Combine(scratch,"stage"),version);
                 StopApp(pipe);stopped=true;Wait(pid);Wait(settings);
                 Apply(stage,target,Path.Combine(scratch,"backup"),0,()=>Start(target,data));stopped=false;
