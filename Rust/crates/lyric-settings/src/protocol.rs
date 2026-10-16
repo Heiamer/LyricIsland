@@ -40,6 +40,21 @@ pub fn edit(key:&str,value:&str)->Result<(Value,Value),String>{
     Ok((reply,request("state",Value::Null)?))
 }
 
+/// Todo and sound commands carry a JSON object rather than a scalar string, so
+/// they bypass `change` and go straight to the pipe with a fresh state reply.
+pub fn command(name:&str,value:Value)->Result<(Value,Value),String>{
+    static EDIT:std::sync::Mutex<()>=std::sync::Mutex::new(());
+    let _guard=EDIT.lock().map_err(|_|"设置连接异常".to_owned())?;
+    let reply=request(name,value)?;
+    Ok((reply,request("state",Value::Null)?))
+}
+
+/// Audition a chime. Never touches real notifications.
+pub fn sound_preview(todo:bool)->Result<Value,String>{request("soundPreview",json!({"todo":todo}))}
+
+/// Acknowledge a "jump to this page" request so the native side stops repeating it.
+pub fn page_seen()->Result<Value,String>{request("pageSeen",Value::Null)}
+
 /// Translate one UI edit into a pipe request. Returns a user-facing error message instead when
 /// the input is rejected locally.
 pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {

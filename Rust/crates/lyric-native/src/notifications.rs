@@ -5,7 +5,7 @@ use windows::Win32::System::WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHR
 #[derive(Clone,Debug,Default)]
 pub struct Notice {pub app_id:String,pub app_name:String,pub title:String,pub body:String,pub icon:Option<Vec<u8>>}
 impl Notice {
-    pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"歌词岛".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v2.png")).ok()}}
+    pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"点屿".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v2.png")).ok()}}
 }
 #[derive(Clone,Default)]
 pub struct Policy {pub enabled:bool,pub paused:bool,pub whitelist_enabled:bool,pub allowed:Vec<String>}

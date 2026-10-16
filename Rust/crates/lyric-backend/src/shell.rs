@@ -44,7 +44,7 @@ pub fn ensure_per_monitor_dpi_awareness(){
     unsafe{let _=SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);}
 }
 pub fn tray_menu(x:i32,y:i32)->Result<(),String>{unsafe{
-    let class=wide("STATIC");let title=wide("Lyric Island");let owner=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_LAYERED,PCWSTR(class.as_ptr()),PCWSTR(title.as_ptr()),WS_POPUP,x,y,1,1,None,None,None,None).map_err(error)?;
+    let class=wide("STATIC");let title=wide("DotIsle");let owner=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_LAYERED,PCWSTR(class.as_ptr()),PCWSTR(title.as_ptr()),WS_POPUP,x,y,1,1,None,None,None,None).map_err(error)?;
     let _=SetLayeredWindowAttributes(owner,windows::Win32::Foundation::COLORREF(0),0,LWA_ALPHA);let _=ShowWindow(owner,SW_SHOWNOACTIVATE);let _=SetForegroundWindow(owner);
     let menu=CreatePopupMenu().map_err(error)?;
     for (id,label) in [(1,"展开灵动岛"),(2,"显示 / 隐藏灵动岛"),(3,"设置"),(4,"退出")]{let label=wide(label);AppendMenuW(menu,MF_STRING,id,PCWSTR(label.as_ptr())).map_err(error)?}

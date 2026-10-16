@@ -13,11 +13,14 @@ fn rounded(r:Rect,radius:f64)->D2D1_ROUNDED_RECT{D2D1_ROUNDED_RECT{rect:rect(r),
 fn point(x:f64,y:f64)->Vector2{Vector2{X:x as f32,Y:y as f32}}
 fn identity()->Matrix3x2{Matrix3x2{M11:1.,M12:0.,M21:0.,M22:1.,M31:0.,M32:0.}}
 fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:x as f32,M32:y as f32,..Default::default()}}
+#[derive(Clone,Copy)]
 pub struct Scene<'a>{
-    pub cover_background:bool,pub demo:bool,
+    pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
+    pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
+    pub cover_background:bool,pub demo:bool,pub animate:bool,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
-    pub lyric:&'a str,pub previous_lyric:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
+    pub lyric:&'a str,pub previous_lyric:&'a str,pub compact_secondary:&'a str,pub previous_compact_secondary:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
     pub title:&'a str,pub artist:&'a str,pub playing:bool,pub highlight:f64,
     pub progress:f64,pub elapsed:f64,pub duration:f64,pub font_size:f64,
     pub text_color:u32,pub component_color:u32,pub progress_color:u32,
@@ -36,13 +39,13 @@ pub struct Renderer{
     blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
     write:IDWriteFactory,body_fonts:IDWriteFontCollection,system_fonts:IDWriteFontCollection,fallback:IDWriteFontFallback,body_family:String,japanese_family:String,
     pub body_line_spacing:f64,pub body_baseline:f64,
-    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,cover:Option<ID2D1Bitmap1>,pub width:u32,pub height:u32,pub dpi:f32,
+    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,measured:HashMap<String,f64>,cover:Option<ID2D1Bitmap1>,pub width:u32,pub height:u32,pub dpi:f32,
 }
 impl Renderer{
     pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{
         let mut rows=vec![];self.dc.BeginDraw();
         for weight in [400,500,600]{
-            let text="晚风轻轻，音乐刚好 Lyric Island 0123456789 译";
+            let text="晚风轻轻，音乐刚好 DotIsle 0123456789 译";
             self.text(text,Rect::new(0.,0.,1000.,32.),16.,weight,0)?;
             let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,weight,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
             let runs=crate::font_probe::inspect(self.layouts.get(&key).unwrap())?;
@@ -64,7 +67,7 @@ impl Renderer{
         let device=device.unwrap();let dxgi:IDXGIDevice=device.cast()?;let adapter=dxgi.GetAdapter()?;let dxgi_factory:IDXGIFactory2=adapter.GetParent()?;
         let desc=DXGI_SWAP_CHAIN_DESC1{Width:width,Height:height,Format:DXGI_FORMAT_B8G8R8A8_UNORM,SampleDesc:DXGI_SAMPLE_DESC{Count:1,Quality:0},BufferUsage:DXGI_USAGE_RENDER_TARGET_OUTPUT,BufferCount:2,Scaling:DXGI_SCALING_STRETCH,SwapEffect:DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,AlphaMode:DXGI_ALPHA_MODE_PREMULTIPLIED,..Default::default()};
         let swap=dxgi_factory.CreateSwapChainForComposition(&device,&desc,None)?;
-        let composition:IDCompositionDevice=DCompositionCreateDevice(&dxgi)?;let target=composition.CreateTargetForHwnd(hwnd,true)?;let visual=composition.CreateVisual()?;visual.SetContent(&swap)?;target.SetRoot(&visual)?;composition.Commit()?;
+        let composition:IDCompositionDevice=DCompositionCreateDevice(&dxgi)?;let target=composition.CreateTargetForHwnd(hwnd,true)?;let visual=composition.CreateVisual()?;visual.SetContent(&swap)?;target.SetRoot(&visual)?;
         let factory:ID2D1Factory1=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,None)?;
         let d2device=factory.CreateDevice(&dxgi)?;let dc=d2device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;dc.SetDpi(dpi,dpi);dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         let surface:IDXGISurface=swap.GetBuffer(0)?;
@@ -93,7 +96,8 @@ impl Renderer{
         let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
+        dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
         use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
@@ -117,6 +121,17 @@ impl Renderer{
         let geometry=self.factory.CreateRoundedRectangleGeometry(&rounded(r,radius))?;
         let mut params=D2D1_LAYER_PARAMETERS1{contentBounds:D2D_RECT_F{left:-100000.,top:-100000.,right:100000.,bottom:100000.},geometricMask:std::mem::ManuallyDrop::new(Some(geometry.cast()?)),maskAntialiasMode:D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,maskTransform:identity(),opacity,opacityBrush:std::mem::ManuallyDrop::new(None),layerOptions:D2D1_LAYER_OPTIONS1_NONE};
         self.dc.PushLayer(&params,None);std::mem::ManuallyDrop::drop(&mut params.geometricMask);Ok(())
+    }
+    /// True glyph-run width for one line, in layout units.
+    ///
+    /// `compact_content` runs every frame, so the DirectWrite layout is cached by
+    /// text and size instead of being rebuilt per frame. The family, weight and
+    /// fallback chain match `text_family` exactly, so a measured width is the
+    /// same width the glyphs are later drawn at.
+    pub unsafe fn measure_line(&mut self,text:&str,size:f64)->Result<f64>{
+        let key=format!("{text}|{size}");if let Some(width)=self.measured.get(&key){return Ok(*width)}
+        let family=self.language_family(text);let name=family.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let format=self.write.CreateTextFormat(PCWSTR(name.as_ptr()),if family==self.body_family||family==self.japanese_family{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,w!("zh-CN"))?;format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;let chars=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&chars,&format,32768.,200.)?;layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;let mut metrics=DWRITE_TEXT_METRICS::default();layout.GetMetrics(&mut metrics)?;let width=metrics.widthIncludingTrailingWhitespace as f64;
+        if self.measured.len()>256{self.measured.clear()}self.measured.insert(key,width);Ok(width)
     }
     unsafe fn text(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32)->Result<()>{
         self.text_family(text,r,size,weight,c,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,None)
@@ -207,36 +222,57 @@ impl Renderer{
             9=>{let result=(||->Result<()>{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;let p=|x:f64,y:f64|point(ox+x*scale,oy+y*scale);sink.BeginFigure(p(8.,14.),D2D1_FIGURE_BEGIN_HOLLOW);for v in [[4.,11.,1.,8.,1.,5.],[1.,1.,6.,0.,8.,4.],[10.,0.,15.,1.,15.,5.],[15.,8.,12.,11.,8.,14.]]{sink.AddBezier(&D2D1_BEZIER_SEGMENT{point1:p(v[0],v[1]),point2:p(v[2],v[3]),point3:p(v[4],v[5])});}sink.EndFigure(D2D1_FIGURE_END_CLOSED);sink.Close()?;self.brush.SetColor(&color(c));self.dc.DrawGeometry(&path,&self.brush,1.4,None);Ok(())})();let _=result;},_=>{}
         }
     }
+    /// Height of the collapsed lyric group and the secondary line size for a
+    /// given font size. Delegates to `compact` so the shell sizes the capsule
+    /// with exactly the numbers used to place the two lines.
+    pub fn compact_metrics(&self,font_size:f64,double:bool,scale:f64)->(f64,f64,f64){
+        crate::compact::group_metrics(font_size,self.body_line_spacing,scale,double)
+    }
+    /// Capsule height that fits the collapsed group with symmetric padding.
+    pub fn compact_height(&self,font_size:f64,double:bool,scale:f64)->f64{
+        crate::compact::capsule_height(font_size,self.body_line_spacing,scale,double)
+    }
     unsafe fn compact_content(&mut self,s:&Scene<'_>)->Result<()>{
         let c=s.layout.capsule;let cover=s.layout.compact_cover(s.layout_scale);self.cover_with_opacity(cover.x,cover.y,cover.w,s.cover_opacity as f32,s.demo)?;
         let round=|v:f64|(v*s.layout_scale).round_ties_even()/s.layout_scale;
-        let line_h=round(s.font_size*self.body_line_spacing);let line_y=c.y+round((40.-line_h)/2.);
-        let viewport=Rect::new(c.x+round(7.)+30.+round(5.),line_y,c.w-14.-30.-22.-10.,line_h);self.dc.PushAxisAlignedClip(&rect(viewport),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        let t=(s.lyric_age_ms/180.).clamp(0.,1.);let ease=1.-(1.-t).powi(3);let dy=(1.-ease)*4.;
-        if t<1.&&!s.previous_lyric.is_empty(){self.text(s.previous_lyric,Rect::new(viewport.x,viewport.y+s.outgoing_y+(-4.-s.outgoing_y)*ease,viewport.w,line_h),s.font_size,500,((255.*s.outgoing_opacity*(1.-t))as u32)<<24|0x00f1f3f5)?;}
+        let double=!s.compact_secondary.is_empty();let(group_h,line_h,secondary_h)=self.compact_metrics(s.font_size,double,s.layout_scale);let secondary_size=(s.font_size*0.78).clamp(9.,11.5);
+        let line_y=c.y+round((c.h-group_h)/2.);
+        let viewport=Rect::new(c.x+round(7.)+30.+round(5.),c.y,c.w-14.-30.-22.-10.,c.h);self.dc.PushAxisAlignedClip(&rect(viewport),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        let t=(s.lyric_age_ms/180.).clamp(0.,1.);let ease=1.-(1.-t).powi(3);let dy=(1.-ease)*5.;let alignment=if double{DWRITE_TEXT_ALIGNMENT_CENTER}else{DWRITE_TEXT_ALIGNMENT_LEADING};
+        if t<1.&&!s.previous_lyric.is_empty(){self.text_family(s.previous_lyric,Rect::new(viewport.x,line_y+s.outgoing_y+(-5.-s.outgoing_y)*ease,viewport.w,line_h),s.font_size,500,((255.*s.outgoing_opacity*(1.-t))as u32)<<24|0x00f1f3f5,"Noto Sans SC",false,alignment,None)?;}
         let a=(255.*t)as u32;
-        let boundary=((viewport.x+viewport.w*s.highlight.clamp(0.,1.))*s.layout_scale).round()/s.layout_scale;
-        // Disjoint color regions: never paint antialiased glyph edges twice.
-        for (clip,c) in [(Rect::new(viewport.x,viewport.y,(boundary-viewport.x).max(0.),line_h),s.progress_color&0xffffff),(Rect::new(boundary,viewport.y,(viewport.x+viewport.w-boundary).max(0.),line_h),0x00f1f3f5)]{
-            if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text(s.lyric,Rect::new(viewport.x,viewport.y+dy,viewport.w,line_h),s.font_size,500,(a<<24)|c)?;self.dc.PopAxisAlignedClip();}
+        let measured=if double{self.measure_line(s.lyric,s.font_size)?.min(viewport.w)}else{viewport.w};let text_x=if double{viewport.x+(viewport.w-measured)/2.}else{viewport.x};let boundary=((text_x+measured*s.highlight.clamp(0.,1.))*s.layout_scale).round()/s.layout_scale;
+        for (clip,c) in [(Rect::new(viewport.x,viewport.y,(boundary-viewport.x).max(0.),viewport.h),s.progress_color&0xffffff),(Rect::new(boundary,viewport.y,(viewport.x+viewport.w-boundary).max(0.),viewport.h),0x00f1f3f5)]{
+            if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(viewport.x,line_y+dy,viewport.w,line_h),s.font_size,500,(a<<24)|c,"Noto Sans SC",false,alignment,None)?;self.dc.PopAxisAlignedClip();}
         }
+        if double{if t<1.&&!s.previous_compact_secondary.is_empty(){self.text_family(s.previous_compact_secondary,Rect::new(viewport.x,line_y+line_h+1.-5.*ease,viewport.w,secondary_h),secondary_size,400,((160.*(1.-t))as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}self.text_family(s.compact_secondary,Rect::new(viewport.x,line_y+line_h+1.+dy,viewport.w,secondary_h),secondary_size,400,((190.*t)as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
         self.dc.PopAxisAlignedClip();
-        for (i,h) in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+20.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.component_color&0xffffff));}
+        for (i,h) in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+c.h/2.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.component_color&0xffffff));}
         Ok(())
     }
     unsafe fn expanded_content(&mut self,s:&Scene<'_>)->Result<()>{
-        let round=|v:f64|(v*s.layout_scale).round_ties_even()/s.layout_scale;
-        let title_h=round(16.*self.body_line_spacing);let artist_h=round(12.5*self.body_line_spacing);
-        let title_y=16.+round((42.-title_h-artist_h-4.)/2.);let artist_y=title_y+title_h+4.;
-        let elapsed_y=134.+round((10.-round(10.*self.body_line_spacing))/2.);
-        let secondary_h=round(11.5*self.body_line_spacing);let lyric_y_base=64.+round((46.-20.-secondary_h-4.)/2.);let status_h=round(10.*self.body_line_spacing);let status_y=110.-status_h;
-        let w=s.layout.card.w;let secondary=0xc2000000|(s.text_color&0xffffff);self.cover_with_opacity(18.,16.,80.,s.cover_opacity as f32,s.demo)?;
-        self.fill(Rect::new(18.,status_y+(status_h-4.)/2.,4.,4.),2.,s.progress_color);self.text(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},Rect::new(28.,status_y,72.,status_h),10.,400,secondary)?;
-        self.text(s.title,Rect::new(114.,title_y,w-164.,title_h),16.,600,s.text_color)?;self.text(s.artist,Rect::new(114.,artist_y,w-164.,artist_h),12.5,400,secondary)?;
-        let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=5.*(1.-lyric_t).powi(3);
-        self.text_family(s.lyric,Rect::new(114.,lyric_y_base+lyric_y,w-132.,20.),s.font_size+3.,500,((255.*lyric_t)as u32)<<24|(s.text_color&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(20.))?;self.text(s.secondary,Rect::new(114.,lyric_y_base+24.,w-132.,secondary_h),11.5,400,secondary)?;
-        self.fill(Rect::new(18.,122.,w-36.,4.),2.,0xff343b45);let p=(w-36.)*s.progress.clamp(0.,1.);self.fill(Rect::new(18.,122.,p,4.),2.,s.component_color);let size=if s.pressed==10{14.}else if s.hover==10{12.}else{10.};self.fill(Rect::new(18.+p-size/2.,124.-size/2.,size,size),size/2.,s.component_color);
-        self.text(&time(s.elapsed),Rect::new(18.,elapsed_y,70.,status_h),10.,400,secondary)?;let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};self.text_family(&total,Rect::new(w-90.,elapsed_y,72.,status_h),10.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+        let w=s.layout.card.w;
+        let secondary=0xb8000000|(if s.cover_background&&self.cover.is_some(){s.component_color}else{s.text_color}&0xffffff);
+        // A shared 20 px inset anchors artwork, status, timeline and controls.
+        self.cover_with_opacity(20.,20.,66.,s.cover_opacity as f32,s.demo)?;
+        let title_width=w-152.;
+        self.text(s.title,Rect::new(102.,18.,title_width,24.),16.,600,s.text_color)?;
+        self.text(s.artist,Rect::new(102.,44.,w-148.,19.),11.5,400,secondary)?;
+        let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=4.*(1.-lyric_t).powi(3);
+        self.text_family(s.lyric,Rect::new(102.,69.+lyric_y,w-122.,22.),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(s.text_color&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(22.))?;
+        self.text(s.secondary,Rect::new(102.,94.,w-122.,18.),10.5,400,secondary)?;
+        let breath=if s.playing&&s.animate{0.68+0.32*(s.time_ms/2600.*std::f64::consts::TAU).sin()}else{1.};
+        let dot=4.+if s.playing&&s.animate{0.8*breath}else{0.};
+        self.fill(Rect::new(23.-dot/2.,101.-dot/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(s.progress_color&0xffffff));
+        self.text(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},Rect::new(31.,93.,62.,18.),9.,400,secondary)?;
+        let track=Rect::new(20.,120.,w-40.,3.);let progress=track.w*s.progress.clamp(0.,1.);
+        self.fill(track,1.5,if s.cover_background&&self.cover.is_some(){0xff000000|crate::cover_color::mix(self.cover_tint,s.component_color,0.18)}else{0xff343b45});
+        self.fill(Rect::new(track.x,track.y,progress,track.h),1.5,s.component_color);
+        let size=if s.pressed==10{13.}else if s.hover==10{11.}else{7.};
+        self.fill(Rect::new(track.x+progress-size/2.,track.y+track.h/2.-size/2.,size,size),size/2.,s.component_color);
+        self.text(&time(s.elapsed),Rect::new(20.,129.,70.,16.),9.,400,secondary)?;
+        let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};
+        self.text_family(&total,Rect::new(w-90.,129.,70.,16.),9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
         for (id,r) in crate::layout::buttons(w,s.layout_scale){self.button(id,r.x,r.y,r.w,s);}
         Ok(())
     }
@@ -247,11 +283,18 @@ impl Renderer{
         self.dc.PopLayer();self.dc.SetTransform(&identity());Ok(())
     }
     pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{
+        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if themed.cover_background&&self.cover.is_some(){let accent=0xff000000|crate::cover_color::accent(self.cover_tint);themed.component_color=accent;themed.progress_color=accent;}let s=&themed;
         let (base_shape,base_radius)=s.layout.shape(s.frame.card_reveal,s.radius);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else{1.};
-        if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());self.compact_content(s)?;self.dc.EndDraw(None,None)?;}
-        if s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha>0.001 {self.dc.SetTarget(&self.expanded);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&matrix(1.,0.,s.frame.content_offset_y));self.expanded_content(s)?;self.dc.EndDraw(None,None)?;}
+        if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
+            if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,0.));self.compact_view(&neighbor)?;}
+            if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width+s.swipe_offset,0.));self.compact_view(&old)?;}
+            self.dc.SetTransform(&matrix(1.,s.switch_offset+s.swipe_offset,0.));self.compact_view(s)?;self.dc.EndDraw(None,None)?;}
+        if s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha>0.001 {self.dc.SetTarget(&self.expanded);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.card.w;
+            if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,s.frame.content_offset_y));self.expanded_view(&neighbor)?;}
+            if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width,s.frame.content_offset_y));self.expanded_view(&old)?;}
+            self.dc.SetTransform(&matrix(1.,s.switch_offset+s.swipe_offset,s.frame.content_offset_y));self.expanded_view(s)?;self.dc.EndDraw(None,None)?;}
         if self.shadow_shape!=Some((shape,radius)){self.dc.SetTarget(&self.shadow);self.dc.BeginDraw();self.dc.SetTransform(&identity());self.dc.Clear(Some(&color(0)));self.fill(shape,radius,0x01000000);self.brush.SetColor(&color(0xff000000));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);self.dc.EndDraw(None,None)?;self.shadow_shape=Some((shape,radius));}
         self.dc.SetTarget(&self.screen);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());
         // One opacity layer for pause/show fades. Geometry remains fixed.
@@ -281,7 +324,8 @@ impl Renderer{
         let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;
         if alpha>0.001{self.draw_layer(&self.expanded,if s.resizing{s.frame.card_blur}else{0.},alpha as f32,matrix(content_scale,tx,ty),(shape,radius))?;}
         let alpha=(1.-blend(p,0.06,0.46))*music_alpha;
-        if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,identity(),(s.layout.capsule,20.))?;}
+        if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,identity(),(s.layout.capsule,s.layout.capsule.h/2.))?;}
+        if s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none(){self.satellite(s)?;}
         if let Some(notice)=s.notification{self.clip(shape,radius,s.notification_mix as f32)?;self.notification_content(notice,shape)?;self.dc.PopLayer();}
         self.dc.PopLayer();self.dc.EndDraw(None,None)?;
         if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;}Ok(())
@@ -314,7 +358,7 @@ impl Renderer{
     }
     unsafe fn notification_content(&mut self,n:&crate::notifications::Notice,r:Rect)->Result<()>{
         let x=r.x;let y=r.y;let icon=Rect::new(x+18.,y+(r.h-40.)/2.,40.,40.);self.clip(icon,10.,1.)?;
-        if let Some(bitmap)=&self.notification_icon{self.dc.DrawBitmap(bitmap,Some(&rect(icon)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
+        if n.app_id.starts_with("LyricIsland.Device"){self.device_icon(icon,n.app_id.ends_with("Phone"))?;}else if let Some(bitmap)=&self.notification_icon{self.dc.DrawBitmap(bitmap,Some(&rect(icon)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
         else{let initial=n.app_name.chars().next().unwrap_or('•').to_string();self.fill(icon,10.,0xff3188ee);self.text(&initial,Rect::new(icon.x+10.,icon.y+4.,24.,32.),22.,600,0xffffffff)?;}
         self.dc.PopLayer();
         self.notification_text(&n.app_name,Rect::new(x+76.,y+10.,r.w-160.,17.),11.5,500,0xffb6bdc8)?;
@@ -336,3 +380,5 @@ fn time(s:f64)->String{let s=s.max(0.)as u64;format!("{:02}:{:02}",s/60,s%60)}
 
 
 
+
+include!("tool_renderer.rs");

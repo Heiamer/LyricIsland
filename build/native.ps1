@@ -42,6 +42,7 @@ $env:AR = Join-Path $ToolchainRoot 'lib/rustlib/x86_64-pc-windows-gnu/bin/llvm-a
 $LinkerPath = Join-Path $ToolchainRoot 'lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe'
 # Import libraries the GNU sysroot lacks: shlwapi (webbrowser) and ktmw32 (gpui's transitive deps).
 $NativeLibraries = @((Join-Path $ProjectRoot 'build/shlwapi'), (Join-Path $ProjectRoot 'build/ktmw32'))
+if ($env:LYRICISLAND_NATIVE_LIB_ROOT) { $NativeLibraries = @((Join-Path $env:LYRICISLAND_NATIVE_LIB_ROOT 'shlwapi'), (Join-Path $env:LYRICISLAND_NATIVE_LIB_ROOT 'ktmw32')) }
 $Encoded = @('-C', 'target-feature=+crt-static', '-C', "dlltool=$DllTool", '-C', "linker=$LinkerPath", '-C', 'linker-flavor=ld.lld')
 foreach ($library in $NativeLibraries) { $Encoded += @('-L', "native=$library") }
 $env:CARGO_ENCODED_RUSTFLAGS = $Encoded -join [char]31

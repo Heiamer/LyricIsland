@@ -11,6 +11,9 @@ using System.Threading;
 // The native build extracts Rust executables and fonts; this bootstrap exits
 // after starting them.
 // This directory owns extraction, package verification and previous-version data migration.
+[assembly: AssemblyTitle("DotIsle · 点屿")]
+[assembly: AssemblyProduct("DotIsle")]
+[assembly: AssemblyDescription("点屿 · Windows 桌面灵动岛")]
 internal static class Program
 {
     private const string Gui = "Direct2D";
@@ -66,7 +69,7 @@ internal static class Program
                 finally { gate.ReleaseMutex(); }
             }
         }
-        catch (Exception ex) { MessageBox(IntPtr.Zero, "无法启动歌词灵动岛：" + ex.Message, "Lyric Island", 0x10); return 1; }
+        catch (Exception ex) { MessageBox(IntPtr.Zero, "无法启动点屿：" + ex.Message, "DotIsle", 0x10); return 1; }
     }
     private static void MigratePreviousData(string root)
     {

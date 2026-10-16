@@ -1,4 +1,4 @@
-//! Lyric Island settings — GPUI frontend.
+//! DotIsle settings — GPUI frontend.
 //!
 //! Replaces the Slint settings window. The native capsule still owns the pipe server, so this
 //! binary is a pure client and keeps the existing contract (see `protocol.rs`).
@@ -39,15 +39,12 @@ use serde_json::{json, Value};
 use theme as t;
 
 /// Pages in sidebar order. `--smoke-ui` walks all of them.
-const PAGES: [(&str, &str); 7] = [
-    ("显示与外观", "让歌词与音乐保持在眼前。调整会自动保存。"),
-    ("动画与反馈", "自然响应，连续运动。"),
-    ("歌词与同步", "让每一句歌词跟上当前播放。"),
-    ("播放器白名单", "选择哪些播放器可以唤出灵动岛。"),
-    ("关于与许可", "版本与开源许可。"),
-    ("更新日志", "从歌词岛独立版开始，按版本倒序查看历次变化。"),
-    ("通知提醒", "重要消息，安静出现。"),
+const PAGES: [(&str, &str); 11] = [
+ ("常规","启动与窗口行为。"),("灵动岛","尺寸、展开与活动切换。"),("歌词与同步","显示每一句歌词和翻译。"),("外观与动画","配色、主题与连续运动。"),("播放器与来源","选择播放器和在线信息来源。"),("通知与设备","消息与设备接入提醒。"),("音效","分别调整通知、提醒与设备音量。"),("待办清单","把重要的小事放在眼前。"),("计时器","专注、倒计时，或记录经过的时间。"),("关于与更新","版本、在线更新与许可。"),("更新日志","查看历次版本变化。"),
 ];
+
+/// Index of the todo page, so the native side can ask for it by name.
+const PAGE_TODOS: usize = 7;
 
 struct Shared {
     state: Value,
@@ -110,6 +107,18 @@ struct SettingsApp {
     calibrate: Entity<TextField>,
     custom_sources: Entity<TextField>,
     notification_apps: Entity<TextField>,
+    /// Todo form fields. Created once and reused, exactly like the fields above: rebuilding them
+    /// inside `render` would drop focus and the half-typed text on every frame.
+    todo_title: Entity<TextField>,
+    todo_content: Entity<TextField>,
+    todo_date: Entity<TextField>,
+    todo_time: Entity<TextField>,
+    /// `Some(id)` while an existing todo is being edited, `None` when composing a new one.
+    todo_editing: Option<String>,
+    todo_form_open: bool,
+    todo_daily: bool,
+    todo_settings:bool,todo_filter:usize,todo_completed_open:bool,todo_color:String,
+    timer_mode:String,timer_new:bool,timer_adjust_open:bool,timer_name:Entity<TextField>,timer_duration:Entity<TextField>,timer_focus:Entity<TextField>,timer_rest:Entity<TextField>,timer_rounds:Entity<TextField>,
 }
 
 impl SettingsApp {
@@ -156,7 +165,34 @@ impl SettingsApp {
                 )
             })
         };
+        // Enter in any todo field saves the form. The callback reaches back into the settings view
+        // through a weak handle, which is why the fields can be built before `Self` exists.
+        let weak = cx.entity().downgrade();
+        let todo_field = |id: &'static str, placeholder: &'static str, cx: &mut Context<Self>| {
+            let weak = weak.clone();
+            cx.new(|cx| {
+                TextField::new(
+                    id,
+                    placeholder,
+                    "",
+                    Rc::new(move |_value: &str, app: &mut App| {
+                        let _ = weak.update(app, |view, cx| view.submit_todo(cx));
+                    }),
+                    cx,
+                )
+            })
+        };
+        let todo_title = todo_field("field-todo-title", "待办题目", cx);
+        let todo_content = todo_field("field-todo-content", "内容，可留空", cx);
+        let todo_date = todo_field("field-todo-date", "YYYY-MM-DD", cx);
+        let todo_time = todo_field("field-todo-time", "HH:MM（24 小时制）", cx);
+        let timer_name=cx.new(|cx|TextField::new("timer-name","可留空","",Rc::new(|_,_|{}),cx));
+        let timer_duration=cx.new(|cx|TextField::new("timer-duration","秒数","300",Rc::new(|_,_|{}),cx));
+        let timer_focus=cx.new(|cx|TextField::new("timer-focus","秒数","1500",Rc::new(|_,_|{}),cx));
+        let timer_rest=cx.new(|cx|TextField::new("timer-rest","秒数","300",Rc::new(|_,_|{}),cx));
+        let timer_rounds=cx.new(|cx|TextField::new("timer-rounds","轮数","4",Rc::new(|_,_|{}),cx));
         Self {
+            timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"pomodoro".into(),timer_new:false,timer_adjust_open:false,todo_settings:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
             shared,
             page: smoke_page(),
             picker,
@@ -170,6 +206,13 @@ impl SettingsApp {
             calibrate,
             custom_sources,
             notification_apps,
+            todo_title,
+            todo_content,
+            todo_date,
+            todo_time,
+            todo_editing: None,
+            todo_form_open: false,
+            todo_daily: false,
         }
     }
 }
@@ -177,6 +220,64 @@ impl SettingsApp {
 impl SettingsApp {
     fn state(&self) -> Value {
         self.shared.lock().map(|s| s.state.clone()).unwrap_or_else(|_| json!({}))
+    }
+
+    /// Read the form entities and submit them. Validation lives on the native side, so an invalid
+    /// date or time comes back as a message rather than being silently dropped here.
+    fn submit_todo(&mut self, cx: &mut Context<Self>) {
+        let payload = json!({
+            "id": self.todo_editing.clone().unwrap_or_default(),
+            "title": self.todo_title.read(cx).text(),
+            "content": self.todo_content.read(cx).text(),
+            "date": self.todo_date.read(cx).text(),
+            "time": self.todo_time.read(cx).text(),
+            "daily": self.todo_daily,"color":self.todo_color,
+        });
+        let weak=cx.entity().downgrade();let job=cx.background_executor().spawn(async move{pipe::command("todoSave",payload)});
+        cx.spawn(async move|_,cx|{let outcome=job.await;let _=weak.update(cx,|view,cx|{match outcome{Ok((reply,state))=>{let success=reply["success"]==true;if let Ok(mut shared)=view.shared.lock(){shared.state=state;shared.message=if success{String::new()}else{reply["message"].as_str().unwrap_or("保存失败").into()};}if success{view.todo_form_open=false;view.todo_editing=None;}},Err(e)=>{if let Ok(mut shared)=view.shared.lock(){shared.message=e;}}}cx.notify();});}).detach();
+    }
+
+    /// Open the form, either empty (defaulting to today) or loaded from an existing todo.
+    fn open_todo_form(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        let state = self.state();
+        let existing = id.as_ref().and_then(|id| {
+            state["todos"]
+                .as_array()?
+                .iter()
+                .find(|todo| todo["id"].as_str() == Some(id.as_str()))
+                .cloned()
+        });
+        let (title, content, date, time, daily) = match &existing {
+            Some(todo) => (
+                todo["title"].as_str().unwrap_or_default().to_owned(),
+                todo["content"].as_str().unwrap_or_default().to_owned(),
+                todo["date"].as_str().unwrap_or_default().to_owned(),
+                todo["time"].as_str().unwrap_or_default().to_owned(),
+                todo["daily"].as_bool().unwrap_or(false),
+            ),
+            None => (
+                String::new(),
+                String::new(),
+                state["today"].as_str().unwrap_or_default().to_owned(),
+                state["now"].as_str().unwrap_or_default().to_owned(),
+                false,
+            ),
+        };
+        self.todo_color=id.as_ref().and_then(|id|state["todos"].as_array().and_then(|a|a.iter().find(|t|t["id"].as_str()==Some(id)))).and_then(|t|t["color"].as_str()).unwrap_or(setting_str(&state,"TodoDefaultColor","#F3D79B")).to_owned();
+        self.todo_editing = id;
+        self.todo_form_open = true;
+        self.todo_daily = daily;
+        self.todo_title.update(cx, |field, cx| field.set_text(&title, cx));
+        self.todo_content.update(cx, |field, cx| field.set_text(&content, cx));
+        self.todo_date.update(cx, |field, cx| field.set_text(&date, cx));
+        self.todo_time.update(cx, |field, cx| field.set_text(&time, cx));
+        cx.notify();
+    }
+
+    fn close_todo_form(&mut self, cx: &mut Context<Self>) {
+        self.todo_form_open = false;
+        self.todo_editing = None;
+        cx.notify();
     }
 }
 
@@ -230,8 +331,9 @@ impl Render for SettingsApp {
             .unwrap_or_default();
         let page = self.page;
 
-        let mut sidebar = div().flex().flex_col().w(px(196.0)).h_full().p_3().gap_1().bg(t::sidebar());
+        let mut sidebar = div().flex().flex_col().w(px(196.0)).flex_shrink_0().h_full().p_3().gap_1().bg(t::sidebar());
         for (index, (label, _)) in PAGES.iter().enumerate() {
+            if index==0||index==5||index==9{sidebar=sidebar.child(div().px_3().pt_3().pb_1().text_size(px(10.)).text_color(t::text_faint()).child(if index==0{"个性化"}else if index==5{"提醒与工具"}else{"帮助"}));}
             sidebar = sidebar.child(nav_item(index, label, index == page, cx));
         }
         sidebar = sidebar.child(div().flex_1()).child(
@@ -240,7 +342,7 @@ impl Render for SettingsApp {
 
         // The scroll container's child must be content-sized: giving it `h_full` pinned it to the
         // viewport, so anything past the fold was clipped instead of becoming scrollable.
-        let mut column = div().flex().flex_col().px_7().py_6()
+        let mut column = div().flex().flex_col().w_full().min_w_0().px_7().py_6()
             .child(div().text_size(px(26.0)).text_color(t::text()).child(title.to_owned()))
             .child(div().mt_1().text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned()));
         column = column.child(div().mt_6().flex().flex_col().gap_3().children(page_rows(page, &state, self, cx)));
@@ -250,19 +352,37 @@ impl Render for SettingsApp {
         let footer = div().mt_6().pt_3().text_size(px(11.0)).text_color(t::text_faint())
             .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
 
-        div().flex().size_full().bg(t::base()).text_color(t::text()).font_family(t::FONT)
+        div().flex().flex_col().size_full().bg(t::base()).text_color(t::text()).font_family(t::FONT)
+            .child(settings_titlebar(window))
+            .child(div().flex().flex_1().min_h_0().min_w_0()
             .child(sidebar)
-            .child(div().w(px(1.0)).h_full().bg(t::hairline()))
+            .child(div().w(px(1.0)).flex_shrink_0().h_full().bg(t::hairline()))
             .child(
-                div().flex().flex_col().flex_1().h_full()
-                    .child(div().id("content").flex_1().overflow_y_scroll().track_scroll(&self.scroll).child(column))
+                div().flex().flex_col().flex_1().min_w_0().h_full()
+                    .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&self.scroll).child(column))
                     .child(hairline())
                     .child(div().px_7().py_3().child(footer)),
-            )
+            ))
     }
 }
 
 /// Sidebar row: a filled pill when selected, a wash under the pointer.
+fn brand_mark()->AnyElement{canvas(|_,_,_|{},|bounds,_,window,_|{let x=bounds.origin.x;let y=bounds.origin.y;let mut shape=|left:f32,top:f32,w:f32,h:f32,r:f32,color:gpui::Rgba|window.paint_quad(quad(Bounds::new(point(x+px(left),y+px(top)),size(px(w),px(h))),px(r),color,px(0.),transparent_black(),BorderStyle::Solid));shape(1.,1.,24.,24.,6.,rgb(0xDDF3E9));shape(4.,9.,18.,8.5,4.25,rgb(0x128F74));shape(6.2,11.4,3.7,3.7,1.85,rgb(0xF5FFFB));shape(12.,12.,6.4,0.9,0.45,rgb(0xE9FFF6));shape(12.,14.,4.1,0.8,0.4,rgb(0x92D8BE));shape(18.5,4.8,3.5,3.5,1.75,rgb(0x14967A));shape(19.7,6.,1.1,1.1,0.55,rgb(0xF5FFFB));}).w(px(26.)).h(px(26.)).into_any_element()}
+fn settings_titlebar(window:&Window)->AnyElement {
+    let mut controls=div().flex().items_center().h_full().pr_2().gap_1();
+    for (id,area,glyph) in [("window-minimize",WindowControlArea::Min,"\u{e921}"),("window-maximize",WindowControlArea::Max,if window.is_maximized(){"\u{e923}"}else{"\u{e922}"}),("window-close",WindowControlArea::Close,"\u{e8bb}")] {
+        let close=area==WindowControlArea::Close;
+        controls=controls.child(div().id(id).window_control_area(area).w(px(38.)).h(px(30.)).rounded(px(9.)).flex().items_center().justify_center().font_family("Segoe Fluent Icons").text_size(px(10.)).text_color(t::text_dim()).hover(move|s|if close{s.bg(t::danger()).text_color(rgb(0xffffff))}else{s.bg(t::hover()).text_color(t::text())}).child(glyph));
+    }
+    div().flex().w_full().h(px(44.)).flex_shrink_0()
+        .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).w(px(196.)).flex_shrink_0().h_full().px_5().flex().items_center().gap_2().bg(t::sidebar())
+            .child(brand_mark())
+            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child("点屿")))
+        .child(div().w(px(1.)).h_full().bg(t::hairline()))
+        .child(div().id("window-title-drag").window_control_area(WindowControlArea::Drag).flex_1().h_full().px_7().flex().items_center().text_size(px(11.)).text_color(t::text_faint()).child("设置"))
+        .child(controls).into_any_element()
+}
+
 fn nav_item(index: usize, label: &str, selected: bool, cx: &mut Context<SettingsApp>) -> AnyElement {
     div()
         .id(("nav", index))
@@ -282,7 +402,7 @@ fn nav_item(index: usize, label: &str, selected: bool, cx: &mut Context<Settings
         .into_any_element()
 }
 
-fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+fn legacy_page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
     match page {
         0 => {
             let mut rows = vec![
@@ -361,6 +481,9 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                     cx,
                 ),
                 toggle_row("Translation", "显示翻译", "展开时优先显示翻译，没有翻译时显示下一句。", flag(state, "Translation", true), view),
+                toggle_row("CompactTranslation", "收起时显示翻译", "默认开启。收起状态下原文在上、翻译在下；没有翻译时不会留出空行。", flag(state, "CompactTranslation", true), view),
+                toggle_row("ChineseTwoLine", "中文双行模式", "默认关闭。没有翻译时，在当前句下方以更小的字显示下一句。", flag(state, "ChineseTwoLine", false), view),
+                toggle_row("AutoCompactWidth", "歌词长度自适应宽度", "默认关闭。收起状态按真实字形宽度收缩胶囊，仍保留封面与播放活动条。", flag(state, "AutoCompactWidth", false), view),
                 calibrate_row(position, view, cx),
             ]
         }
@@ -444,7 +567,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
             action_row("checkUpdate", "在线更新", "检查最新正式版本。", "检查更新", view, cx),
             action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
             action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("Lyric Island · 歌词岛 1.2.2", "原生胶囊 · GPUI 设置 · Rust 后台",
+            info_row("DotIsle · 点屿 1.3", "原生胶囊 · GPUI 设置 · Rust 后台",
                      "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
             info_row("界面组件", "GPUI 0.2.2",
                      "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
@@ -452,7 +575,7 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
                      "TaskbarLyrics、AF-Media-Bar、NetEase-Cloud-Music-DiscordRPC 的移植来源继续保留。\nLyricify-Lyrics-Helper 的协议移植按 Apache-2.0 保留归属。\n详情见发行目录中的 LICENSE、THIRD-PARTY-NOTICES.md 与 licenses/。"),
         ],
         5 => history::rows(),
-        _ => {
+        6 => {
             let notifications = &state["notificationState"];
             let mut rows = vec![
                 toggle_row("NotificationsEnabled", "通知提醒", "接收当前用户的新通知，无需额外安装通知组件。", flag(state,"NotificationsEnabled",false),view),
@@ -497,8 +620,11 @@ fn page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<Se
             }
             rows.push(info_row("通知接收状态",notifications["access"].as_str().unwrap_or("未开启"),notifications["message"].as_str().unwrap_or("请开启通知提醒。")));
             rows.push(action_row("notificationPreview","预览通知横幅","显示本地示例，预览通知外观。","预览",view,cx));
+
             rows
         }
+        7 => new_todo_rows(state, view, cx),
+        _ => Vec::new(),
     }
 }
 
@@ -557,6 +683,374 @@ fn check_row(id: SharedString, title: &str, detail: &str, checked: bool, cx: &mu
             cx.notify();
         }))
         .into_any_element()
+}
+
+/// A row whose button runs a local closure instead of a pipe command.
+fn button_row(
+    id: &'static str,
+    title: &str,
+    detail: &str,
+    label: &str,
+    cx: &mut Context<SettingsApp>,
+    action: impl Fn(&mut SettingsApp, &mut Context<SettingsApp>) + 'static,
+) -> AnyElement {
+    card(SharedString::from(id), title, detail)
+        .child(
+            div()
+                .id(SharedString::from(format!("run-{id}")))
+                .px_3()
+                .py_2()
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .bg(t::surface_hi())
+                .border_1()
+                .border_color(t::hairline())
+                .text_size(px(12.0))
+                .text_color(t::text())
+                .hover(|style| style.bg(t::accent()).text_color(t::on_accent()))
+                .active(|style| style.opacity(0.85))
+                .child(label.to_owned())
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    action(view, cx);
+                    cx.notify();
+                })),
+        )
+        .into_any_element()
+}
+
+/// A small secondary button used inside todo rows and the todo form.
+fn small_button(
+    id: SharedString,
+    label: &str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded(px(7.0))
+        .cursor_pointer()
+        .bg(t::field())
+        .border_1()
+        .border_color(t::hairline())
+        .text_size(px(11.5))
+        .text_color(t::text_dim())
+        .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
+        .active(|style| style.opacity(0.85))
+        .child(label.to_owned())
+        .on_click(on_click)
+}
+
+/// A labelled text field inside the todo form.
+fn field_line(label: &str, width: f32, field: Entity<TextField>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w(px(width))
+        .child(div().text_size(px(11.0)).text_color(t::text_faint()).child(label.to_owned()))
+        .child(field)
+}
+
+/// A labelled segmented control, used for the chime choice.
+fn segmented_row(
+    id_prefix: &'static str,
+    key: &'static str,
+    title: &str,
+    detail: &str,
+    choices: &'static [(&'static str, &'static str)],
+    current: &str,
+    cx: &mut Context<SettingsApp>,
+) -> AnyElement {
+    let mut segments = div().flex().flex_row().gap_1().p_1().rounded(px(9.0)).bg(t::field());
+    for (value, label) in choices {
+        let selected = current == *value;
+        segments = segments.child(
+            div()
+                .id(SharedString::from(format!("{id_prefix}-{value}")))
+                .px_3()
+                .py_1()
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .bg(if selected { t::accent() } else { t::field() })
+                .text_size(px(12.0))
+                .text_color(if selected { t::on_accent() } else { t::text_dim() })
+                .hover(|style| style.bg(if selected { t::accent() } else { t::surface_hi() }))
+                .active(|style| style.opacity(0.85))
+                .child((*label).to_owned())
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    let shared = Rc::clone(&view.shared);
+                    let _ = send(&shared, key, value, cx);
+                    cx.notify();
+                })),
+        );
+    }
+    card(SharedString::from(format!("row-{key}")), title, detail)
+        .child(segments)
+        .into_any_element()
+}
+
+/// Audition button. Plays through the same worker the banner uses, but never
+/// reads or fabricates a real notification.
+fn preview_button(prefix: &'static str, cx: &mut Context<SettingsApp>) -> AnyElement {
+    small_button(
+        SharedString::from(format!("preview-{prefix}")),
+        "试听",
+        cx.listener(move |view, _, _, cx| {
+            audition(Rc::clone(&view.shared), prefix, cx);
+            cx.notify();
+        }),
+    )
+    .into_any_element()
+}
+
+/// Play one chime through the pipe. Kept as a free function because the async
+/// continuation needs `App`, not a view context.
+fn audition(shared: Rc<Mutex<Shared>>, prefix: &'static str, cx: &mut App) {
+    let job = cx.background_executor().spawn(async move {if prefix=="Device"{pipe::request("deviceSoundPreview",Value::Null)}else{pipe::sound_preview(prefix=="Todo")}});
+    cx.spawn(async move |cx| {
+        let outcome = job.await;
+        if let Ok(mut shared) = shared.lock() {
+            shared.message = match outcome {
+                Ok(reply) if reply["success"].as_bool() == Some(true) => String::new(),
+                Ok(reply) => reply["message"].as_str().unwrap_or("试听失败").to_owned(),
+                Err(error) => error,
+            };
+        }
+        let _ = cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
+}
+
+/// Ask for a local PCM WAV and hand the chosen path to the native side, which
+/// validates it before it becomes a setting.
+fn pick_sound_file(shared: Rc<Mutex<Shared>>, path_key: &'static str, cx: &mut App) {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some(SharedString::from("选择 WAV 音效")),
+    });
+    cx.spawn(async move |cx| {
+        let picked = match receiver.await {
+            Ok(Ok(Some(paths))) => paths.into_iter().next(),
+            _ => None,
+        };
+        let Some(path) = picked else {
+            return;
+        };
+        let text = path.to_string_lossy().to_string();
+        let _ = cx.update(|cx| {
+            let _ = send(&shared, path_key, &text, cx);
+        });
+    })
+    .detach();
+}
+
+/// The four sound settings shared by notifications and reminders: switch, chime,
+/// volume and an optional local PCM WAV. Keys are literals so the wire contract
+/// stays visible at the call site.
+fn sound_rows(
+    prefix: &'static str,
+    title: &str,
+    detail: &str,
+    state: &Value,
+    view: &SettingsApp,
+    cx: &mut Context<SettingsApp>,
+) -> Vec<AnyElement> {
+    let todo=prefix=="Todo";
+    let (enabled_key,kind_key,volume_key,path_key)=match prefix{"Todo"=>("TodoSoundEnabled","TodoSound","TodoVolume","TodoSoundPath"),"Device"=>("DeviceSoundEnabled","DeviceSound","DeviceVolume","DeviceSoundPath"),_=>("NotificationSoundEnabled","NotificationSound","NotificationVolume","NotificationSoundPath")};
+    let default_kind = if prefix=="Device"{"Connect"}else if todo { "Bell" } else { "Soft" };
+    let default_volume = if todo { 45.0 } else { 35.0 };
+    let current = setting_str(state, kind_key, default_kind).to_owned();
+    let mut rows = vec![
+        toggle_row(enabled_key, title, detail, flag(state, enabled_key, true), view),
+        segmented_row(
+            kind_key,
+            kind_key,
+            "音色",
+            "四段原创短音，可选择内置音色或自己的声音文件。",
+            &[("Soft", "轻柔"), ("Glass", "清脆"), ("Bell", "铃音"), ("Connect","连接")],
+            &current,
+            cx,
+        ),
+        slider_row(
+            volume_key,
+            "音量",
+            "0 为静音。只影响点屿自己播放的音效，不改变系统音量。",
+            0.0,
+            100.0,
+            "%",
+            slider_value(state, volume_key, view, default_volume),
+            view,
+            cx,
+        ),
+        sound_path_row(path_key, state, cx),
+    ];
+    rows.push(
+        card(SharedString::from(format!("row-preview-{prefix}")), "试听音效", "播放当前音色与音量，不会产生或读取任何通知。")
+            .child(preview_button(prefix, cx))
+            .into_any_element(),
+    );
+    rows
+}
+
+/// Pick or clear a custom PCM WAV for one sound slot.
+fn sound_path_row(
+    path_key: &'static str,
+    state: &Value,
+    cx: &mut Context<SettingsApp>,
+) -> AnyElement {
+    let current = setting_str(state, path_key, "");
+    let label = if current.is_empty() {
+        "使用内置音色".to_owned()
+    } else {
+        Path::new(current).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| current.to_owned())
+    };
+    let clear = !current.is_empty();
+    card(SharedString::from(format!("row-{path_key}")), "自定义音效", "选择本机的 16 位 PCM WAV（8–48 kHz、10 秒以内、不超过 8 MB）。")
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().text_size(px(11.5)).text_color(t::text_dim()).child(label))
+                .child(small_button(
+                    SharedString::from(format!("pick-{path_key}")),
+                    "选择文件",
+                    cx.listener(move |view, _, _, cx| {
+                        pick_sound_file(Rc::clone(&view.shared), path_key, cx);
+                        cx.notify();
+                    }),
+                ))
+                .child(small_button(
+                    SharedString::from(format!("clear-{path_key}")),
+                    "清除",
+                    cx.listener(move |view, _, _, cx| {
+                        if !clear {
+                            return;
+                        }
+                        let shared = Rc::clone(&view.shared);
+                        let _ = send(&shared, path_key, "", cx);
+                        cx.notify();
+                    }),
+                )),
+        )
+        .into_any_element()
+}
+
+/// The add / edit form. Fields are entities owned by the settings view, so
+/// switching pages or re-rendering never costs the user their typing.
+fn todo_form(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let editing = view.todo_editing.is_some();
+    let daily = view.todo_daily;
+    div()
+        .id("row-todo-form")
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_3()
+        .rounded(px(12.0))
+        .bg(t::surface())
+        .border_1()
+        .border_color(t::hairline())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(13.5)).text_color(t::text()).child(if editing { "编辑待办" } else { "新建待办" }))
+                .child(div().text_size(px(11.5)).text_color(t::text_dim()).child("题目必填。日期使用本地日期，时间使用 24 小时制。按 Enter 或点保存提交。")),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap_3()
+                .child(field_line("题目", 220.0, view.todo_title.clone()))
+                .child(field_line("内容（可留空）", 300.0, view.todo_content.clone())),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap_3()
+                .child(field_line("日期", 140.0, view.todo_date.clone()))
+                .child(field_line("时间", 120.0, view.todo_time.clone()))
+                .child(
+                    div()
+                        .id("todo-daily")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .bg(t::field())
+                        .border_1()
+                        .border_color(t::hairline())
+                        .hover(|style| style.bg(t::surface_hi()))
+                        .child(switch(daily))
+                        .child(div().text_size(px(12.0)).text_color(t::text_dim()).child("每日重复"))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.todo_daily = !view.todo_daily;
+                            cx.notify();
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(small_button(
+                    "todo-save".into(),
+                    if editing { "保存修改" } else { "保存" },
+                    cx.listener(|view, _, _, cx| view.submit_todo(cx)),
+                ))
+                .child(small_button(
+                    "todo-cancel".into(),
+                    "取消",
+                    cx.listener(|view, _, _, cx| view.close_todo_form(cx)),
+                )),
+        )
+        .child(palette_row(view,cx))
+        .into_any_element()
+}
+
+/// Send a todo / sound command and fold the reply back, mirroring `send`.
+fn send_todo(shared: &Rc<Mutex<Shared>>, command: &'static str, value: Value, cx: &mut App) {
+    let job = cx.background_executor().spawn(async move { pipe::command(command, value) });
+    let shared = Rc::clone(shared);
+    cx.spawn(async move |cx| {
+        let outcome = job.await;
+        if let Ok(mut shared) = shared.lock() {
+            match outcome {
+                Ok((reply, state)) => {
+                    shared.state = state;
+                    shared.connection_error = false;
+                    shared.message_is_connection_error = false;
+                    let success = reply["success"].as_bool() == Some(true);
+                    shared.message = if success { String::new() } else { reply["message"].as_str().unwrap_or("待办操作失败").to_owned() };
+                    shared.notice = reply["message"].as_str().unwrap_or(if success { "已保存" } else { "待办操作失败" }).to_owned();
+                }
+                Err(error) => {
+                    shared.message = error;
+                    shared.connection_error = true;
+                    shared.message_is_connection_error = true;
+                }
+            }
+        }
+        let _ = cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
 }
 
 /// A row that runs a command when pressed, with the row title as the button label.
@@ -825,6 +1319,7 @@ fn default_color(key: &str) -> &'static str {
     match key {
         "ExpandedComponentColor" => "#B1E8D1",
         "LyricProgressColor" => "#A9E6CD",
+        "TodoDefaultColor"=>"#F3D79B",
         _ => "#F4F6F8",
     }
 }
@@ -1309,9 +1804,10 @@ fn main() {
         let window = match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3".into()),appears_transparent:true,..Default::default()}),
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("歌词岛 · 设置 1.2.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("点屿 · 设置 1.3");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1393,12 +1889,25 @@ fn ui_state(state:&Value)->Value {let mut state=state.clone();if let Some(map)=s
 fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<Shared>>) {
     cx.spawn(async move |cx| loop {
         cx.background_executor().timer(Duration::from_millis(750)).await;
-        let reply = cx.background_executor().spawn(async {pipe::request("state", Value::Null)}).await;
+        let reply = cx.background_executor().spawn(async {
+            let value = pipe::request("state", Value::Null)?;
+            // Clicking a reminder banner asks this window to show the todo page. Acknowledge it in
+            // the same round trip so the native side stops repeating the request.
+            if value["pendingPage"].as_str().is_some() {
+                let _ = pipe::page_seen();
+            }
+            Ok::<Value, String>(value)
+        }).await;
+        let mut jump = None;
         let mut changed=true;
         if let Ok(mut state) = shared.lock() {
             let before=(ui_state(&state.state),state.notice.clone(),state.message.clone(),state.connection_error);
             match reply {
                 Ok(value) => {
+                    jump = match value["pendingPage"].as_str() {
+                        Some("todos") => Some(PAGE_TODOS),Some("timers")=>Some(8),
+                        _ => None,
+                    };
                     state.state = value;
                     state.notice = "已连接 · 调整会自动保存".into();
                     if state.message_is_connection_error{state.message.clear();state.message_is_connection_error=false;}
@@ -1407,6 +1916,12 @@ fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<S
                 Err(error) => {state.notice=error;state.connection_error=true;},
             }
             changed=before!=(ui_state(&state.state),state.notice.clone(),state.message.clone(),state.connection_error);
+        }
+        if let Some(target) = jump {
+            if window.update(cx, |view, _, cx| {
+                if view.page != target { view.page = target; }
+                cx.notify();
+            }).is_err() { break; }
         }
         if changed && window.update(cx, |_, _, cx| cx.notify()).is_err() {
             break;
@@ -1420,13 +1935,34 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
     let _ = std::fs::create_dir_all(&directory);
     cx.spawn(async move |cx| {
         for page in 0..PAGES.len() {
-            if window.update(cx, |view, _, cx| { view.page = page; cx.notify(); }).is_err() {
+            // The todo page is walked with its form open, so the walk paints the fields and the
+            // daily-repeat control rather than only the list.
+            if window.update(cx, |view, _, cx| {
+                view.page = page;
+                if page == PAGE_TODOS {
+                    view.open_todo_form(None, cx);
+                }
+                cx.notify();
+            }).is_err() {
                 return;
             }
             cx.background_executor().timer(Duration::from_millis(240)).await;
         }
         let whitelist_regression=window.update(cx,|view,_,cx|{
-            let mut state=view.shared.lock().unwrap().state.clone();state["settings"]["NotificationWhitelistEnabled"]=json!(false);let collapsed=page_rows(6,&state,view,cx).len();state["settings"]["NotificationWhitelistEnabled"]=json!(true);let expanded=page_rows(6,&state,view,cx).len();collapsed==6&&expanded>=collapsed+3
+            let mut state=view.shared.lock().unwrap().state.clone();state["settings"]["NotificationWhitelistEnabled"]=json!(false);let collapsed=page_rows(5,&state,view,cx).len();state["settings"]["NotificationWhitelistEnabled"]=json!(true);let expanded=page_rows(5,&state,view,cx).len();collapsed==9&&expanded>=collapsed+3
+        }).unwrap_or(false);
+        // The todo page must grow by exactly one row when the form opens, and the form must not be
+        // built from a fresh entity each frame.
+        let todo_regression=window.update(cx,|view,_,cx|{
+            view.todo_form_open=false;view.todo_editing=None;
+            let state=view.shared.lock().unwrap().state.clone();
+            let collapsed=page_rows(PAGE_TODOS,&state,view,cx).len();
+            view.open_todo_form(None,cx);
+            let state=view.shared.lock().unwrap().state.clone();
+            let opened=page_rows(PAGE_TODOS,&state,view,cx).len();
+            let filled=view.todo_date.read(cx).text()==state["today"].as_str().unwrap_or_default()&&!view.todo_daily;
+            view.close_todo_form(cx);
+            collapsed>=3&&opened==collapsed+1&&filled
         }).unwrap_or(false);
         let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
             let result=window.update(cx,|view,_,cx|{
@@ -1444,7 +1980,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         }else{None};
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,
+            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression&&todo_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"todoRegression":todo_regression,
             "pages": PAGES.len(),
             "settings": "GPUI",
             "ipc": "Rust",
@@ -1536,8 +2072,10 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
             saved=shared.lock().is_ok_and(|s|s.state["settings"]["CompactWidth"].as_f64()==Some(278.)&&s.message.is_empty());
             if saved{break}
         }
-        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.2.2"});
+        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.3"});
         let _=std::fs::write(directory.join("report.json"),report.to_string());
         std::process::exit(if report["success"]==true{0}else{1});
     }).detach();
 }
+
+include!("tools_ui.rs");

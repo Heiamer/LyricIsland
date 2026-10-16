@@ -92,6 +92,6 @@ internal static class Updater {
                 // Keep recovery data until the next update; never delete a failed rollback backup.
                 File.WriteAllText(Path.Combine(scratch,"success.txt"),version);return 0;
             }
-        }catch(Exception e){if(stopped){try{Start(target,data);}catch{}}MessageBox.Show("在线更新未完成："+e.Message+(scratch==null?"":"\n诊断和备份："+scratch),"歌词岛在线更新",MessageBoxButtons.OK,MessageBoxIcon.Error);return 1;}
+        }catch(Exception e){if(stopped){try{Start(target,data);}catch{}}MessageBox.Show("在线更新未完成："+e.Message+(scratch==null?"":"\n诊断和备份："+scratch),"点屿在线更新",MessageBoxButtons.OK,MessageBoxIcon.Error);return 1;}
     }
 }

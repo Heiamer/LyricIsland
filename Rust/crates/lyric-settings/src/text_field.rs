@@ -149,6 +149,10 @@ impl TextField {
 
     pub fn set_text(&mut self,text:&str,cx:&mut Context<Self>){self.text=text.to_owned();self.selected=self.text.len()..self.text.len();self.marked=None;cx.notify();}
 
+    /// Current contents. A form reads its values back through this rather than keeping a second
+    /// copy in sync, so what is submitted is always exactly what the field shows.
+    pub fn text(&self)->&str{&self.text}
+
     /// Where the caret is: the moving end of the selection.
     fn caret(&self) -> usize {
         if self.reversed {
