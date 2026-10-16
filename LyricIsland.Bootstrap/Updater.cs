@@ -14,6 +14,7 @@ using System.Windows.Forms;
 
 internal static class Updater {
     sealed class Client : WebClient {
+        public Client(){Encoding=System.Text.Encoding.UTF8;Headers[HttpRequestHeader.UserAgent]="DotIsle-Updater";}
         protected override WebRequest GetWebRequest(Uri address) { var r=base.GetWebRequest(address);r.Timeout=120000;if(r is HttpWebRequest)((HttpWebRequest)r).ReadWriteTimeout=120000;return r; }
     }
     static string Hash(string path){using(var s=File.OpenRead(path))using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(s)).Replace("-", "").ToLowerInvariant();}
