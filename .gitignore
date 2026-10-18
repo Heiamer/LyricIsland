@@ -27,3 +27,7 @@ __pycache__/
 
 # Generated bundle metadata
 LyricIsland.Bootstrap/BundleVersion.g.cs
+
+# Rust executable entrypoints are source files, not build output.
+!Rust/crates/*/src/bin/
+!Rust/crates/*/src/bin/*.rs

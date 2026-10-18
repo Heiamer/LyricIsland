@@ -5,7 +5,7 @@
 //! hit the crate's recursion limit).
 use std::sync::OnceLock;
 
-const CHANGELOG: &str = include_str!("../../../../CHANGELOG.md");
+const CHANGELOG: &str = include_str!("../assets/CHANGELOG-SUMMARY.md");
 
 /// One version: display title, date, and the flattened body.
 pub struct Entry {

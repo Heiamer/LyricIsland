@@ -49,14 +49,14 @@ impl Backend{
     fn run(self:Arc<Self>){
         let mut media:Option<Media>=None;let mut retry=Instant::now();let mut netease=NeteaseTimeline::new(self.local.clone());let mut last_cover=String::new();let mut cover_retry=Instant::now();let mut durations=crate::duration::DurationResolver::new(self.data.join("database/track-durations-v1.json"));
         while !self.closed.load(Ordering::Acquire){
-            let (allowed,online)=match self.state.lock(){Ok(s)=>(s.settings["AllowedSources"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_else(||["Netease","QQMusic","Kugou","Kuwo","Spotify","TwilightEcho"].map(str::to_string).to_vec()),s.settings["OnlineSongInfo"].as_bool().unwrap_or(false)),Err(_)=>break};
+            let (filter,online)=match self.state.lock(){Ok(s)=>{let list=|key:&str|s.settings[key].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>());(crate::media::SourceFilter{ignored:list("IgnoredSources").unwrap_or_else(||vec!["Browser".into()]),only:list("AllowedSources").unwrap_or_default()},s.settings["OnlineSongInfo"].as_bool().unwrap_or(false))},Err(_)=>break};
             if media.is_none()&&Instant::now()>=retry{match Media::new(){Ok(m)=>media=Some(m),Err(e)=>{io::log(&self.logs,"SMTC",&e.to_string());retry=Instant::now()+Duration::from_secs(5)}}}
-            let result=media.as_mut().map(|m|m.read(&allowed));
+            let result=media.as_mut().map(|m|m.read(&filter));
             match result{
                 Some(Ok(mut sample))=>{
-                    if allowed.iter().any(|s|crate::media::matches(s,"cloudmusic.exe")){netease.read(online)}
+                    if filter.allows("cloudmusic.exe"){netease.read(online)}
                     if sample.playback.track.is_none(){
-                        if let Some((title,artist))=crate::media::netease_window_metadata(&allowed){
+                        if let Some((title,artist))=crate::media::netease_window_metadata(&filter){
                             sample.playback.track=Some(TrackInfo::new(format!("Netease|{title}|{artist}"),title,artist,"","Netease",Duration::ZERO));sample.playback.source_app_user_model_id="cloudmusic.exe".into();
                         }
                     }

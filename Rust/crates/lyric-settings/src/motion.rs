@@ -61,6 +61,16 @@ pub fn sheet() -> SpringConfig {
     spring(0.82, 0.36)
 }
 
+/// The dimming layer behind a drawer.
+///
+/// A scrim is not an object arriving — it is the room getting darker. Bounce on it would be
+/// meaningless (the alpha is clamped at 1 anyway), and it has to be down *before* the panel
+/// finishes travelling, so the content behind is already dimmed when the panel lands. So:
+/// critically damped, and quicker than [`sheet`].
+pub fn scrim() -> SpringConfig {
+    spring(1.0, 0.22)
+}
+
 /// A spring that drives a 0..1 phase from `on`, preserving whatever the element is already doing.
 pub fn phase(config: SpringConfig, on: bool) -> SpringAnimation<bool> {
     SpringAnimation::new(config).to(on).with_epsilon(0.0015)
@@ -145,8 +155,11 @@ fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
 }
 
 /// Decelerate into place: the curve an entering surface uses. Reads as "arriving", not "stopping".
+///
+/// `cubic-bezier(0.23, 1, 0.32, 1)` — the strong ease-out the skill lists, not the browser's
+/// own `ease-out`, which is too weak to read as intentional.
 pub fn ease_out(progress: f32) -> f32 {
-    bezier(0.22, 1.0, 0.36, 1.0, progress)
+    bezier(0.23, 1.0, 0.32, 1.0, progress)
 }
 
 /// Slow at both ends — for a value that changes in place, such as a colour wash.
@@ -200,21 +213,24 @@ pub fn mix(amount: f32, from: gpui::Rgba, to: gpui::Rgba) -> gpui::Rgba {
 ///
 /// The first row is the page's own furniture — a tab bar or a back link — and keys off
 /// `route_epoch` alone, so switching a filter never makes the tab bar blink. Everything below it
-/// keys off `content_epoch`, which changes with the content it describes. `step_ms` is clamped so a
-/// long page never leaves its last row waiting.
+/// keys off `content_epoch`, which changes with the content it describes.
+///
+/// The whole cascade is budgeted, not just one row: a tab switch re-runs it, tabs are hit dozens
+/// of times a session, and the skill's ceiling for a UI element is 300 ms. 200 ms per row with the
+/// delay capped at four steps lands the last row at 288 ms — still a cascade, no longer a wait.
 pub fn cascade(rows: Vec<AnyElement>, route_epoch: u32, content_epoch: u32, step_ms: u64) -> Vec<AnyElement> {
     let head = SharedString::from(format!("row-head-{route_epoch}"));
     let body = SharedString::from(format!("row-body-{content_epoch}"));
     rows.into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let delay = (index as u64 * step_ms).min(step_ms * 6);
+            let delay = (index as u64 * step_ms).min(step_ms * 4);
             let id = if index == 0 { (head.clone(), 0usize) } else { (body.clone(), index) };
             div()
                 .w_full()
                 .min_w_0()
-                .with_animation(id, enter(260, delay), |element, progress| {
-                    rise(element, progress, 10.0)
+                .with_animation(id, enter(200, delay), |element, progress| {
+                    rise(element, progress, 8.0)
                 })
                 .child(row)
                 .into_any_element()

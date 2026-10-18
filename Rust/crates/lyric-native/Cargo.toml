@@ -10,11 +10,15 @@ path = "src/main.rs"
 
 [dependencies]
 lyric-backend = { path = "../lyric-backend" }
+# The shortcut parser, shared with the settings recorder.
+lyric-core = { path = "../lyric-core" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 roxmltree = "=0.20.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Material Color Utilities port (Celebi quantizer, Score, HCT/TonalPalette) for cover-driven Monet palettes.
+material-colors = { path = "../../vendor/material-colors-0.4.2" }
 windows-core = "0.62"
 windows-numerics = "0.3"
 windows = { version = "0.62", features = [

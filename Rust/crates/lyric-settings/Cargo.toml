@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 lyric-backend = { path = "../lyric-backend" }
+# The shortcut parser lives here so the recorder and RegisterHotKey cannot disagree.
+lyric-core = { path = "../lyric-core" }
 serde_json.workspace = true
 # Only the Windows DirectX backend is needed. Disabling the defaults also drops
 # `windows-manifest`, which would require a resource compiler (rc.exe) that is not installed

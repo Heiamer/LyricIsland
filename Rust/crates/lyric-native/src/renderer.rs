@@ -24,16 +24,16 @@ pub struct Scene<'a>{
     pub lyric:&'a str,pub previous_lyric:&'a str,pub compact_secondary:&'a str,pub previous_compact_secondary:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
     pub title:&'a str,pub artist:&'a str,pub playing:bool,pub highlight:f64,
     pub progress:f64,pub elapsed:f64,pub duration:f64,pub font_size:f64,
-    pub music_layout:crate::layout::MusicLayout,pub music_mix:f64,
+    pub fluid_motion:bool,pub music_layout:crate::layout::MusicLayout,pub music_mix:f64,
     pub text_color:u32,pub component_color:u32,pub progress_color:u32,
     pub hover:i32,pub pressed:i32,pub opacity:f32,
     pub transparent:bool,pub floating:bool,pub favorite_enabled:bool,pub has_track:bool,pub layout_scale:f64,
-    pub activity_scales:[f64;3],pub activity_opacity:f64,pub cover_opacity:f64,
+    pub activity_scales:[f64;3],pub activity_opacity:f64,pub cover_opacity:f64,pub cover_age_ms:f64,
     pub outgoing_opacity:f64,pub outgoing_y:f64,
 }
 pub struct Renderer{
     surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
-    cover_tint:u32,shadow_shape:Option<(Rect,f64)>,
+    cover_palette:crate::cover_color::CoverPalette,shadow_shape:Option<(Rect,f64)>,
     notification_icon:Option<ID2D1Bitmap1>,device_bitmaps:HashMap<String,ID2D1Bitmap1>,
     factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
     _device:ID3D11Device,_composition:IDCompositionDevice,_target:IDCompositionTarget,_visual:IDCompositionVisual,
@@ -41,7 +41,7 @@ pub struct Renderer{
     blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
     write:IDWriteFactory,body_fonts:IDWriteFontCollection,system_fonts:IDWriteFontCollection,fallback:IDWriteFontFallback,body_family:String,japanese_family:String,
     pub body_line_spacing:f64,pub body_baseline:f64,
-    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,measured:HashMap<String,f64>,cover:Option<ID2D1Bitmap1>,pub width:u32,pub height:u32,pub dpi:f32,
+    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,measured:HashMap<String,f64>,cover:Option<ID2D1Bitmap1>,previous_cover:Option<ID2D1Bitmap1>,cover_changed:std::time::Instant,flip_from:f64,pub width:u32,pub height:u32,pub dpi:f32,
 }
 impl Renderer{
     pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{
@@ -99,22 +99,31 @@ impl Renderer{
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
         dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,blur,shadow_fx})
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,blur,shadow_fx})
     }
-    pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
+    pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{self.load_cover(bytes,true)}
+    /// `theme` runs the Monet palette; notification icons skip it so they never recolour the music card.
+    unsafe fn load_cover(&mut self,bytes:Option<&[u8]>,theme:bool)->std::result::Result<(),Box<dyn std::error::Error>>{
         use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
-        self.cover=None;self.cover_tint=0x1b1f25;if let Some(bytes)=bytes{
+        let phase=(self.flip_from+(1.-self.flip_from)*self.cover_changed.elapsed().as_secs_f64()/0.28).clamp(0.,1.);
+        if phase>=0.5||self.previous_cover.is_none(){self.previous_cover=self.cover.clone();self.flip_from=1.-phase;}else{self.flip_from=phase;}
+        self.cover_changed=std::time::Instant::now();
+        self.cover=None;self.cover_palette=Default::default();if let Some(bytes)=bytes{
             let factory:IWICImagingFactory=CoCreateInstance(&CLSID_WICImagingFactory,None,CLSCTX_INPROC_SERVER)?;
             let stream=factory.CreateStream()?;stream.InitializeFromMemory(bytes)?;
             let decoder=factory.CreateDecoderFromStream(&stream,std::ptr::null(),WICDecodeMetadataCacheOnLoad)?;let frame=decoder.GetFrame(0)?;
             let (mut width,mut height)=(0,0);frame.GetSize(&mut width,&mut height)?;
             if width==0||height==0{return Err("封面尺寸无效".into())}
-            let scaled_height=((height as f64/width as f64)*192.).round().clamp(1.,16384.)as u32;
-            let scaler=factory.CreateBitmapScaler()?;scaler.Initialize(&frame,192,scaled_height,WICBitmapInterpolationModeFant)?;
+            let scale=192./width.max(height)as f64;
+            let scaled_width=(width as f64*scale).round().clamp(1.,192.)as u32;
+            let scaled_height=(height as f64*scale).round().clamp(1.,192.)as u32;
+            let scaler=factory.CreateBitmapScaler()?;scaler.Initialize(&frame,scaled_width,scaled_height,WICBitmapInterpolationModeFant)?;
             let converter=factory.CreateFormatConverter()?;converter.Initialize(&scaler,&GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,None,0.,WICBitmapPaletteTypeCustom)?;
-            let mut pixels=vec![0u8;192*scaled_height as usize*4];converter.CopyPixels(std::ptr::null(),192*4,&mut pixels)?;
-            self.cover_tint=crate::cover_color::dominant(&pixels);
+            let mut pixels=vec![0u8;scaled_width as usize*scaled_height as usize*4];converter.CopyPixels(std::ptr::null(),scaled_width*4,&mut pixels)?;
+            if theme{self.cover_palette=crate::cover_color::palette(&pixels);}
             self.cover=Some(self.dc.CreateBitmapFromWicBitmap(&converter,None)?);
+            // Restart the flip clock after decode + palette so their cost never eats the animation's first frames.
+            self.cover_changed=std::time::Instant::now();
         }Ok(())
     }
     unsafe fn fill(&self,r:Rect,radius:f64,c:u32){self.brush.SetColor(&color(c));self.dc.FillRoundedRectangle(&rounded(r,radius),&self.brush);}
@@ -206,6 +215,16 @@ impl Renderer{
         else{self.text_family("♫",r,size*13./24.,400,0xffc5f0dd,"Segoe UI Symbol",true,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
         self.dc.PopLayer();Ok(())
     }
+    unsafe fn flipping_cover(&mut self,r:Rect,s:&Scene<'_>)->Result<()>{
+        let t=if s.animate{(self.flip_from+(1.-self.flip_from)*s.cover_age_ms/280.).clamp(0.,1.)}else{1.};
+        if t>=1.||self.previous_cover.is_none(){return self.cover_with_opacity(r.x,r.y,r.w,s.cover_opacity as f32,s.demo)}
+        let sx=(std::f64::consts::PI*t).cos().abs().max(0.018);let sy=1.-0.06*(std::f64::consts::PI*t).sin();
+        let draw=Rect::new(r.x+r.w*(1.-sx)/2.,r.y+r.h*(1.-sy)/2.,r.w*sx,r.h*sy);
+        let bitmap=if t<0.5{self.previous_cover.clone()}else{self.cover.clone()};
+        self.clip(draw,6.*sx.min(sy),s.cover_opacity as f32)?;self.fill(draw,6.*sx,0xff1b2026);
+        if let Some(bitmap)=bitmap{let size=bitmap.GetSize();let edge=size.width.min(size.height);let source=D2D_RECT_F{left:(size.width-edge)/2.,top:(size.height-edge)/2.,right:(size.width+edge)/2.,bottom:(size.height+edge)/2.};self.dc.DrawBitmap(&bitmap,Some(&rect(draw)),1.,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
+        self.fill(draw,6.*sx,(((1.-sx)*60.)as u32)<<24);self.dc.PopLayer();Ok(())
+    }
     unsafe fn button(&mut self,id:i32,x:f64,y:f64,size:f64,scene:&Scene<'_>){
         let disabled=(id==2&&!scene.floating)||(id==9&&!scene.favorite_enabled)||([3,4,5].contains(&id)&&!scene.has_track);
         let with_alpha=|c:u32|if disabled{0x4d000000|(c&0xffffff)}else{c};
@@ -253,24 +272,36 @@ impl Renderer{
     }
     unsafe fn expanded_content(&mut self,s:&Scene<'_>)->Result<()>{
         let w=s.layout.card.w;
-        let g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale);
+        let mut g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale,s.font_size);
+        let lyric_width=self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w);
+        g.lyric.x+=(g.lyric.w-lyric_width)*0.5*g.centered;g.lyric.w-=(g.lyric.x-20.).max(0.)*g.centered;
+        let sub_width=self.measure_line(s.secondary,10.5)?.min(g.secondary.w);
+        g.secondary.x+=(g.secondary.w-sub_width)*0.5*g.centered;g.secondary.w=sub_width+(g.secondary.w-sub_width)*(1.-g.centered);
         let secondary=0xb8000000|(s.text_color&0xffffff);
         // Artwork, text, status, timeline and controls all share one geometry with hit testing.
-        self.cover_with_opacity(g.cover.x,g.cover.y,g.cover.w,s.cover_opacity as f32,s.demo)?;
+        self.flipping_cover(g.cover,s)?;
         self.text(s.title,Rect::new(g.title.x,g.title.y,g.title.w,g.title.h),16.,600,s.text_color)?;
-        self.text(s.artist,Rect::new(g.artist.x,g.artist.y,g.artist.w,g.artist.h),11.5,400,secondary)?;
+        self.text(s.artist,Rect::new(g.artist.x,g.artist.y,g.artist.w,g.artist.h),10.,400,secondary)?;
         let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=4.*(1.-lyric_t).powi(3);
         let boundary=g.lyric.x+self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w)*s.highlight.clamp(0.,1.);
-        for (clip,ink) in [(Rect::new(g.lyric.x,g.lyric.y,(boundary-g.lyric.x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(g.lyric.x+g.lyric.w-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(g.lyric.x,g.lyric.y+lyric_y,g.lyric.w,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(27.))?;self.dc.PopAxisAlignedClip();}}
+        for (clip,ink) in [(Rect::new(g.lyric.x,g.lyric.y,(boundary-g.lyric.x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(g.lyric.x+g.lyric.w-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(g.lyric.x,g.lyric.y+lyric_y,g.lyric.w,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(g.lyric.h))?;self.dc.PopAxisAlignedClip();}}
 
         self.text(s.secondary,Rect::new(g.secondary.x,g.secondary.y,g.secondary.w,g.secondary.h),10.5,400,secondary)?;
         let breath=if s.playing&&s.animate{0.68+0.32*(s.time_ms/2600.*std::f64::consts::TAU).sin()}else{1.};
         let dot=4.+if s.playing&&s.animate{0.8*breath}else{0.};
-        let cx=g.status_dot.x+g.status_dot.w/2.;let cy=g.status_dot.y+g.status_dot.h/2.;
+        // Use the secondary lyric's actual baseline on the side layout, including language fallback.
+        let secondary_line=10.5*self.body_line_spacing;let split=g.split.clamp(0.,1.);let status_line=secondary_line;
+        let secondary_baseline=g.secondary.y+secondary_line*self.baseline_ratio(&self.language_family(s.secondary));
+        let title_baseline=g.title.y+16.*self.body_line_spacing*self.baseline_ratio(&self.language_family(s.title));
+        let mut status_rect=g.status_text;
+        status_rect.y=secondary_baseline*(1.-split)+title_baseline*split-status_line*self.baseline_ratio(&self.body_family);
+        // The dot rides the status line box instead of the static geometry, so its centre stays
+        // on the words even though the baseline is recomputed per layout and per language.
+        let cx=g.status_dot.x+g.status_dot.w/2.;let cy=status_rect.y+status_line*0.57;
         self.fill(Rect::new(cx-dot/2.,cy-dot/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(s.progress_color&0xffffff));
-        self.text_family(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},g.status_text,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(15.))?;
+        self.text_family(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},status_rect,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(status_line))?;
         let track=g.track;let progress=track.w*s.progress.clamp(0.,1.);
-        self.fill(track,1.5,if s.cover_background&&self.cover.is_some(){0xff000000|crate::cover_color::mix(self.cover_tint,s.component_color,0.18)}else{0xff343b45});
+        self.fill(track,1.5,if s.cover_background&&self.cover.is_some(){0xff000000|crate::cover_color::mix(self.cover_palette.background,s.component_color,0.18)}else{0xff343b45});
         self.fill(Rect::new(track.x,track.y,progress,track.h),1.5,s.component_color);
         let size=if s.pressed==10{13.}else if s.hover==10{11.}else{7.};
         self.fill(Rect::new(track.x+progress-size/2.,track.y+track.h/2.-size/2.,size,size),size/2.,s.component_color);
@@ -287,8 +318,8 @@ impl Renderer{
         self.dc.PopLayer();self.dc.SetTransform(&identity());Ok(())
     }
     pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{
-        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if themed.cover_background&&self.cover.is_some(){let accent=0xff000000|crate::cover_color::accent(self.cover_tint);themed.component_color=accent;if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
-        let (base_shape,base_radius)=s.layout.shape(s.frame.card_reveal,s.radius);let p=s.frame.card_reveal;
+        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if self.cover.is_some(){let accent=0xff000000|self.cover_palette.accent;if themed.cover_background{themed.component_color=accent;}if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
+        let (base_shape,base_radius)=s.layout.morph_shape(s.frame.card_reveal,s.radius,s.fluid_motion);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
         if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
@@ -307,8 +338,8 @@ impl Renderer{
         let shadow_color=[0_f32,0.,0.,0.3];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
         self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
         let alpha=if s.transparent{0xf5000000}else{0xff000000};
-        let top=alpha|crate::cover_color::mix(0x1b1f25,self.cover_tint,if s.cover_background{p*music_alpha}else{0.});
-        let bottom=alpha|crate::cover_color::mix(0x0c0f14,self.cover_tint,if s.cover_background{p*music_alpha*0.65}else{0.});
+        let top=alpha|crate::cover_color::mix(0x1b1f25,self.cover_palette.background,if s.cover_background{p*music_alpha}else{0.});
+        let bottom=alpha|crate::cover_color::mix(0x0c0f14,self.cover_palette.background,if s.cover_background{p*music_alpha*0.65}else{0.});
         if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
             let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(top)},D2D1_GRADIENT_STOP{position:1.,color:color(bottom)}];
             let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
@@ -336,7 +367,7 @@ impl Renderer{
         if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;}Ok(())
     }
     pub unsafe fn set_notification_icon(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
-        let music_cover=self.cover.take();let result=self.set_cover(bytes);self.notification_icon=self.cover.take();self.cover=music_cover;result
+        let music_cover=self.cover.take();let previous=self.previous_cover.take();let changed=self.cover_changed;let flip_from=self.flip_from;let palette=self.cover_palette;let result=self.load_cover(bytes,false);self.notification_icon=self.cover.take();self.cover=music_cover;self.previous_cover=previous;self.cover_changed=changed;self.flip_from=flip_from;self.cover_palette=palette;result
     }
     unsafe fn notification_layout(&mut self,text:&str,r:Rect,size:f64,weight:i32)->Result<IDWriteTextLayout>{
         let key=format!("notice|{text}|{}|{}|{size}|{weight}",r.w,r.h);
@@ -387,3 +418,14 @@ fn time(s:f64)->String{let s=s.max(0.)as u64;format!("{:02}:{:02}",s/60,s%60)}
 
 
 include!("tool_renderer.rs");
+
+impl Renderer{
+ pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,present:bool)->Result<()>{
+  self.dc.SetTarget(&self.screen);self.dc.SetTransform(&identity());self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));
+  let r=Rect::new(16.,12.+offset,240.,44.);self.clip(Rect::new(0.,0.,272.,80.),0.,opacity as f32)?;
+  self.fill(Rect::new(r.x,r.y+2.,r.w,r.h),22.,0x25000000);self.fill(r,22.,0xff1a1d22);
+  self.brush.SetColor(&color(0x28ffffff));self.dc.DrawRoundedRectangle(&rounded(r,22.),&self.brush,0.7,None);
+  self.osd_content(n,r)?;self.dc.PopLayer();self.dc.EndDraw(None,None)?;
+  if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;self._composition.Commit()?;}Ok(())
+ }
+}

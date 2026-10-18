@@ -24,6 +24,8 @@ mod theme;
 mod value;
 mod quick_ui;
 mod rules_ui;
+mod tutorial;
+mod row_edges;
 
 use text_field::TextField;
 use value::{format_value, position_to_value};
@@ -254,17 +256,26 @@ struct SettingsApp {
     settings_tab:usize,
     /// Minutes preset for the "开始专注" drawer.
     focus_minutes:u32,
+    timer_motion:RefCell<std::collections::HashMap<String,TimerSample>>,
     timer_mode:String,timer_new:bool,timer_adjust_open:bool,timer_name:Entity<TextField>,timer_duration:Entity<TextField>,timer_focus:Entity<TextField>,timer_rest:Entity<TextField>,timer_rounds:Entity<TextField>,
     notice_view: usize,
     quick_text: Entity<TextField>,
     quick_preview: Value,
     quick_request: String,
     workflow_name: Entity<TextField>,
-    workflow_stages: Vec<(Entity<TextField>, Entity<TextField>)>,
+    workflow_stages: Vec<(Entity<TextField>, Entity<TextField>, usize)>,
     workflow_count: usize,
     workflow_template: String,
     workflow_selected:usize,workflow_generation:u64,workflow_busy:bool,
-    workflow_library:Vec<Entity<TextField>>,workflow_scroll:ScrollHandle,workflow_focus:FocusHandle,workflow_pending:Option<Value>,
+    workflow_library:Vec<LibraryModule>,workflow_module_selected:Option<String>,workflow_module_serial:u64,
+    workflow_library_generation:u64,workflow_library_busy:bool,
+    workflow_stage_editing:Option<usize>,workflow_stage_backup:String,
+    tutorial_step:Option<usize>,tutorial_epoch:usize,tutorial_recovery:u8,tutorial_checked:bool,
+    workflow_drop:Option<usize>,workflow_stage_bounds:Rc<RefCell<Vec<Bounds<Pixels>>>>,workflow_canvas_bounds:Rc<Cell<Bounds<Pixels>>>,
+    workflow_scroll:ScrollHandle,workflow_focus:FocusHandle,workflow_pending:Option<Value>,
+    /// The 自定义快捷键 recorder. `hotkey_pressed` accumulates modifiers for the session so a
+    /// combination typed one key at a time still reads as one chord.
+    hotkey_focus:FocusHandle,hotkey_active:bool,hotkey_pressed:gpui::Modifiers,hotkey_candidate:Option<String>,
     rule_editing: Option<String>,
     rule_trigger: String,
     rule_name: Entity<TextField>,
@@ -341,7 +352,7 @@ impl SettingsApp {
             cx.new(|cx| {
                 TextField::new(
                     "field-calibrate",
-                    "输入播放器显示的秒数，按 Enter 校准",
+                    "秒数",
                     "",
                     Rc::new(move |value: &str, app: &mut App| {
                         let _ = send(&shared, "synchronize", value, app);
@@ -403,11 +414,15 @@ impl SettingsApp {
         let timer_duration=cx.new(|cx|TextField::new("timer-duration","秒数","300",Rc::new(|_,_|{}),cx));
         let timer_focus=cx.new(|cx|TextField::new("timer-focus","秒数","1500",Rc::new(|_,_|{}),cx));
         let timer_rest=cx.new(|cx|TextField::new("timer-rest","秒数","300",Rc::new(|_,_|{}),cx));
-        let timer_rounds=cx.new(|cx|TextField::new("timer-rounds","轮数","4",Rc::new(|_,_|{}),cx));
+        let timer_rounds=cx.new(|cx|TextField::new("timer-rounds","轮数","1",Rc::new(|_,_|{}),cx));
         let quick_text={let weak=weak.clone();cx.new(|cx|TextField::new("field-quick","例如：20分钟后取快递","",Rc::new(move|text,app|{let text=text.to_owned();let _=weak.update(app,move|view,cx|view.preview_quick_text(text,cx));}),cx))};
         let workflow_name=cx.new(|cx|TextField::new("flow-name","流程名称","",Rc::new(|_,_|{}),cx));
         let mut workflow_stages=Vec::new();
-        for index in 0..12{let name=cx.new(move|cx|TextField::new(format!("flow-stage-name-{index}"),"阶段名称","",Rc::new(|_,_|{}),cx));let minutes=cx.new(move|cx|TextField::new(format!("flow-stage-minutes-{index}"),"分钟","",Rc::new(|_,_|{}),cx));workflow_stages.push((name,minutes));}
+        for index in 0..12{let commit=weak.clone();let cancel=weak.clone();let name=cx.new(move|cx|{let mut field=TextField::new(format!("flow-stage-name-{index}"),"阶段名称","",Rc::new(move|_,app|{let _=commit.update(app,|view,cx|view.finish_stage_rename(true,cx));}),cx);field.set_cancel_handler(Some(Rc::new(move|app|{let _=cancel.update(app,|view,cx|view.finish_stage_rename(false,cx));})));field});let minutes=cx.new(move|cx|TextField::new(format!("flow-stage-minutes-{index}"),"分钟","",Rc::new(|_,_|{}),cx));workflow_stages.push((name,minutes,5));}
+        let mut workflow_library=Vec::new();
+        let module_seed={let state=shared.lock().map(|shared|shared.state.clone()).unwrap_or_else(|_|json!({}));workflow_module_seed(&state)};
+        for value in &module_seed{workflow_library.push(new_library_module(value,&weak,cx));}
+        let workflow_module_serial=workflow_library.len() as u64;
         let rule_name=cx.new(|cx|TextField::new("rule-name","规则名称","",Rc::new(|_,_|{}),cx));
         let rule_path=cx.new(|cx|TextField::new("rule-path","C:/Program Files/App/App.exe","",Rc::new(|_,_|{}),cx));
         let rule_message=cx.new(|cx|TextField::new("rule-message","提醒内容","",Rc::new(|_,_|{}),cx));
@@ -418,7 +433,7 @@ impl SettingsApp {
             Route::from_key(setting_str(&state, "ControlCenterStartPage", "overview")).unwrap_or(Route::Overview)
         });
         Self {
-            timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"workflow".into(),timer_new:false,timer_adjust_open:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
+            timer_motion:RefCell::new(std::collections::HashMap::new()),timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"workflow".into(),timer_new:false,timer_adjust_open:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
             shared:Rc::clone(&shared),
             route: start_route,
             drawer: smoke_drawer(),
@@ -463,7 +478,10 @@ impl SettingsApp {
             press: None,
             notice_view:0,quick_text,quick_preview:Value::Null,quick_request:String::new(),
             workflow_name,workflow_stages,workflow_count:2,workflow_template:String::new(),workflow_selected:0,workflow_generation:0,workflow_busy:false,
-            workflow_library: [5,25,5,10,3,10].iter().enumerate().map(|(i,m)|cx.new(|cx|TextField::new(format!("library-minutes-{i}"),"分钟",&m.to_string(),Rc::new(|_,_|{}),cx))).collect(),workflow_scroll:ScrollHandle::new(),workflow_focus:cx.focus_handle(),workflow_pending:None,
+            workflow_library,workflow_module_selected:None,workflow_module_serial,workflow_library_generation:0,workflow_library_busy:false,
+            tutorial_step:if std::env::args().any(|a|a=="--tutorial"){Some(0)}else{None},tutorial_epoch:0,tutorial_recovery:0,tutorial_checked:false,workflow_stage_editing:None,workflow_stage_backup:String::new(),workflow_drop:None,workflow_stage_bounds:Rc::new(RefCell::new(Vec::new())),workflow_canvas_bounds:Rc::new(Cell::new(Bounds::new(point(px(0.0),px(0.0)),size(px(0.0),px(0.0))))),
+            workflow_scroll:ScrollHandle::new(),workflow_focus:cx.focus_handle(),workflow_pending:None,
+            hotkey_focus:cx.focus_handle(),hotkey_active:false,hotkey_pressed:gpui::Modifiers::default(),hotkey_candidate:None,
             rule_editing:None,rule_trigger:"enter".into(),rule_name,rule_path,rule_message,rule_cooldown:30,rule_threshold:60,rule_enabled:true,
         }
     }
@@ -596,13 +614,16 @@ fn tally() {
 }
 
 /// Rows stacked with a hairline between neighbours — the rhythm every surface shares.
-fn stacked(rows: Vec<AnyElement>) -> Div {
+fn stacked(rows: Vec<AnyElement>, rounded_panel: bool) -> Div {
+    let count = rows.len();
     let mut body = div().flex().flex_col().min_w_0();
     for (index, row) in rows.into_iter().enumerate() {
         if index > 0 {
-            body = body.child(hairline());
+            // Same bleed as the rows: a divider narrower than the fill it separates reads as
+            // a line drawn inside the highlight rather than as the boundary between two rows.
+            body = body.child(div().h(px(1.0)).mx(px(-PANEL_PAD)).bg(t::hairline()));
         }
-        body = body.child(row);
+        body = body.child(row_edges::wrap(row, rounded_panel && index == 0, rounded_panel && index + 1 == count));
     }
     body
 }
@@ -610,16 +631,20 @@ fn stacked(rows: Vec<AnyElement>) -> Div {
 /// A raised group, as the handoff draws it: one bordered panel holding every row of a section,
 /// with hairlines inserted *between* rows — never at the edges.
 ///
-/// Child washes are inset and individually rounded: overflow in GPUI is rectangular,
-/// so it cannot clip a rectangular child background to this panel's rounded corners.
+/// Rows bleed to the panel border. Only its first and last rows inherit the outer radius;
+/// interior seams remain straight, including in drawers. RowEdges scopes that topology while
+/// lazy animation elements materialise their row styles during request_layout.
+const PANEL_PAD: f32 = 18.0;
+const PANEL_RADIUS: f32 = 16.0;
+
 fn panel(rows: Vec<AnyElement>) -> AnyElement {
     div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden()
-        .px(px(18.0)).py(px(2.0)).child(stacked(rows)).into_any_element()
+        .px(px(PANEL_PAD)).py(px(0.0)).child(stacked(rows, true)).into_any_element()
 }
 
 /// A borderless panel whose rows carry their own horizontal padding (notification and timer lists).
 fn list(rows: Vec<AnyElement>) -> AnyElement {
-    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden().p(px(8.0)).child(stacked(rows)).into_any_element()
+    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden().p(px(8.0)).child(stacked(rows, false)).into_any_element()
 }
 
 /// A 34px icon tile (`di-symbol`): notification rows and task lines wear one.
@@ -716,7 +741,7 @@ fn tab_row(id_prefix: &'static str, labels: &[&'static str], selected: usize, cx
             pick(view, index);
             // The rows below the bar are about to be replaced: restart their cascade so the new
             // content arrives instead of silently swapping.
-            view.pulse();
+            if id_prefix!="timer-mode"{view.pulse();}
             cx.notify();
         });
         let id = SharedString::from(format!("tab-{id_prefix}-{index}"));
@@ -794,16 +819,21 @@ fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsAp
     let anchor = view.select_bounds.borrow().iter().find(|(name, _)| *name == key).map(|(_, bounds)| *bounds)
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))));
     let options: &[(&str, &str)] = match key {
+        "osd-placement" => &[("Island","灵动岛内"),("Bottom","屏幕下方")],
         "startPage" => &[("overview", "概览"), ("notifications", "通知"), ("todos", "待办清单"), ("timers", "流程与专注"), ("island", "灵动岛"), ("settings", "设置"), ("about", "关于与更新")],
         "todo-color" | "todo-default-color" => &[("#F3D79B", "柔黄"), ("#B7DBCB", "薄荷"), ("#C9BCE5", "浅紫")],
         _ => &[("System", "跟随系统"), ("Light", "浅色"), ("Dark", "深色")],
     };
     let current = match key {
+        "osd-placement" => setting_str(state,"SystemStateHintPlacement","Island").to_owned(),
         "startPage" => setting_str(state, "ControlCenterStartPage", "overview").to_owned(),
         "todo-color" => view.todo_color.clone(),
         "todo-default-color" => setting_str(state, "TodoDefaultColor", "#F3D79B").to_owned(),
         _ => setting_str(state, "SettingsTheme", "System").to_owned(),
     };
+    let menu_height=options.len()as f32*36.+12.;let menu_left=f32::from(anchor.origin.x).clamp(8.,WINDOW_WIDTH-218.);
+    let below=f32::from(anchor.origin.y+anchor.size.height)+6.;
+    let menu_top=if below+menu_height<=WINDOW_HEIGHT-12.{below}else{(f32::from(anchor.origin.y)-menu_height-6.).max(48.)};
     let mut menu = div().flex().flex_col().p(px(6.0));
     for (value, label) in options {
         let active = current == *value;
@@ -819,6 +849,7 @@ fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsAp
                     match key {
                         "todo-color" => view.todo_color = value.clone(),
                         "todo-default-color" => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "TodoDefaultColor", &value, cx);}
+                        "osd-placement" => {let shared=Rc::clone(&view.shared);let _=send(&shared,"SystemStateHintPlacement",&value,cx);}
                         "startPage" => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "ControlCenterStartPage", &value, cx);}
                         _ => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "SettingsTheme", &value, cx);}
                     }
@@ -826,17 +857,17 @@ fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsAp
                 })),
         );
     }
-    div().id("select-layer").absolute().inset_0()
+    div().id("select-layer").absolute().inset_0().occlude()
         .child(div().id("select-scrim").absolute().inset_0().on_click(cx.listener(|view, _, _, cx| {view.select = None;cx.notify();})))
         .child(
-            div().absolute().left(anchor.origin.x).w(px(210.0))
+            div().absolute().left(px(menu_left)).w(px(210.0))
                 .rounded(px(12.0)).border_1().border_color(t::hairline()).bg(t::surface())
                 .shadow(vec![BoxShadow::new(px(0.0), px(4.0), t::shadow().into()).blur_radius(px(14.0))])
                 .child(menu)
                 // The menu grows out of the control that owns it and travels the short distance to
                 // its resting place, so the eye never has to search for where it came from.
                 .with_animation(("select-menu", view.menu_epoch), motion::enter(170, 0), move |element, progress| {
-                    element.opacity(progress).top(anchor.origin.y + anchor.size.height + px(6.0 + 7.0 * (1.0 - progress)))
+                    element.opacity(progress).top(px(menu_top + 7.0 * (1.0 - progress)))
                 }),
         )
         .into_any_element()
@@ -856,6 +887,12 @@ impl Render for SettingsApp {
             window.resize(canvas);
         }
         let state = self.state();
+        if !self.tutorial_checked&&state["success"]==true{self.tutorial_checked=true;if !flag(&state,"GestureTutorialSeen",false)&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none_or(|p|p=="LyricIsland.Native.Settings.v1"){self.tutorial_step=Some(0);}}
+        if self.route==Route::Timers&&self.drawer.is_none()&&!self.timer_new&&self.shared.lock().map(|s|!s.connection_error).unwrap_or(false){
+            if let Some(items)=state["timers"].as_array(){let active=state["activeComponent"].as_str().unwrap_or("").strip_prefix("timer:").unwrap_or("");let selected=items.iter().find(|t|t["mode"].as_str()==Some(self.timer_mode.as_str())&&t["id"].as_str()==Some(active)).or_else(||items.iter().find(|t|t["mode"].as_str()==Some(self.timer_mode.as_str())));
+                if let Some(timer)=selected.filter(|t|t["running"]==true){let id=timer["id"].as_str().unwrap_or("");let samples=self.timer_motion.borrow();if samples.get(id).map(|s|s.observed.elapsed().as_secs_f64()<0.92||s.elapsed!=timer["elapsedMs"].as_u64().unwrap_or(0)).unwrap_or(true){window.request_animation_frame();}}
+            }
+        }
         let route = self.route;
         let (title, subtitle) = route.heading();
         let theme = setting_str(&state, "SettingsTheme", "System").to_owned();
@@ -953,7 +990,7 @@ impl Render for SettingsApp {
         let head = head.with_animation(("page-head", self.route_epoch), motion::enter(240, 0), |element, progress| {
             motion::rise(element, progress, 8.0)
         });
-        let rows = motion::cascade(page_rows(route, &state, self, cx), self.route_epoch, self.content_epoch, 22);
+        let rows=page_rows(route,&state,self,cx);let rows=if route==Route::Timers{rows}else{motion::cascade(rows,self.route_epoch,self.content_epoch,22)};
         let mut column = div().flex().flex_col().w_full().min_w_0().pt(px(28.)).px(px(22.)).pb(px(24.)).child(head);
         column = column.child(div().flex().flex_col().children(rows));
 
@@ -982,8 +1019,9 @@ impl Render for SettingsApp {
             .child(dot)
             .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
         let drawer = drawer_panel(&state, self, cx);
+        if self.tutorial_step.is_some(){window.focus(&self.music_focus,cx);}
 
-        div().flex().flex_col().size_full().bg(t::base()).text_color(t::text()).text_size(px(13.0)).font(t::ui_font())
+        div().relative().flex().flex_col().size_full().bg(t::base()).text_color(t::text()).text_size(px(13.0)).font(t::ui_font())
             // The press is taken at the root, not per control: whatever the hover stack says is
             // innermost when the button goes down *is* what got pressed, and releasing it anywhere —
             // including outside the window — has to let it back up.
@@ -1018,8 +1056,10 @@ impl Render for SettingsApp {
                         )})
                         .child(footer)),
             )
-            .child(select_overlay(&state, self, cx))
             .child(drawer))
+            // Popovers are window-level and must paint after the drawer, never behind its surface.
+            .child(select_overlay(&state, self, cx))
+            .children(tutorial::overlay(&state,self,cx))
     }
 }
 
@@ -1112,24 +1152,25 @@ fn music_layout_row(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
     let selected=setting_str(state,"MusicExpandedLayout","SideBySide");
     let focus=view.music_focus.clone();
     let options=div().flex().flex_row().gap(px(12.))
-        .child(music_layout_option("Separated","A · 歌词分区","歌词独立成行，长句更从容。",selected=="Separated",false,view,cx))
-        .child(music_layout_option("SideBySide","B · 封面与歌词并排","封面与歌词并排，整体更紧凑。",selected=="SideBySide",true,view,cx))
+        .child(music_layout_option("Separated","舒展","歌词独立成行，长句更从容。",selected=="Separated",0,view,cx))
+        .child(music_layout_option("SideBySide","紧凑","封面与歌词并排，整体更紧凑。",selected=="SideBySide",1,view,cx))
+        .child(music_layout_option("LyricFocus","歌词聚焦","歌词居中呈现，封面与信息收于顶部。",selected=="LyricFocus",2,view,cx))
         .track_focus(&focus)
         .on_key_down(cx.listener(move |view,event:&KeyDownEvent,window,cx|{
             let current=setting_str(&view.state(),"MusicExpandedLayout","SideBySide").to_owned();
-            let next=match event.keystroke.key.as_str(){"left"=>"Separated","right"=>"SideBySide","space"=>if current=="Separated"{"SideBySide"}else{"Separated"},_=>return};
+            let values=["Separated","SideBySide","LyricFocus"];let index=values.iter().position(|value|*value==current).unwrap_or(0);let next=match event.keystroke.key.as_str(){"left"=>values[(index+2)%3],"right"|"space"=>values[(index+1)%3],_=>return};
             if next!=current{let _=send(&view.shared,"MusicExpandedLayout",next,cx);}
             window.focus(&view.music_focus,cx);cx.notify();
         }));
-    let label=if selected=="Separated"{"A · 歌词分区"}else{"B · 封面与歌词并排"};
+    let label=match selected{"Separated"=>"舒展","LyricFocus"=>"歌词聚焦",_=>"紧凑"};
     let footer=div().flex().items_center().gap_2().pt(px(2.))
         .child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(t::accent()))
         .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("当前选择：{label}")));
-    card("row-music-layout","展开卡片布局","两种布局保留相同的内容与播放操作。")
+    card("row-music-layout","展开卡片布局","三种布局保留相同的内容与播放操作。")
         .flex_col().items_stretch().gap_3().child(options).child(footer).into_any_element()
 }
 
-fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, side_by_side: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, layout: u8, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
     let shared=Rc::clone(&view.shared);
     let radio=div().w(px(18.)).h(px(18.)).rounded(px(9.)).border_1()
         .border_color(if selected{t::accent()}else{t::hairline_bright()})
@@ -1138,7 +1179,7 @@ fn music_layout_option(value: &'static str, title: &'static str, detail: &'stati
     let mut tile=div().id(SharedString::from(format!("music-layout-{value}"))).flex_1().min_w_0().flex().flex_col().gap_2().p(px(10.)).rounded(px(14.))
         .border_1().border_color(if selected{t::accent()}else{t::hairline()})
         .bg(if selected{t::row_hover()}else{t::base()})
-        .cursor_pointer().child(canvas(|_,_,_|{},move |bounds,_,window,_|paint_music_thumb(bounds,window,side_by_side)).w_full().h(px(150.)))
+        .cursor_pointer().child(canvas(|_,_,_|{},move |bounds,_,window,_|paint_music_thumb(bounds,window,layout)).w_full().h(px(150.)))
         .child(div().flex().items_center().justify_between().gap_2()
             .child(div().min_w_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
             .child(radio))
@@ -1152,13 +1193,13 @@ fn music_layout_option(value: &'static str, title: &'static str, detail: &'stati
 }
 
 /// A grayscale schematic of the expanded card: only the arrangement changes between A and B.
-fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, side_by_side: bool) {
+fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, layout: u8) {
     let w=f32::from(bounds.size.width);let h=f32::from(bounds.size.height);let s=(w/300.).min(h/150.);
     let ox=bounds.origin.x+px((w-300.*s)/2.);let oy=bounds.origin.y+px((h-150.*s)/2.);
     let mut r=|x:f32,y:f32,ww:f32,hh:f32,rad:f32,c:gpui::Rgba|{window.paint_quad(quad(Bounds::new(point(ox+px(x*s),oy+px(y*s)),size(px(ww*s),px(hh*s))),px(rad*s),c,px(0.),transparent_black(),BorderStyle::Solid))};
     let (card,cover,bright,dim,faint,control)=(rgb(0x222829),rgb(0x3B4344),rgb(0xD7DAD8),rgb(0x7C8584),rgb(0x4E5757),rgb(0xC9CDCB));
     r(0.,0.,300.,150.,12.,card);
-    if side_by_side{
+    if layout==1{
         r(16.,14.,54.,54.,8.,cover);
         r(82.,16.,104.,7.,3.5,bright);r(82.,29.,74.,5.,2.5,dim);r(82.,41.,92.,5.,2.5,dim);
         r(266.,18.,6.,6.,3.,dim);
@@ -1167,6 +1208,11 @@ fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, side_by_side: 
         r(116.,133.,4.,10.,1.5,bright);r(123.,133.,4.,10.,1.5,bright);
         r(144.,131.,14.,14.,7.,control);
         r(174.,133.,4.,10.,1.5,bright);r(181.,133.,4.,10.,1.5,bright);
+    }else if layout==2{
+        r(16.,14.,38.,38.,7.,cover);r(66.,17.,95.,7.,3.5,bright);r(66.,31.,60.,5.,2.5,dim);r(266.,18.,6.,6.,3.,dim);
+        r(58.,72.,184.,7.,3.5,bright);r(90.,87.,120.,5.,2.5,dim);
+        r(16.,112.,268.,2.5,1.25,faint);r(16.,120.,30.,3.,1.5,dim);r(254.,120.,30.,3.,1.5,dim);
+        r(116.,131.,4.,10.,1.5,bright);r(123.,131.,4.,10.,1.5,bright);r(144.,129.,14.,14.,7.,control);r(174.,131.,4.,10.,1.5,bright);r(181.,131.,4.,10.,1.5,bright);
     }else{
         r(16.,14.,46.,46.,7.,cover);
         r(74.,16.,84.,7.,3.5,bright);r(74.,29.,58.,5.,2.5,dim);
@@ -1184,6 +1230,11 @@ fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, side_by_side: 
 fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
     let mut sections: Vec<AnyElement> = Vec::new();
     sections.push(section_group("音乐卡片", None, vec![music_layout_row(state, view, cx)], cx));
+    sections.push(section_group("系统状态提示", None, vec![
+        toggle_row("SystemStateHintsEnabled","系统状态提示","统一提醒大写锁定、小键盘锁定、麦克风静音和触控板状态。",flag(state,"SystemStateHintsEnabled",true),view,cx),
+        segmented_row("osd-placement","SystemStateHintPlacement","提示位置","屏幕下方使用独立浮层，不打断岛上的音乐或计时。",&[("Island","灵动岛内"),("Bottom","屏幕下方")],setting_str(state,"SystemStateHintPlacement","Island"),cx),
+        system_test_row(cx),
+    ],cx));
     sections.push(section_group("何时出现", None, vec![
         toggle_row("HideWhenPaused", "音乐暂停后隐藏", "暂停时收起淡出；有计时器等活动时继续显示当前组件。", flag(state, "HideWhenPaused", true), view, cx),
         toggle_row("AlwaysOnTop", "始终置顶", "显示在其他软件上方，不抢占键盘焦点。", flag(state, "AlwaysOnTop", true), view, cx),
@@ -1208,8 +1259,10 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
     display.push(toggle_row("Translation", "展开卡片显示翻译", "有翻译时优先显示翻译。", flag(state, "Translation", true), view, cx));
     sections.push(section_group("尺寸与显示", None, display, cx));
     sections.push(section_group("交互", None, vec![
+        button_row("gesture-tutorial","手势教程","跟着动画了解展开、切换与隐藏。","查看教程",cx,|v,cx|{v.tutorial_epoch+=1;v.tutorial_recovery=0;v.tutorial_step=Some(0);cx.notify();}),
         toggle_row("HoverExpand", "悬停展开", "鼠标经过时展开当前组件。", flag(state, "HoverExpand", false), view, cx),
         toggle_row("ClickAnywhereExpand", "点击任意区域展开", "展开当前选中的组件。", flag(state, "ClickAnywhereExpand", true), view, cx),
+        toggle_row("SwipeUpHide","上拖隐藏","按住胶囊或展开卡片的空白区域向上拖动隐藏；托盘菜单可重新显示。",flag(state,"SwipeUpHide",true),view,cx),
         toggle_row("SwipeActivities", "左右滑动胶囊切换", "按住收起胶囊或展开卡片左右拖动切换组件。", flag(state, "SwipeActivities", true), view, cx),
         toggle_row("Floating", "自由悬浮", "允许移动灵动岛位置。", flag(state, "Floating", false), view, cx),
         toggle_row("MusicClickOpenApp", "点击封面或歌名打开播放器", "仅影响音乐卡片。", flag(state, "MusicClickOpenApp", false), view, cx),
@@ -1221,12 +1274,20 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
         calibrate_row(position, view, cx),
         toggle_row("OnlineSongInfo", "在线补全网易云歌曲信息", "本地信息缺失时直连 music.163.com 补全封面和歌名，不发送账号或令牌。", flag(state, "OnlineSongInfo", true), view, cx),
     ], cx));
-    let mut sources: Vec<AnyElement> = Vec::new();
-    for (id, name) in pipe::PLAYERS {
-        let allowed = source_allowed(state, id);
-        sources.push(check_row(SharedString::from(format!("source:{id}")), name, if id == "Browser" { "默认关闭，避免网页视频唤出胶囊。" } else { "仅响应允许的播放器。" }, allowed, cx));
+    // Everything responds by default, so this page is a grid of exclusions rather than a checklist
+    // of permissions: the common case needs no action at all, and a player that is not on the grid
+    // still works. The four groups follow how people describe their own players, not session ids.
+    let mut grid = div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface())
+        .p(px(PANEL_PAD)).flex().flex_col().gap(px(16.0));
+    for (label, players) in pipe::PLAYER_GROUPS {
+        grid = grid.child(player_group(label, players, state, view, cx));
     }
-    sources.push(card("row-custom-add", "添加自定义程序", "输入程序名或媒体会话标识，不支持通配符和启动参数。按 Enter 添加。").child(div().w(px(300.0)).child(view.custom_sources.clone())).into_any_element());
+    grid = grid.child(div().flex().items_center().gap_2()
+        .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(t::accent()))
+        .child(div().text_size(px(12.0)).text_color(t::text_dim()).child("默认响应所有播放器；点选后不再唤出灵动岛。浏览器媒体默认不响应。")));
+    sections.push(section_block("播放器与来源", None, grid.into_any_element(), cx));
+    let mut extras: Vec<AnyElement> = Vec::new();
+    extras.push(card("row-custom-add", "其它程序", "输入程序名或媒体会话标识，不支持通配符和启动参数。按 Enter 添加。").child(div().w(px(300.0)).child(view.custom_sources.clone())).into_any_element());
     let custom = custom_sources(state);
     if !custom.is_empty() {
         let mut chips = div().flex().flex_row().flex_wrap().gap_2();
@@ -1243,10 +1304,10 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
                     }))),
             );
         }
-        sources.push(card("row-custom-list", "已添加的自定义程序", "这些程序不在内置列表里，但同样可以唤出灵动岛。").child(chips).into_any_element());
+        extras.push(card("row-custom-list", "已加入的程序", "这些程序不在上面的列表里，同样不会唤出灵动岛。").child(chips).into_any_element());
     }
-    sources.push(info_row("当前播放信息", text(state, "player", "等待播放器"), &format!("{}\n{}", text(state, "title", "暂无播放"), text(state, "artist", "")), view, cx));
-    sections.push(section_group("播放器与来源", None, sources, cx));
+    extras.push(info_row("当前播放信息", text(state, "player", "等待播放器"), &format!("{}\n{}", text(state, "title", "暂无播放"), text(state, "artist", "")), view, cx));
+    sections.push(section_group("其它程序", None, extras, cx));
     sections.push(section_group("组件", None, vec![
         page_link("link-todos", "待办清单", "提醒与清单在控制中心管理。", "打开", Route::Todos, cx),
         page_link("link-timers", "流程与专注", "番茄钟、倒计时与秒表。", "打开", Route::Timers, cx),
@@ -1283,6 +1344,7 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
                 select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
                 toggle_row("CoverBackground", "封面取色背景", "根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view, cx),
                 toggle_row("Animation", "界面动画", "连续形变可以随时反向操作，由软件开关控制，不跟随 Windows 动画设置。", flag(state, "Animation", true), view, cx),
+                toggle_row("IslandFluidMotion", "灵动岛流体动画", "容器先到位、内容随后落定，整段比原来更短。关闭则完全回到 2.0.0 的原始曲线；「界面动画」关闭时此项不生效。", flag(state, "IslandFluidMotion", true), view, cx),
             ]));
             let mut palette: Vec<AnyElement> = Vec::new();
             for (key, title) in [("ExpandedTextColor", "展开卡片字体颜色"), ("ExpandedComponentColor", "展开卡片组件颜色"), ("LyricProgressColor", "歌词进度填色")] {
@@ -1507,7 +1569,9 @@ fn drawer_panel(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>
     let rows = motion::cascade(drawer_rows(&drawer, state, view, cx), tag as u32, tag as u32, 16);
     let scroll = view.drawer_scroll.clone();
     // A drawer is a sheet: a little bounce as it lands, because it was thrown in from the edge.
+    // The scrim is a different thing and gets a different spring — see `motion::scrim`.
     let spring = || motion::phase_from(motion::sheet(), open, false);
+    let scrim = || motion::phase_from(motion::scrim(), open, false);
     let panel = div().id("drawer-panel").w(px(if matches!(drawer,Drawer::WorkflowEditor){1000.}else{385.0})).max_w_full().h_full().flex_shrink_0().flex().flex_col().bg(t::surface())
         .shadow(vec![BoxShadow::new(px(-8.0), px(0.0), t::shadow().into()).blur_radius(px(30.0))])
         .child(
@@ -1525,14 +1589,15 @@ fn drawer_panel(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>
                         .on_click(cx.listener(|view, _, _, cx| view.close_drawer(cx))),
                 ),
         )
-        .child(div().id("drawer-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).px(px(23.0)).pb(px(23.0)).child(stacked(rows)));
+        .child(div().id("drawer-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).px(px(if matches!(drawer,Drawer::WorkflowEditor){23.}else{PANEL_PAD})).pb(px(23.0)).child(stacked(rows, false)));
+    let panel=if matches!(drawer,Drawer::WorkflowEditor){panel.child(workflow_footer(view,cx))}else{panel};
     // GPUI routes a wheel event to every scroll container under the cursor, so without an
     // occluding hitbox the page behind keeps scrolling while the drawer scrolls.
     div().id("drawer").absolute().inset_0().flex().flex_row().occlude()
         .child(
             div().id("drawer-scrim").flex_1().h_full().bg(t::scrim())
                 .on_click(cx.listener(|view, _, _, cx| view.close_drawer(cx)))
-                .with_spring(("drawer-scrim", tag), spring(), |element, phase| {
+                .with_spring(("drawer-scrim", tag), scrim(), |element, phase| {
                     element.opacity(motion::alpha(phase))
                 }),
         )
@@ -1628,26 +1693,73 @@ impl SettingsApp {
     }
 }
 
-/// Whether a built-in player id is currently allowed.
-fn source_allowed(state: &Value, id: &str) -> bool {
-    setting(state, "AllowedSources")
+/// Whether a built-in player is currently kept silent. Absent the setting, only the browser is:
+/// a video in a tab is the one source that would otherwise take the island over uninvited.
+fn source_excluded(state: &Value, id: &str) -> bool {
+    setting(state, "IgnoredSources")
         .as_array()
         .map(|list| list.iter().any(|entry| entry.as_str().is_some_and(|entry| entry.eq_ignore_ascii_case(id))))
-        .unwrap_or(matches!(id, "Netease" | "QQMusic" | "Kugou" | "Kuwo" | "Spotify" | "TwilightEcho"))
+        .unwrap_or_else(|| id.eq_ignore_ascii_case("Browser"))
 }
 
-/// Custom (non built-in) entries from the source whitelist.
+/// Custom (non built-in) entries from the exclusion list.
 fn custom_sources(state: &Value) -> Vec<String> {
-    setting(state, "AllowedSources")
+    setting(state, "IgnoredSources")
         .as_array()
         .map(|list| {
             list.iter()
                 .filter_map(Value::as_str)
-                .filter(|id| !pipe::PLAYERS.iter().any(|(known, _)| known.eq_ignore_ascii_case(id)))
+                .filter(|id| !pipe::player_ids().any(|known| known.eq_ignore_ascii_case(id)))
                 .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One group of player tiles under its own 12px heading.
+///
+/// The grid wraps instead of stretching: a row of five tiles has to look the same as a row of
+/// three, and `flex_1` would silently make the short row's tiles wider than the long row's.
+fn player_group(label: &str, players: &[(&'static str, &'static str)], state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let mut row = div().flex().flex_row().flex_wrap().gap(px(8.0));
+    for &(id, name) in players {
+        row = row.child(player_tile(id, name, source_excluded(state, id), view, cx));
+    }
+    div().flex().flex_col().gap(px(8.0))
+        .child(div().text_size(px(12.0)).text_color(t::text_dim()).child(label.to_owned()))
+        .child(row)
+        .into_any_element()
+}
+
+/// One player, as a tile rather than a full-width row.
+///
+/// The trailing mark carries the state twice over — filled tick for responding, hollow cross for
+/// silent — because a page where nearly everything is "on" cannot rely on colour alone to show the
+/// few that are not. Pressing it is the whole interaction, so the tile washes on hover and keeps its
+/// border; nothing here needs a switch, which would add a second hit target to a 54px box.
+fn player_tile(id: &'static str, name: &'static str, excluded: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let shared = Rc::clone(&view.shared);
+    let mark = div().w(px(18.0)).h(px(18.0)).flex_shrink_0().rounded(px(9.0))
+        .flex().items_center().justify_center().text_size(px(11.0))
+        .border_1().border_color(if excluded { t::hairline_bright() } else { t::accent() })
+        .bg(if excluded { t::base() } else { t::accent() })
+        .text_color(if excluded { t::text_faint() } else { t::on_accent() })
+        .child(if excluded { "×" } else { "✓" });
+    // 144 + 8 gaps is what lets the widest group (six tiles) hold one line inside the 915px panel:
+    // a group that wrapped to a lone tile on its own row would read as a mistake rather than a grid.
+    let tile = div().id(SharedString::from(format!("player-{id}")))
+        .w(px(144.0)).flex_shrink_0().flex().items_center().justify_between().gap_2()
+        .px(px(10.0)).py(px(10.0)).rounded(px(12.0))
+        .border_1().border_color(t::hairline()).bg(t::base())
+        .cursor_pointer()
+        .child(div().min_w_0().overflow_hidden().text_size(px(13.0)).text_color(if excluded { t::text_dim() } else { t::text() }).child(name))
+        .child(mark)
+        .hover(|style| style.bg(t::row_hover()).border_color(t::hairline_bright()))
+        .on_click(cx.listener(move |_view, _, _, cx| {
+            let _ = send(&shared, &format!("source:{id}"), if excluded { "false" } else { "true" }, cx);
+            cx.notify();
+        }));
+    tile.into_any_element()
 }
 
 fn notification_allowed(state: &Value, id: &str) -> bool {
@@ -1658,13 +1770,16 @@ fn notification_allowed(state: &Value, id: &str) -> bool {
 }
 
 /// A row whose whole surface toggles a membership (players, notification apps).
-fn check_row(id: SharedString, title: &str, detail: &str, checked: bool, cx: &mut Context<SettingsApp>) -> AnyElement {
+///
+/// Goes through the same liveness shell as every other row rather than styling `.hover()`
+/// itself: these sit directly above the toggle rows on the 通知 page, and a row that snapped
+/// while the one beside it sprang read as two different interfaces.
+fn check_row(id: SharedString, title: &str, detail: &str, checked: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
     let key = id.to_string();
     let mark = SharedString::from(format!("check-{key}"));
-    card(id, title, detail)
+    let spring_key = SharedString::from(format!("check-{key}"));
+    let row = card(id, title, detail)
         .cursor_pointer()
-        .hover(|style| style.bg(t::row_hover()))
-        .active(|style| style.bg(t::row_hover()).opacity(0.92))
         .child(
             // The circle fills and the tick fades in together on one spring, so a source that is
             // switched on reads as a single gesture rather than two separate repaints.
@@ -1686,8 +1801,8 @@ fn check_row(id: SharedString, title: &str, detail: &str, checked: bool, cx: &mu
             let shared = Rc::clone(&view.shared);
             let _ = send(&shared, &key, if checked { "false" } else { "true" }, cx);
             cx.notify();
-        }))
-        .into_any_element()
+        }));
+    live_shell(row, spring_key, view, cx, |row, liveness| row_wash(row, liveness, true))
 }
 
 /// A row whose button runs a local closure instead of a pipe command.
@@ -2172,27 +2287,36 @@ fn calibrate_row(position: f64, view: &SettingsApp, cx: &mut Context<SettingsApp
                 })),
         );
     }
-    card("row-calibrate", "播放位置校准", "输入播放器上显示的秒数并按 Enter，或用按钮微调。备用本地计时时使用。")
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .child(div().text_size(px(12.0)).text_color(t::accent()).child(format!("{position:.0} 秒")))
-                .child(div().w(px(228.0)).child(view.calibrate.clone()))
-                .child(stepper),
-        )
+    card(
+        "row-calibrate",
+        "播放位置校准",
+        "输入播放器上显示的秒数，按 Enter 校准；右侧按钮每次微调 1 或 5 秒。仅在备用本地计时时使用。",
+    )
+    .child(
+        // Wraps instead of clipping: the field used to be a fixed 228 DIP wide with a 20-character
+        // placeholder, so the instruction was cut mid-word and the only way to read it was to
+        // guess. The instruction now lives in the row's detail text where it can be any length.
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap_2()
+            .child(div().text_size(px(12.0)).text_color(t::accent()).child(format!("{position:.0} 秒")))
+            .child(div().w(px(112.0)).child(view.calibrate.clone()))
+            .child(stepper),
+    )
         .into_any_element()
 }
 
 /// One labelled row inside a panel: title, optional 12px detail, and the control on the right. The
 /// surrounding panel owns the surface and the dividers, so the row itself is only rhythm.
 ///
-/// The negative margin cancels the panel's 18px padding and the padding puts it back, so the content
+/// The negative margin cancels the panel's padding and the padding puts it back, so the content
 /// stays exactly where it was while the row's own box — and therefore its hover fill — reaches the
-/// panel's border. That is the whole point: a highlight that stops 18px short of the frame reads as
-/// a shadow that missed.
+/// panel's border. That is the whole point: a highlight that stops short of the frame reads as a
+/// shadow that missed. Both numbers come from [`PANEL_PAD`], so they cannot drift.
 fn card(id: impl Into<ElementId>, title: &str, detail: &str) -> Stateful<Div> {
     tally();
     let mut body = div().flex().flex_col().gap_1().flex_1().min_w_0()
@@ -2201,7 +2325,7 @@ fn card(id: impl Into<ElementId>, title: &str, detail: &str) -> Stateful<Div> {
         body = body.child(div().text_size(px(12.0)).text_color(t::text_dim()).child(detail.to_owned()));
     }
     div().id(id).flex().flex_row().items_center().justify_between().gap(px(15.0)).py(px(16.0)).min_w_0()
-        .mx(px(-6.0)).px(px(6.0))
+        .mx(px(-PANEL_PAD)).px(px(PANEL_PAD))
         .child(body)
 }
 
@@ -2258,7 +2382,8 @@ fn live(key: &'static str, view: &SettingsApp, cx: &Context<SettingsApp>, build:
 fn row_wash(row: Stateful<Div>, liveness: f32, interactive: bool) -> Stateful<Div> {
     let wash = motion::wash(liveness);
     let press = if interactive { motion::sink(liveness) } else { 0.0 };
-    row.relative().rounded(px(12.0))
+    row.relative().rounded_t(px(if row_edges::current().0 { PANEL_RADIUS } else { 0. }))
+        .rounded_b(px(if row_edges::current().1 { PANEL_RADIUS } else { 0. }))
         .bg(motion::mix(press, motion::mix(wash, t::surface(), t::row_hover()), t::surface_hi()))
         .child(accent_bar(liveness))
 }
@@ -2900,7 +3025,7 @@ impl SettingsApp {
 fn info_row(title: &str, detail: &str, body: &str, view: &SettingsApp, cx: &Context<SettingsApp>) -> AnyElement {
     tally();
     let row = div().id(SharedString::from(format!("row-info-{title}")))
-        .flex().flex_col().py(px(16.0)).mx(px(-6.0)).px(px(6.0)).min_w_0()
+        .flex().flex_col().py(px(16.0)).mx(px(-PANEL_PAD)).px(px(PANEL_PAD)).min_w_0()
         .child(div().text_size(px(14.0)).text_color(t::text()).child(title.to_owned()))
         .child(div().mt_1().text_size(px(12.0)).text_color(t::text_dim()).child(detail.to_owned()))
         .child(div().mt_3().text_size(px(12.5)).text_color(t::text_dim()).child(body.to_owned()));
@@ -3342,22 +3467,46 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         }).unwrap_or(false);
         // New surfaces: the quick drawer, the 流程 editor and the 应用提醒 view must all build from
         // a live snapshot, and a fresh 流程 form must start with two valid 25-minute stages.
-        let feature_regression=window.update(cx,|view,_,cx|{
+        let feature_regression=window.update(cx,|view,window,cx|{
             let state=view.shared.lock().unwrap().state.clone();view.drawer=None;view.open_workflow_form(None,cx);
             let empty=view.workflow_count==0&&view.workflow_stages_json(cx).is_err();
-            let payload=FlowDrag{source:None,kind:1,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,0,cx);
+            let payload=FlowDrag{source:None,module:Some("builtin-focus".into()),kind:1,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,0,cx);
             let independent=view.workflow_count==1&&view.workflow_stages[0].1.read(cx).text()=="25";
             view.workflow_stages[0].1.update(cx,|f,cx|f.set_text("17",cx));
-            let isolated=view.workflow_library[1].read(cx).text()=="25";
-            let payload=FlowDrag{source:None,kind:2,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,1,cx);
+            let library_minutes=view.workflow_library.iter().find(|module|module.id=="builtin-focus").is_some_and(|module|module.minutes.read(cx).text()=="25");
+            view.library_add_to_flow("builtin-rest",cx);
             let valid=view.workflow_stages_json(cx).is_ok();let entity=view.workflow_stages[0].0.entity_id();
-            let payload=FlowDrag{source:Some(0),kind:0,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,2,cx);
+            let payload=FlowDrag{source:Some(0),module:None,kind:0,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,2,cx);
             let reordered=view.workflow_stages[1].0.entity_id()==entity;
             view.workflow_selected=1;view.flow_duplicate(cx);let duplicated=view.workflow_count==3&&view.workflow_stages[2].0.entity_id()!=entity;
             view.flow_remove(2,cx);let removed=view.workflow_count==2;
             view.workflow_stages[0].1.update(cx,|f,cx|f.set_text("0",cx));let invalid=view.workflow_stages_json(cx).is_err();
+            let original_kind=view.workflow_stages[0].2;view.workflow_stages[0].2=3;
+            view.begin_stage_rename(0,window,cx);view.workflow_stages[0].0.update(cx,|f,cx|f.set_text("  改名阶段  ",cx));view.finish_stage_rename(true,cx);
+            let renamed=view.workflow_stages[0].2==3&&view.workflow_stages[0].0.read(cx).text()=="改名阶段";view.workflow_stages[0].2=original_kind;
+            // The library is a real draft: add, rename, cycle the badge, duplicate, then clean up.
+            let library_before=view.workflow_library.len();view.library_add(cx);
+            let temp_id=view.workflow_module_selected.clone();
+            let added_library=temp_id.is_some()&&view.workflow_library.len()==library_before+1;
+            let renamed_library=temp_id.as_ref().is_some_and(|id|{view.library_rename_commit(id,"临时模块",cx);view.workflow_library.iter().find(|module|&module.id==id).is_some_and(|module|module.name=="临时模块")});
+            let rejected_library=temp_id.as_ref().is_some_and(|id|{view.library_rename_commit(id,"",cx);view.workflow_library.iter().find(|module|&module.id==id).is_some_and(|module|module.name=="临时模块")});
+            let cycled_library=temp_id.as_ref().is_some_and(|id|{let before=view.workflow_library.iter().find(|module|&module.id==id).map(|module|module.kind).unwrap_or(0);view.library_cycle_kind(id,cx);view.workflow_library.iter().find(|module|&module.id==id).is_some_and(|module|module.kind==(before+1)%FLOW_MODULES.len())});
+            let duplicated_library=temp_id.as_ref().is_some_and(|id|{let before=view.workflow_library.len();view.library_duplicate(id,cx);view.workflow_library.len()==before+1});
+            let temp_ids:Vec<String>=view.workflow_library.iter().filter(|module|module.name.starts_with("临时模块")).map(|module|module.id.clone()).collect();
+            for id in &temp_ids{view.library_delete(id,cx);}
+            let library_clean=!temp_ids.is_empty()&&view.workflow_library.len()==library_before;
+            view.workflow_module_selected=None;
             let quick=quick_ui::quick_reminder_rows(&state,view,cx).len()>=2;let rules=rules_ui::rules_page_rows(&state,view,cx).len()>=2;
-            view.drawer=None;empty&&independent&&isolated&&valid&&reordered&&duplicated&&removed&&invalid&&quick&&rules
+            view.drawer=None;empty&&independent&&library_minutes&&valid&&reordered&&duplicated&&removed&&invalid&&renamed&&added_library&&renamed_library&&rejected_library&&cycled_library&&duplicated_library&&library_clean&&quick&&rules
+        }).unwrap_or(false);
+        let clock_regression=window.update(cx,|view,_,cx|{
+            let mut state=view.shared.lock().unwrap().state.clone();let old_mode=view.timer_mode.clone();let old_new=view.timer_new;
+            state["timers"]=json!([]);view.timer_new=true;
+            for mode in ["workflow","pomodoro","countdown","stopwatch"]{view.timer_mode=mode.into();if timer_rows(&state,view,cx).is_empty(){return false}}
+            let _=focus_direction_switch(&state,None,cx);state["settings"]["FocusCountUp"]=json!(true);let _=focus_direction_switch(&state,None,cx);
+            let sample=json!({"id":"clock-smoke","mode":"pomodoro","countUp":true,"elapsedMs":0,"revision":1,"phase":"focus","running":false});let _=focus_direction_switch(&state,Some(&sample),cx);
+            view.timer_mode=old_mode;view.timer_new=old_new;
+            precise_clock(3830)=="00:03.83"&&display_clock(3.2,true)=="00:03"&&display_clock(3.2,false)=="00:04"&&display_clock(3600.,false)=="01:00:00"
         }).unwrap_or(false);
         let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
             let result=window.update(cx,|view,_,cx|{
@@ -3381,7 +3530,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         };
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
+            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with("2.0.2")&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with("2.0.2")&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
             "pages": Route::ALL.len(),
             "settings": "GPUI",
             "ipc": "Rust",

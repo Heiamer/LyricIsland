@@ -2,8 +2,9 @@
 // The settings defaults are one large json! literal; the default macro recursion
 // budget is not enough for it once the 1.3 keys are included.
 #![recursion_limit = "256"]
-mod update_activity;mod activation;mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
-mod devices;mod osd;mod timers;mod activities;mod compact;mod sound;mod todos;mod history;mod quick_reminder;mod app_rules;mod foreground;mod diagnostics;
+mod bottom_osd;mod update_activity;mod activation;mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
+mod devices;mod osd;mod timers;mod activities;
+mod gestures;mod compact;mod sound;mod todos;mod history;mod quick_reminder;mod app_rules;mod foreground;mod diagnostics;
 use std::{cell::RefCell,path::{Path,PathBuf},sync::{Arc,Mutex,OnceLock,mpsc},time::{Instant,Duration},ffi::{c_char,CStr}};
 use serde_json::{Value,json};
 use base64::Engine;
@@ -24,7 +25,14 @@ struct QuickPreview{pub token:String,pub title:String,pub date:String,pub time:S
 /// Focus timers parked by the current lock. Kept after restart only as ordinary
 /// paused state; nothing resumes automatically without a matching generation.
 struct FocusResume{pub generation:u64,pub ids:Vec<String>,pub prompted:bool}
-fn hotkey_code(name:&str)->Option<(HOT_KEY_MODIFIERS,u32)>{match name{"Ctrl+Alt+R"=>Some((MOD_CONTROL|MOD_ALT,'R' as u32)),"Ctrl+Shift+R"=>Some((MOD_CONTROL|MOD_SHIFT,'R' as u32)),"Ctrl+Alt+N"=>Some((MOD_CONTROL|MOD_ALT,'N' as u32)),_=>None}}
+fn hotkey_code(name:&str)->Option<(HOT_KEY_MODIFIERS,u32)>{
+    // One parser for the recorder and the registration, so a binding the settings window accepts
+    // is never one this side quietly drops.
+    let hotkey=lyric_core::hotkey::Hotkey::parse(name)?;
+    let mut mods=HOT_KEY_MODIFIERS(0);
+    if hotkey.ctrl{mods|=MOD_CONTROL}if hotkey.alt{mods|=MOD_ALT}if hotkey.shift{mods|=MOD_SHIFT}if hotkey.win{mods|=MOD_WIN}
+    Some((mods,hotkey.vk))
+}
 fn awake_ms()->u64{let mut value=0u64;unsafe{let _=QueryUnbiasedInterruptTime(&mut value);}(value/10_000)as u64}
 static REQUESTS:OnceLock<Mutex<Vec<Pending>>>=OnceLock::new();static WINDOW:OnceLock<isize>=OnceLock::new();
 fn inside_round_rect(r:Rect,radius:f64,x:f64,y:f64)->bool{
@@ -57,13 +65,14 @@ struct App {
     compact_width:compact::Width,compact_key:String,compact_height:f64,last_compact:Instant,todos:todos::Store,todo_now:todos::Now,last_schedule:Instant,history:history::Store,last_history_prune:Instant,queue:std::collections::VecDeque<Queued>,pending_page:Option<String>,
     updates:update_activity::Hub,update_return:String,update_until:Option<Instant>,
     devices:devices::Hub,
-    timers:timers::Store,selected:String,components:Vec<String>,panel:Option<activities::Panel>,previous_panel:Option<activities::Panel>,drag_panel:Option<activities::Panel>,drag_target:String,slide_outgoing:bool,switching:bool,slide:activities::Spring,slide_direction:f64,swipe:Option<activities::Swipe>,last_timer:Instant,timer_fraction:u128,last_checkpoint:Instant,
+    timers:timers::Store,selected:String,components:Vec<String>,panel:Option<activities::Panel>,previous_panel:Option<activities::Panel>,drag_panel:Option<activities::Panel>,drag_target:String,slide_outgoing:bool,switching:bool,slide:activities::Spring,slide_direction:f64,swipe:Option<activities::Swipe>,hide_drag:Option<gestures::HideDrag>,dismiss_offset:activities::Spring,last_timer:Instant,timer_fraction:u128,last_checkpoint:Instant,
     cursor_inside:bool,leave_at:Option<Instant>,last_left:bool,user_hidden:bool,display_wanted:bool,missing_since:Option<Instant>,manual_until:Option<Instant>,
     opacity:f64,fade_from:f64,fade_to:f64,fade_start:Instant,hide_at:Option<Instant>,dirty:bool,
     settings_process:Option<std::process::Child>,renderer_generation:u64,render_frames:u64,error:Option<String>,transparent:bool,activity:motion::Activity,cover_start:Instant,progress:progress::PlaybackProgress,outgoing_opacity:f64,outgoing_y:f64,
     quick:Vec<QuickPreview>,quick_commits:Vec<(String,String)>,pending_action:Option<String>,templates:timers::Templates,
     rules:app_rules::Store,foreground:foreground::Watcher,usage_date:String,last_awake:u64,last_rules_checkpoint:Instant,
     lock_generation:u64,session_locked:bool,focus_resume:Option<FocusResume>,
+    bottom_osd:bottom_osd::Overlay,
     music_mix:f64,music_from:f64,music_start:Instant,
 }
 impl App {
@@ -85,10 +94,10 @@ impl App {
         let epoch=||std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()as i64;
         history.prune(history_days(),epoch());
         let compact_width=compact::Width::new(settings["CompactWidth"].as_f64().unwrap_or(260.));
-        let music_mix=if settings["MusicExpandedLayout"].as_str()==Some("Separated"){1.}else{0.};
-        let mut layout=Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.));layout.card.h=264.+20.*music_mix;
+        let music_mix=layout::MusicLayout::from_setting(settings["MusicExpandedLayout"].as_str().unwrap_or("")).position();
+        let mut layout=Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.));layout.card.h=layout::music_height(music_mix,settings["FontSize"].as_f64().unwrap_or(12.5));
         let updates=update_activity::Hub::new(&data);
-        Self{updates,update_return:"music".into(),update_until:None,banner:banner::Banner::default(),osd_banner:banner::Banner::default(),osd:osd::Hub::default(),pending_osd:0,notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout,settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_width,compact_key:String::new(),compact_height:40.,last_compact:now,todos,todo_now,last_schedule:now,history,last_history_prune:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,manual_until:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.,music_mix,music_from:music_mix,music_start:now,quick:vec![],quick_commits:vec![],pending_action:None,templates,rules,foreground,usage_date,last_awake:awake_ms(),last_rules_checkpoint:now,lock_generation:0,session_locked:false,focus_resume:None}
+        Self{bottom_osd:bottom_osd::Overlay::new(),updates,update_return:"music".into(),update_until:None,banner:banner::Banner::default(),osd_banner:banner::Banner::default(),osd:osd::Hub::default(),pending_osd:0,notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout,settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_width,compact_key:String::new(),compact_height:40.,last_compact:now,todos,todo_now,last_schedule:now,history,last_history_prune:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,hide_drag:None,dismiss_offset:activities::Spring::default(),last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,manual_until:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.,music_mix,music_from:music_mix,music_start:now,quick:vec![],quick_commits:vec![],pending_action:None,templates,rules,foreground,usage_date,last_awake:awake_ms(),last_rules_checkpoint:now,lock_generation:0,session_locked:false,focus_resume:None}
     }
     fn refresh_components(&mut self){
         let mut components=vec![];if self.updates.selectable(){components.push("update".into());}if self.demo||self.snapshot["track"].is_object(){components.push("music".to_string());}
@@ -99,7 +108,7 @@ impl App {
     }
     fn component_panel(&self,id:&str)->Option<activities::Panel>{
         if id=="update"{Some(self.updates.panel())}else if id=="todos"{let tasks=self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).take(3).map(|t|activities::Task{id:t.id.clone(),title:t.title.clone(),detail:format!("{} {}{}",t.date,t.time,if t.daily{" · 每天"}else{""}),color:0xff000000|u32::from_str_radix(t.color.trim_start_matches('#'),16).unwrap_or(0xf3d79b)}).collect();Some(activities::Panel{kind:2,title:"待办清单".into(),value:format!("{} 项待办",self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).count()),subtitle:"记住重要的小事".into(),accent:0xfff3d79b,tasks,..Default::default()})}
-        else if let Some(id)=id.strip_prefix("timer:"){self.timers.items.iter().find(|t|t.id==id).map(|t|activities::Panel{kind:1,title:t.name.clone(),value:t.clock(),subtitle:t.subtitle(),progress:t.progress(),running:t.running,accent:if t.mode=="pomodoro"{if t.phase=="rest"{0xff87cbb0}else{0xffe7a185}}else if t.mode=="workflow"{0xffc9bce5}else if t.mode=="stopwatch"{0xffb1e8d1}else{0xffadcaf0},tasks:vec![]})}else{None}
+        else if let Some(id)=id.strip_prefix("timer:"){self.timers.items.iter().find(|t|t.id==id).map(|t|t.panel())}else{None}
     }
     fn select_component(&mut self,id:&str,direction:i32){
         if !self.components.iter().any(|c|c==id)||self.selected==id{return}
@@ -107,26 +116,34 @@ impl App {
         self.slide_direction=if direction<0{-1.}else{1.};self.switching=self.flag("Animation",true);self.slide.set(if self.switching{self.slide_direction*if self.expanded{self.layout.card.w}else{self.layout.capsule.w}}else{0.});self.dirty=true;
     }
     fn cycle_component(&mut self,direction:i32){self.refresh_components();let n=self.components.len();if n<2{return}let i=self.components.iter().position(|c|c==&self.selected).unwrap_or(0);let next=(i as i32+direction).rem_euclid(n as i32)as usize;let id=self.components[next].clone();self.select_component(&id,direction);}
+    fn can_hide(&self,hit:i32)->bool{self.flag("SwipeUpHide",true)&&!self.banner.visible()&&self.dragging.is_none()&&matches!(hit,0|1|13|40..=42)}
+    fn hide_by_gesture(&mut self){self.user_hidden=true;self.held=false;self.leave_at=None;self.hide_at=None;self.seeking=false;self.pressed=0;self.drag_target.clear();self.drag_panel=None;self.swipe=None;self.fade(0.);self.dirty=true;}
     fn can_swipe(&self,hit:i32)->bool{self.flag("SwipeActivities",true)&&!self.banner.visible()&&self.components.len()>1&&matches!(hit,0|1|13|40..=42)}
     fn finish_swipe(&mut self,swipe:activities::Swipe)->bool{
         if !swipe.active{return false}
-        let direction=swipe.direction();let width=if self.expanded{self.layout.card.w}else{self.layout.capsule.w};let offset=swipe.dx.clamp(-width,width);
+        let fluid=self.flag("IslandFluidMotion",true);
+        // A flick is a decision even when the finger only travelled twenty pixels. Without
+        // this a quick throw springs back to where it started, which is the first gesture
+        // everyone tries and the one that reads as broken.
+        let direction=if fluid{let flick=swipe.flick();if flick!=0{flick}else{swipe.direction()}}else{swipe.direction()};
+        let width=if self.expanded{self.layout.card.w}else{self.layout.capsule.w};
+        let offset=if fluid{motion::rubber(swipe.dx,width)}else{swipe.dx.clamp(-width,width)};
         if direction!=0{self.cycle_component(direction);if self.flag("Animation",true){self.slide.release(self.slide_direction*width+offset,swipe.velocity);}}
         else{self.slide.release(if self.flag("Animation",true){offset}else{0.},swipe.velocity);self.slide_outgoing=false;self.switching=self.flag("Animation",true);}
         self.drag_target.clear();self.drag_panel=None;self.pressed=0;self.dirty=true;true
     }
-    fn active_timer_action(&mut self,action:&str){if let Some(id)=self.selected.strip_prefix("timer:"){if let Err(e)=self.timers.action(id,action){self.error=Some(e);}self.refresh_components();self.dirty=true;}}
+    fn active_timer_action(&mut self,action:&str){if let Some(id)=self.selected.strip_prefix("timer:"){let action=if action=="toggle"{self.timers.items.iter().find(|t|t.id==id).map(|t|t.primary_action()).unwrap_or(action)}else{action};if let Err(e)=self.timers.action(id,action){self.error=Some(e);}self.refresh_components();self.dirty=true;}}
     fn flag(&self,k:&str,default:bool)->bool{self.settings[k].as_bool().unwrap_or(default)}
     /// Prefer the single-file launcher when one extracted this copy: a versioned runtime folder
     /// changes on every update, so registering it would break login startup after the next release.
-    fn startup_target(&self)->PathBuf{if self.base.join("Installed.json").exists(){return self.base.join("LyricIsland.exe")}
+    fn startup_target(&self)->PathBuf{if self.base.join("Installed.json").exists()||self.base.join("Portable.json").is_file(){return self.base.join("LyricIsland.exe")}
         if let Ok(text)=std::fs::read_to_string(self.base.join("launcher.txt")){let path=PathBuf::from(text.trim());if path.is_file(){return path}}
         std::env::current_exe().unwrap_or_else(|_|self.base.join("LyricIsland.exe"))
     }
     fn apply_startup(&mut self)->std::result::Result<(),String>{
         shell::set_startup(self.flag("AutoStart",false),&self.startup_target().to_string_lossy(),&self.data.join("settings.json"),&self.settings,None)
     }
-    fn music_target(&self)->f64{if self.settings["MusicExpandedLayout"].as_str()==Some("Separated"){1.}else{0.}}
+    fn music_target(&self)->f64{layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")).position()}
     /// Height is part of the shared geometry, so the window keeps the taller host
     /// and only the card itself grows while the two layouts cross-fade.
     fn start_music_shift(&mut self){
@@ -135,9 +152,10 @@ impl App {
         else{self.music_mix=target;self.music_from=target;}
         self.dirty=true;
     }
+    fn shape(&self)->(Rect,f64){self.layout.morph_shape(self.frame.card_reveal,self.options().radius,self.flag("IslandFluidMotion",true))}
     fn options(&self)->Options{serde_json::from_value(self.settings["Motion"].clone()).unwrap_or_default()}
     unsafe fn position(&mut self)->Result<()> {
-        let base=self.compact_base();self.layout=Layout::new(base);self.layout.card.h=264.+20.*self.music_mix;self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
+        let base=self.compact_base();self.layout=Layout::new(base);self.layout.card.h=layout::music_height(self.music_mix,self.settings["FontSize"].as_f64().unwrap_or(12.5));self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
         let monitor=MonitorFromWindow(self.hwnd,MONITOR_DEFAULTTONEAREST);let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>()as u32,..Default::default()};let _=GetMonitorInfoW(monitor,&mut info);
         let dpi=GetDpiForWindow(self.hwnd).max(96)as f64;let scale=dpi/96.;let work=info.rcWork;let width=(self.layout.host.w*scale).ceil()as i32;let height=(self.layout.host.h*scale).ceil()as i32;
         let floating=self.flag("Floating",false);let center=if floating{self.settings["CenterX"].as_f64().unwrap_or(0.5)}else{0.5};
@@ -152,9 +170,25 @@ impl App {
     fn retarget(&mut self,expanded:bool){
         if self.expanded==expanded{return}let velocity=self.transition.as_ref().map(|t|t.velocity(self.sampled_ms)).unwrap_or_default();
         self.expanded=expanded;let o=self.options();
-        if self.flag("Animation",true){self.transition=Some(Transition::new(expanded,self.frame,o,velocity,false));self.transition_start=Instant::now();self.sampled_ms=0.;}
+        if self.flag("Animation",true){self.transition=Some(Transition::styled(self.motion_style(),expanded,self.frame,o,velocity,false));self.transition_start=Instant::now();self.sampled_ms=0.;}
         else{self.transition=None;self.frame=if expanded{Frame::expanded()}else{Frame::hidden(o)};}
         self.dirty=true;
+    }
+    /// Which island curve this frame uses.
+    ///
+    /// 灵动岛流体动画 is its own switch, separate from 界面动画: the latter turns motion off
+    /// entirely, this one chooses between the 2.0.0 curve and the derived-channel one. Both
+    /// stay in the binary, so a user who preferred the old read keeps it exactly.
+    fn motion_style(&self)->motion::Style{if self.flag("IslandFluidMotion",true){motion::Style::Fluid}else{motion::Style::Classic}}
+    /// How far the dragged surface is drawn from its resting place.
+    ///
+    /// The classic curve hard-clamps at one width, so the surface stops dead under a finger
+    /// that is still moving. The fluid curve damps the excess instead, which is the only
+    /// difference the user can see at the boundary.
+    fn swipe_offset(&self)->f64{
+        let Some(swipe)=self.swipe.filter(|s|s.active)else{return 0.};
+        let width=if self.expanded{self.layout.card.w}else{self.layout.capsule.w};
+        if self.flag("IslandFluidMotion",true){motion::rubber(swipe.dx,width)}else{swipe.dx.clamp(-width,width)}
     }
     fn fade(&mut self,target:f64){if self.fade_to!=target{self.fade_from=self.opacity;self.fade_to=target;self.fade_start=Instant::now();self.dirty=true;}}
     fn command(&self,action:&str,seconds:f64){if let Some(backend)=self.backend.clone(){use std::sync::atomic::Ordering;if self.command_busy.swap(true,Ordering::AcqRel){return}let busy=self.command_busy.clone();let action=action.to_string();std::thread::spawn(move||{let _=backend.command(&action,seconds);busy.store(false,Ordering::Release);});}}
@@ -300,7 +334,7 @@ impl App {
     /// is on screen. Called after a todo is completed or deleted.
     fn cancel_todo(&mut self,id:&str){
         self.queue.retain(|e|e.todo.as_deref()!=Some(id));
-        if self.banner_todo.as_deref()==Some(id){self.banner_todo=None;let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+        if self.banner_todo.as_deref()==Some(id){self.banner_todo=None;let (r,rad)=self.shape();self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
     }
     fn poll(&mut self){
         let previous=self.snapshot.clone();self.last_poll=Instant::now();if let Some(b)=&self.backend{self.snapshot=b.snapshot(self.cover_version);}
@@ -335,16 +369,16 @@ impl App {
         if self.opacity<0.01{return -1}
         if self.banner.visible(){let (r,radius,_)=self.banner.presentation(self.start.elapsed().as_secs_f64());if !inside_round_rect(r,radius,x,y){return -1}return if Rect::new(r.x+r.w-32.,r.y+6.,26.,26.).contains(x,y){11}else{12}}
         if !self.expanded&&self.components.len()>1&&self.layout.satellite().contains(x,y){return 20}
-        let (shape,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
+        let (shape,radius)=self.shape();
         if !inside_round_rect(shape,radius,x,y){return -1}
         if self.selected!="music"{
-            if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let x=(x-shape.x)/scale;let y=(y-shape.y)/scale-self.frame.content_offset_y;let w=self.layout.card.w;if self.selected=="update"{if Rect::new(24.,190.,w-48.,42.).contains(x,y){return 50}if Rect::new(w-48.,14.,30.,30.).contains(x,y){return 51}}else if self.selected=="todos"{for(i,r)in layout::todo_rows(w,self.panel.as_ref().map(|p|p.tasks.len()).unwrap_or(0)).enumerate(){if r.contains(x,y){return 40+i as i32;}}if layout::todo_footer(w).contains(x,y){return 7}}else{if Rect::new(w/2.-50.,137.,100.,40.).contains(x,y){return 30}if Rect::new(18.,145.,60.,32.).contains(x,y){return 31}if Rect::new(w-78.,145.,60.,32.).contains(x,y){return 7}}}
+            if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let x=(x-shape.x)/scale;let y=(y-shape.y)/scale-self.frame.content_offset_y;let w=self.layout.card.w;if self.selected=="update"{if Rect::new(24.,190.,w-48.,42.).contains(x,y){return 50}if Rect::new(w-48.,14.,30.,30.).contains(x,y){return 51}}else if self.selected=="todos"{for(i,r)in layout::todo_rows(w,self.panel.as_ref().map(|p|p.tasks.len()).unwrap_or(0)).enumerate(){if r.contains(x,y){return 40+i as i32;}}if layout::todo_footer(w).contains(x,y){return 7}}else{for(id,rect)in layout::timer_buttons(w){if rect.contains(x,y){return id}}}}
             return 0
         }
         if 1.-motion::blend(self.frame.card_reveal,0.06,0.46)>0.1&&self.layout.compact_cover(unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.}).contains(x,y){return 1}
         if self.expanded&&self.frame.content_opacity*motion::blend(self.frame.card_reveal,0.25,0.88)>0.01{
             let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let ty=shape.y+(shape.h-self.layout.card.h*scale)/2.;let x=(x-tx)/scale;let y=(y-ty)/scale-self.frame.content_offset_y;let w=self.layout.card.w;
-            let g=layout::music_geometry(w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.});
+            let g=layout::music_geometry(w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},self.settings["FontSize"].as_f64().unwrap_or(12.5));
             if g.cover.contains(x,y){return 1}
             if self.flag("MusicClickOpenApp",false)&&g.text_hit.contains(x,y){return 13}
             if g.progress_hit.contains(x,y){return 10}
@@ -355,7 +389,7 @@ impl App {
         // The click-through visual HWND retains the complete GPU surface, including
         // shadows. This separate, undrawn HWND receives input only inside the
         // animated contour. No alpha readback or cursor polling is required.
-        let (r,radius)=if self.banner.visible(){let (r,radius,_)=self.banner.presentation(self.start.elapsed().as_secs_f64());(r,radius)}else{self.layout.shape(self.frame.card_reveal,self.options().radius)};
+        let (r,radius)=if self.banner.visible(){let (r,radius,_)=self.banner.presentation(self.start.elapsed().as_secs_f64());(r,radius)}else{self.shape()};
         let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;
         let satellite=if !self.expanded&&!self.banner.visible()&&self.components.len()>1{self.layout.satellite()}else{Rect::default()};
         let key=if self.opacity<0.01{[0;10]}else{[(r.x*scale).floor()as i32,(r.y*scale).floor()as i32,((r.x+r.w)*scale).ceil()as i32,((r.y+r.h)*scale).ceil()as i32,(radius*2.*scale).round()as i32,(radius*2.*scale).round()as i32,(satellite.x*scale)as i32,(satellite.y*scale)as i32,((satellite.x+satellite.w)*scale)as i32,((satellite.y+satellite.h)*scale)as i32]};
@@ -377,7 +411,7 @@ impl App {
                 if todo.as_ref().is_some_and(|id|id.starts_with("device:")){}else if todo.as_ref().is_some_and(|id|id.starts_with("timer:")){self.show_settings_page("timers");}else if todo.as_ref().is_some_and(|id|id.starts_with("focus:")){self.show_settings_page("timers");}else if todo.as_ref().is_some_and(|id|id.starts_with("rule:")){self.show_settings_page("notifications");}else if todo.is_some(){self.show_settings_page("todos");}
                 else if self.flag("NotificationClickOpenApp",true){if let Some(n)=&self.banner.notice{if let Err(e)=activation::open(&n.app_id){self.error=Some(e);}}}
             }
-            let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
+            let (base,radius)=self.shape();self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
         0=>{if self.expanded{self.held=false;self.retarget(false)}else if self.flag("ClickAnywhereExpand",false){self.held=true;self.retarget(true)}},
         1|13=>{if self.flag("MusicClickOpenApp",false){if let Err(e)=activation::open(self.snapshot["sourceId"].as_str().unwrap_or("")){self.error=Some(e);}}else if id==1{self.held=!self.held;self.retarget(self.held)}},2=>{if self.flag("Floating",false){let mut cursor=POINT::default();let mut bounds=RECT::default();let _=GetCursorPos(&mut cursor);let _=GetWindowRect(self.hwnd,&mut bounds);self.dragging=Some((cursor,bounds));SetCapture(self.hwnd);}},
         3=>self.command("previous",0.),4=>{if self.demo{self.snapshot["isPlaying"]=json!(self.snapshot["isPlaying"]!=true)}else{self.command("toggle",0.)}},5=>self.command("next",0.),
@@ -385,14 +419,17 @@ impl App {
         9=>{let title=self.snapshot["track"]["title"].as_str().unwrap_or("").to_string();let source=self.snapshot["track"]["sourceApp"].as_str().unwrap_or("").to_string();std::thread::spawn(move||{shell::favorite(&title,&source,true);});},_=>{}}
         self.dirty=true;
     }
-    fn update_seek(&mut self,x:f64){let (shape,_)=self.layout.shape(self.frame.card_reveal,self.options().radius);let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let g=layout::music_geometry(self.layout.card.w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.});self.seek_fraction=((x-tx-g.track.x*scale)/(g.track.w*scale)).clamp(0.,1.);self.dirty=true;}
+    fn update_seek(&mut self,x:f64){let (shape,_)=self.shape();let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let g=layout::music_geometry(self.layout.card.w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},self.settings["FontSize"].as_f64().unwrap_or(12.5));self.seek_fraction=((x-tx-g.track.x*scale)/(g.track.w*scale)).clamp(0.,1.);self.dirty=true;}
     fn progress_value(&self)->f64{self.progress.fraction(self.start.elapsed().as_secs_f64())}
     fn scene(&self)->Scene<'_>{
         let elapsed=self.progress.seconds(self.start.elapsed().as_secs_f64());let duration=self.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);let track=&self.snapshot["track"];let f=&self.snapshot["frame"];
+        // Sampled once: two calls per frame meant the bars and their opacity were read at
+        // two different instants, so the analyser could disagree with itself mid-fade.
+        let activity=self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true));
         let col=|k:&str,default:u32|self.settings[k].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).map(|v|0xff000000|v).unwrap_or(default);
         let (notice_rect,notice_radius,notice_mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());
         let (osd_rect,osd_radius,osd_mix)=self.osd_banner.presentation(self.start.elapsed().as_secs_f64());
-        Scene{drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe.filter(|s|s.active).map(|s|s.dx.clamp(-if self.expanded{self.layout.card.w}else{self.layout.capsule.w},if self.expanded{self.layout.card.w}else{self.layout.capsule.w})).unwrap_or(0.),lyric_cover_color:self.flag("LyricColorFromCover",true),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,osd:if self.banner.visible(){None}else{self.osd_banner.notice.as_ref()},osd_rect,osd_radius,osd_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),music_layout:layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),music_mix:self.music_mix,text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
+        Scene{fluid_motion:self.flag("IslandFluidMotion",true),drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe_offset(),lyric_cover_color:self.flag("LyricColorFromCover",true),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,osd:if self.banner.visible(){None}else{self.osd_banner.notice.as_ref()},osd_rect,osd_radius,osd_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),music_layout:layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),music_mix:self.music_mix,text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:activity.0,activity_opacity:activity.1,cover_opacity:1.,cover_age_ms:self.cover_start.elapsed().as_secs_f64()*1000.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
     }
     unsafe fn draw(&mut self)->Result<()>{// Take the renderer to split immutable scene data from mutable graphics state.
         if let Some(mut r)=self.renderer.take(){let result=r.render(&self.scene(),true);self.renderer=Some(r);result?;self.render_frames+=1;}self.dirty=false;Ok(())
@@ -402,8 +439,8 @@ impl App {
         let device=notice.app_id.starts_with("LyricIsland.Device");
         self.notification_preview=preview;self.banner_todo=todo.clone();
         let now=self.start.elapsed().as_secs_f64();
-        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,now,false);}
-        let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
+        if self.osd_banner.visible(){let (r,rad)=self.shape();self.osd_banner.dismiss(r,rad,now,false);}
+        let (base,radius)=self.shape();
         if let Some(r)=&mut self.renderer{let _=unsafe{r.set_notification_icon(notice.icon.as_deref())};}
         let width=440_f64.min(self.layout.host.w-48.);let height=self.renderer.as_mut().and_then(|r|unsafe{r.notification_height(&notice,width)}.ok()).unwrap_or(80.);
         self.banner.show(notice,base,radius,self.layout.host.w,height,now,self.flag("Animation",true));
@@ -417,14 +454,19 @@ impl App {
     fn show_osd(&mut self,hint:osd::Hint,preview:bool){
         if !preview&&(!self.flag("SystemStateHintsEnabled",true)||self.flag("PauseNotifications",false)){return}
         if self.demo&&!preview{return}
+        if self.settings["SystemStateHintPlacement"].as_str()==Some("Bottom"){
+            let font=self.base.join("Assets/Fonts/NotoSansSC.ttf");let animate=self.flag("Animation",true);
+            if let Err(e)=unsafe{self.bottom_osd.show(hint.notice(),self.hwnd,&font,animate)}{self.error=Some(e.to_string());}return
+        }
+        if self.user_hidden&&!preview{return}
         let now=self.start.elapsed().as_secs_f64();
         // A message the user is reading always wins; the hint is transient and is dropped
         // instead of cutting the notification short.
         if self.banner.visible(){
             if !preview{return}
-            let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,now,false);
+            let (r,rad)=self.shape();self.banner.dismiss(r,rad,now,false);
         }
-        let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
+        let (base,radius)=self.shape();
         self.osd_banner.show_compact(hint.notice(),base,radius,self.layout.host.w,now,self.flag("Animation",true));
         self.hide_at=None;self.fade(1.);self.dirty=true;
     }
@@ -432,24 +474,28 @@ impl App {
         if !self.flag("SystemStateHintsEnabled",true){self.pending_osd=0;return}
         let pending=std::mem::take(&mut self.pending_osd);
         if pending==0{return}
-        for hint in self.osd.flush(pending,self.flag("CapsLockHintEnabled",true),self.flag("NumLockHintEnabled",true),self.flag("MicrophoneMuteHintEnabled",true)){self.show_osd(hint,false);}
+        for hint in self.osd.flush(pending,true,true,true){self.show_osd(hint,false);}
     }
     fn apply_osd(&mut self){
         if self.demo{return}
         if self.flag("SystemStateHintsEnabled",true){unsafe{self.osd.install(self.hwnd);}}
         else{
-            self.osd.uninstall();self.pending_osd=0;
-            if self.osd_banner.visible(){let now=self.start.elapsed().as_secs_f64();let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,now,false);}
+            self.osd.uninstall();self.pending_osd=0;unsafe{self.bottom_osd.clear();}
+            if self.osd_banner.visible(){let now=self.start.elapsed().as_secs_f64();let (r,rad)=self.shape();self.osd_banner.dismiss(r,rad,now,false);}
         }
     }
     unsafe fn tick(&mut self)->Result<()> {
+        self.bottom_osd.tick()?;
         if self.updates.tick(self.flag("AutoCheckUpdatesEnabled",true),self.demo){self.dirty=true;}
         if self.updates.reminder{self.updates.reminder=false;if !self.flag("PauseNotifications",false){if self.selected!="update"{self.update_return=self.selected.clone();}self.refresh_components();self.select_component("update",1);self.update_until=Some(Instant::now()+Duration::from_secs(8));self.user_hidden=false;self.fade(1.);}}
         if self.update_until.is_some_and(|until|Instant::now()>until)&&!self.updates.busy()&&!self.held{self.update_until=None;let previous=self.update_return.clone();self.select_component(&previous,-1);self.manual_until=None;}
         let gates=devices::Gates{master:self.flag("DeviceRemindersEnabled",true)&&!self.flag("PauseNotifications",false),disconnect:self.flag("DeviceDisconnectRemindersEnabled",true),headphones:self.flag("HeadphoneConnectionRemindersEnabled",true),speaker:self.flag("SpeakerConnectionRemindersEnabled",true),gamepad:self.flag("GamepadConnectionRemindersEnabled",true),mouse:self.flag("MouseConnectionRemindersEnabled",true),keyboard:self.flag("KeyboardConnectionRemindersEnabled",true)};
         for event in self.devices.poll(&gates){let notice=event.notice();self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("device:{}",event.key)),chime:true});self.record_history("device",&notice,None);}
-        if self.flag("SystemStateHintsEnabled",true)&&!self.flag("PauseNotifications",false){for hint in self.osd.poll(self.flag("MicrophoneMuteHintEnabled",true),self.flag("TouchpadHintEnabled",true)){self.show_osd(hint,false);}}else{self.osd.poll(false,false);}
+        if self.flag("SystemStateHintsEnabled",true)&&!self.flag("PauseNotifications",false){for hint in self.osd.poll(true,true){self.show_osd(hint,false);}}else{self.osd.poll(false,false);}
         let now=Instant::now();let dt=now.duration_since(self.last_timer);self.last_timer=now;
+        let before=self.dismiss_offset.value;
+        if self.hide_drag.is_none(){if self.user_hidden&&self.opacity>0.001&&before<0.{self.dismiss_offset.set((before-dt.as_secs_f64()*180.).max(-150.));}else{self.dismiss_offset.tick(dt.as_secs_f64());}}
+        if (before-self.dismiss_offset.value).abs()>0.01||self.hide_drag.is_some_and(|d|d.active){let mut rect=RECT::default();GetWindowRect(self.hwnd,&mut rect)?;let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;SetWindowPos(self.visual_hwnd,None,rect.left,rect.top+(self.dismiss_offset.value*scale).round()as i32,0,0,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOSIZE)?;self.dirty=true;}
         let nanos=dt.as_nanos()+self.timer_fraction;self.timer_fraction=nanos%1_000_000;
         let events=self.timers.advance((nanos/1_000_000).min(u64::MAX as u128)as u64);
         if !events.is_empty(){for t in events{let notice=notifications::Notice{app_id:"LyricIsland.Timer".into(),app_name:"计时器".into(),title:t.name.clone(),body:if t.finished{"计时已完成".into()}else{t.subtitle()},icon:None};self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("timer:{}",t.id)),chime:true});self.record_history("timer",&notice,None);}if let Err(e)=self.timers.persist(){self.error=Some(e);}}
@@ -466,9 +512,9 @@ impl App {
             notifications::Event::Notice(notice)=>{let policy=notifications::Policy::from_settings(&self.settings);if policy.should_show()&&policy.permits(&notice.app_id,&notice.app_name){if !self.user_hidden{self.enqueue(Queued{notice:notice.clone(),todo:None,chime:true});}self.record_history("notice",&notice,None);}}
         }}
         if self.flag("PauseNotifications",false){
-            if self.banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+            if self.banner.visible(){let (r,rad)=self.shape();self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
             if self.selected=="update"&&self.opacity>0.001&&self.panel.as_ref().is_some_and(|p|p.running&&p.progress<0.)&&self.flag("Animation",true){self.dirty=true;}
-        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+        if self.osd_banner.visible(){let (r,rad)=self.shape();self.osd_banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}self.bottom_osd.clear();
             // Nothing may be presented or chimed while paused. Reminders stay
             // unmarked, so they are re-checked once notifications resume.
             self.queue.retain(|e|e.todo.is_some());
@@ -477,10 +523,15 @@ impl App {
         if let Some(t)=self.transition{self.sampled_ms=self.transition_start.elapsed().as_secs_f64()*1000.;self.frame=t.sample(self.sampled_ms);self.dirty=true;if self.sampled_ms>=t.duration_ms{self.transition=None;self.frame=t.end;}}
         let target=self.music_target();
         if (self.music_mix-target).abs()>0.0001{let t=if self.flag("Animation",true){(self.music_start.elapsed().as_secs_f64()/0.23).min(1.)}else{1.};let e=t*t*(3.-2.*t);self.music_mix=self.music_from+(target-self.music_from)*e;if t>=1.{self.music_mix=target;}self.dirty=true;}
-        let target_height=if self.selected=="update"{264.}else if self.panel.is_some(){200.}else{264.+20.*self.music_mix};
+        let target_height=if self.selected=="update"{264.}else if self.panel.is_some(){200.}else{layout::music_height(self.music_mix,self.settings["FontSize"].as_f64().unwrap_or(12.5))};
         if (self.layout.card.h-target_height).abs()>0.01{let weight=if self.flag("Animation",true){1.-(-dt.as_secs_f64()*26.).exp()}else{1.};self.layout.card.h+=(target_height-self.layout.card.h)*weight;if (self.layout.card.h-target_height).abs()<0.1{self.layout.card.h=target_height;}self.dirty=true;}
         if !self.banner.visible()&&self.hide_at.is_some_and(|t|Instant::now()>=t){self.hide_at=None;self.fade(0.);}
-        if (self.opacity-self.fade_to).abs()>0.00001{let t=if self.flag("Animation",true){(self.fade_start.elapsed().as_secs_f64()/0.2).min(1.)}else{1.};self.opacity=self.fade_from+(self.fade_to-self.fade_from)*(1.-(std::f64::consts::PI*t).cos())/2.;self.dirty=true;}
+        if (self.opacity-self.fade_to).abs()>0.00001{let t=if self.flag("Animation",true){(self.fade_start.elapsed().as_secs_f64()/0.2).min(1.)}else{1.};
+            // A symmetric sine starts slow, and an appearing surface is exactly what the eye
+            // is locked onto at that instant. The fluid curve decelerates into place instead,
+            // so the island is already most of the way visible by the time it is noticed.
+            let eased=if self.flag("IslandFluidMotion",true){motion::cubic_out(t)}else{(1.-(std::f64::consts::PI*t).cos())/2.};
+            self.opacity=self.fade_from+(self.fade_to-self.fade_from)*eased;self.dirty=true;}
         let mut pt=POINT::default();let _=GetCursorPos(&mut pt);let mut local=pt;let _=ScreenToClient(self.hwnd,&mut local);let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;let x=local.x as f64/scale;let y=local.y as f64/scale;
         let hit=self.hit(x,y);let inside=hit>=0;
         if inside{if let Some(t)=self.manual_until.as_mut(){*t=Instant::now()+Duration::from_secs(6);}}
@@ -489,13 +540,13 @@ impl App {
         if self.swipe.is_none()&&!self.banner.visible()&&self.leave_at.is_some_and(|t|t.elapsed()>=Duration::from_millis(1200)){self.leave_at=None;if !self.held{self.retarget(false)}}
         self.cursor_inside=inside;if self.hover!=hit{self.hover=hit;self.dirty=true;}
         let left=GetAsyncKeyState(VK_LBUTTON.0 as i32)<0;if !self.banner.visible()&&left&&!self.last_left&&!inside&&self.expanded{self.held=false;self.retarget(false)}self.last_left=left;
-        if self.opacity>0.001&&(self.snapshot["isPlaying"]==true&&self.flag("Animation",true)||self.lyric_start.elapsed()<Duration::from_millis(220)){self.dirty=true;}
+        if self.opacity>0.001&&(self.snapshot["isPlaying"]==true&&self.flag("Animation",true)||self.lyric_start.elapsed()<Duration::from_millis(220)||(self.expanded&&self.flag("Animation",true)&&self.cover_start.elapsed()<Duration::from_millis(300))){self.dirty=true;}
         if self.banner.visible(){
-            let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);
+            let (r,rad)=self.shape();
             self.banner.tick(r,rad,self.start.elapsed().as_secs_f64(),inside,self.flag("Animation",true));self.dirty=true;
             if !self.banner.visible(){self.banner_todo=None;self.last_poll=Instant::now()-Duration::from_secs(1);}
         }
-        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.tick(r,rad,self.start.elapsed().as_secs_f64(),false,self.flag("Animation",true));self.dirty=true;}
+        if self.osd_banner.visible(){let (r,rad)=self.shape();self.osd_banner.tick(r,rad,self.start.elapsed().as_secs_f64(),false,self.flag("Animation",true));self.dirty=true;}
         // Collapsed capsule: retarget only when an input actually changed, then
         // advance the spring. Measurement is cached inside the renderer.
         let compact_key=format!("{}|{}|{}|{}|{}",self.lyric,self.compact_secondary,self.settings["FontSize"],self.settings["CompactWidth"],self.flag("AutoCompactWidth",false));
@@ -516,20 +567,20 @@ impl App {
     unsafe fn request(&mut self,r:Value)->Value {
         if r["version"]!=1{return json!({"success":false,"message":"请求版本无效"})}let command=r["command"].as_str().unwrap_or("");
         match command {
-            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"settings":self.settings,"softwareUpdate":self.updates.state,"dataDirectory":self.data.to_string_lossy(),"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"osdVisible":self.osd_banner.visible(),"systemState":self.osd.status(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"compactWidth":self.compact_width.value,"compactHeight":self.compact_height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components,"notificationHistory":self.history.list(),"historyError":self.history.error,"quickHotkey":self.settings["QuickReminderHotkey"],"pendingAction":self.pending_action,"sessionLocked":self.session_locked,"focusResume":self.focus_resume.as_ref().map(|r|json!({"generation":r.generation,"ids":r.ids,"prompted":r.prompted})),"templates":self.templates.list(),"workflowTemplateError":self.templates.error,"appRules":self.rules.list(&self.todo_now.date),"appRuleError":self.rules.error,"foreground":{"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable},"lockWatch":true})},
-            "updateTestPrepare" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{self.updates.nonce="integration-test-nonce".into();self.updates.job="integration-test-job".into();self.updates.action.clear();self.updates.release=json!({"newer":true,"version":"2.0.1"});self.updates.state=json!({"phase":"downloading","seq":0});self.refresh_components();json!({"success":true,"nonce":self.updates.nonce,"jobId":self.updates.job})},
+            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"settings":self.settings,"softwareUpdate":self.updates.state,"dataDirectory":self.data.to_string_lossy(),"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"osdVisible":self.osd_banner.visible()||self.bottom_osd.visible(),"bottomOsdVisible":self.bottom_osd.visible(),"systemState":self.osd.status(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"compactWidth":self.compact_width.value,"compactHeight":self.compact_height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components,"notificationHistory":self.history.list(),"historyError":self.history.error,"quickHotkey":self.settings["QuickReminderHotkey"],"pendingAction":self.pending_action,"sessionLocked":self.session_locked,"focusResume":self.focus_resume.as_ref().map(|r|json!({"generation":r.generation,"ids":r.ids,"prompted":r.prompted})),"templates":self.templates.list(),"workflowTemplateError":self.templates.error,"appRules":self.rules.list(&self.todo_now.date),"appRuleError":self.rules.error,"foreground":{"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable},"lockWatch":true})},
+            "updateTestPrepare" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{self.updates.nonce="integration-test-nonce".into();self.updates.job="integration-test-job".into();self.updates.action.clear();self.updates.release=json!({"newer":true,"version":env!("CARGO_PKG_VERSION")});self.updates.state=json!({"phase":"downloading","seq":0});self.refresh_components();json!({"success":true,"nonce":self.updates.nonce,"jobId":self.updates.job})},
             "showUpdate"=>{self.refresh_components();if self.updates.selectable(){self.select_component("update",1);self.held=true;self.retarget(true);self.user_hidden=false;self.fade(1.);json!({"success":true})}else{json!({"success":false,"message":"当前没有更新任务，请先检查更新。"})}},
-            "openInstaller"=>{match std::process::Command::new(self.base.join("DotIsle.Setup.exe")).arg("--migrate-data").arg(&self.data).spawn(){Ok(_)=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e.to_string()})}},
+            "openInstaller"=>{match std::process::Command::new(self.base.join("DotIsle.Setup.exe")).arg(format!("/MIGRATEDATA={}",self.data.display())).spawn(){Ok(_)=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e.to_string()})}},
             "checkUpdate"=>{self.updates.check(true);json!({"success":true,"message":"正在检查双源更新…"})},
             "updateDownload"|"installUpdate"=>{let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());match self.updates.begin(&self.base,&self.data,&pipe){Ok(())=>{if self.selected!="update"{self.update_return=self.selected.clone();}self.refresh_components();self.select_component("update",1);self.held=true;self.retarget(true);self.user_hidden=false;self.fade(1.);json!({"success":true,"message":"开始下载；校验后等待你确认安装。"})},Err(e)=>json!({"success":false,"message":e})}},
             "updateApply"=>{if self.updates.phase()!="ready"{json!({"success":false,"message":"更新尚未就绪"})}else{self.updates.action="apply".into();json!({"success":true})}},
             "updateCancel"=>{if matches!(self.updates.phase(),"applying"|"restarting"){json!({"success":false,"message":"安装期间不可取消"})}else{self.updates.action="cancel".into();json!({"success":true})}},
             "updateProgress"=>{match self.updates.progress(&r["value"]){Ok(reply)=>{if matches!(self.updates.phase(),"cancelled"|"failed"|"completed"){self.held=false;self.update_until=Some(Instant::now()+Duration::from_secs(5));}self.dirty=true;reply},Err(e)=>json!({"success":false,"message":e})}},
             "deviceSoundPreview"=>{match sound::play_device(&self.settings,true){Ok(())=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e})}},
-            "devicePreview"=>{let kind=match r["value"]["kind"].as_str().unwrap_or("usb"){"phone"=>devices::Kind::Phone,"volume"=>devices::Kind::Volume,"headphones"=>devices::Kind::Headphones,"speaker"=>devices::Kind::Speaker,"gamepad"=>devices::Kind::Gamepad,"mouse"=>devices::Kind::Mouse,"keyboard"=>devices::Kind::Keyboard,"audio"=>devices::Kind::Audio,_=>devices::Kind::Usb};let connected=r["value"]["connected"].as_bool().unwrap_or(true);let label=match kind{devices::Kind::Phone=>"手机 · 示例设备",devices::Kind::Volume=>"移动磁盘 · 示例设备",devices::Kind::Headphones=>"耳机 · 示例设备",devices::Kind::Speaker=>"音响 · 示例设备",devices::Kind::Gamepad=>"手柄 · 示例设备",devices::Kind::Mouse=>"鼠标 · 示例设备",devices::Kind::Keyboard=>"键盘 · 示例设备",devices::Kind::Audio=>"音频设备 · 示例设备",devices::Kind::Usb=>"U 盘 · 示例设备"};let e=devices::Event::new("preview".into(),kind,connected,label.into());self.show_notice(e.notice(),true,Some("device:preview".into()),true);json!({"success":true})},
+            "devicePreview"=>{let kind=match r["value"]["kind"].as_str().unwrap_or("usb"){"phone"=>devices::Kind::Phone,"volume"=>devices::Kind::Volume,"headphones"=>devices::Kind::Headphones,"speaker"=>devices::Kind::Speaker,"gamepad"=>devices::Kind::Gamepad,"mouse"=>devices::Kind::Mouse,"keyboard"=>devices::Kind::Keyboard,_=>devices::Kind::Usb};let connected=r["value"]["connected"].as_bool().unwrap_or(true);let label=match kind{devices::Kind::Phone=>"手机 · 示例设备",devices::Kind::Volume=>"移动磁盘 · 示例设备",devices::Kind::Headphones=>"耳机 · 示例设备",devices::Kind::Speaker=>"音响 · 示例设备",devices::Kind::Gamepad=>"手柄 · 示例设备",devices::Kind::Mouse=>"鼠标 · 示例设备",devices::Kind::Keyboard=>"键盘 · 示例设备",devices::Kind::Usb=>"U 盘 · 示例设备"};let e=devices::Event::new("preview".into(),kind,connected,label.into());self.show_notice(e.notice(),true,Some("device:preview".into()),true);json!({"success":true})},
             "osdPreview"=>{let kind=match r["value"]["kind"].as_str().unwrap_or("caps"){"num"=>osd::Kind::Num,"mic"=>osd::Kind::Mic,"touchpad"=>osd::Kind::Touchpad,_=>osd::Kind::Caps};let on=r["value"]["on"].as_bool().unwrap_or(true);self.show_osd(osd::Hint{kind,on},true);json!({"success":true})},
             "timerCreate"=>{let mut value=r["value"].clone();if value["name"].as_str().is_none_or(|s|s.trim().is_empty()){if let Some(title)=value["todoId"].as_str().and_then(|id|self.todos.items.iter().find(|t|t.id==id)).map(|t|t.title.clone()){value["name"]=json!(title);}}match self.timers.create(&value){Ok(id)=>{self.refresh_components();self.select_component(&format!("timer:{id}"),1);self.user_hidden=false;self.hide_at=None;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true,"id":id})},Err(e)=>json!({"success":false,"message":e})}},
-            "timerAction"=>{let id=r["value"]["id"].as_str().unwrap_or("");let action=r["value"]["action"].as_str().unwrap_or("");match self.timers.act(id,action,r["value"]["revision"].as_u64()){Ok(())=>{self.refresh_components();self.compact_key.clear();json!({"success":true,"timers":self.timers.list()})},Err(e)=>json!({"success":false,"message":e})}},
+            "timerAction"=>{let id=r["value"]["id"].as_str().unwrap_or("");let action=r["value"]["action"].as_str().unwrap_or("");let result=if action=="direction"{r["value"]["countUp"].as_bool().ok_or_else(||"计时方向无效".to_owned()).and_then(|up|self.timers.set_direction(id,up,r["value"]["revision"].as_u64()))}else{self.timers.act(id,action,r["value"]["revision"].as_u64())};match result{Ok(())=>{self.refresh_components();self.compact_key.clear();json!({"success":true,"timers":self.timers.list()})},Err(e)=>json!({"success":false,"message":e})}},
             "quickReminderPreview"=>{let text=r["value"]["text"].as_str().unwrap_or("").to_owned();self.quick_preview(&text)},
             "quickReminderCommit"=>{let token=r["value"]["previewToken"].as_str().unwrap_or("");let request=r["value"]["clientRequestId"].as_str().unwrap_or("");self.quick_commit(token,request)},
             "pendingActionSeen"=>{self.pending_action=None;json!({"success":true})},
@@ -597,7 +648,7 @@ impl App {
                 match sound::play(&self.settings,todo,true){Ok(())=>json!({"success":true,"message":"已播放试听"}),Err(e)=>json!({"success":false,"message":e})}
             },
             "expand"=>{self.user_hidden=false;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true})},
-            "toggleVisibility"=>{self.user_hidden=!self.user_hidden;if !self.user_hidden{self.manual_until=Some(Instant::now()+Duration::from_secs(6));}self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
+            "toggleVisibility"=>{self.dismiss_offset.set(0.);let _=self.position();self.user_hidden=!self.user_hidden;if !self.user_hidden{self.manual_until=Some(Instant::now()+Duration::from_secs(6));}self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
             "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true,None,true);json!({"success":true,"message":"通知横幅预览"})},
             "toggleNotifications"=>{
                 if !self.flag("NotificationsEnabled",true){return self.request(json!({"version":1,"command":"update","value":{"key":"NotificationsEnabled","value":true}}))}
@@ -625,8 +676,9 @@ impl App {
                 if let Some(listener)=&self.notification_listener{listener.configure(notifications::Policy::from_settings(&self.settings));}
                 if r["value"]["key"]=="QuickReminderHotkey"&&!self.demo{if let Err(e)=unsafe{self.register_hotkey()}{self.settings=old.clone();let _=self.save();let _=unsafe{self.register_hotkey()};return json!({"success":false,"message":e})}}
                 if r["value"]["key"]=="FocusPauseOnLock"&&!self.flag("FocusPauseOnLock",false){self.focus_resume=None;if let Err(e)=self.timers.clear_lock_pauses(){self.error=Some(e);}}
-                if !self.notification_preview&&self.banner.visible()&&(self.flag("PauseNotifications",false)||(self.banner_todo.is_none()&&(!self.flag("NotificationsEnabled",true)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))))){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+                if !self.notification_preview&&self.banner.visible()&&(self.flag("PauseNotifications",false)||(self.banner_todo.is_none()&&(!self.flag("NotificationsEnabled",true)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))))){let (r,rad)=self.shape();self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
                 if let Some(b)=&self.backend{b.apply(self.settings.clone());}if let Err(e)=self.position(){self.error=Some(e.to_string());return json!({"success":false,"message":e.to_string()})}
+                if r["value"]["key"]=="SystemStateHintPlacement"{unsafe{self.bottom_osd.clear();}let now=self.start.elapsed().as_secs_f64();let(r,rad)=self.shape();self.osd_banner.dismiss(r,rad,now,false);}
                 if r["value"]["key"]=="MusicExpandedLayout"{self.start_music_shift();}
                 if ["SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&r["value"]["key"].as_str().unwrap_or("")){self.apply_osd();}
                 self.transition=None;self.frame=if self.expanded{Frame::expanded()}else{Frame::hidden(self.options())};json!({"success":true,"message":"已保存"})
@@ -646,20 +698,25 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
         WM_TIMER=>{if wparam.0==osd::OSD_TIMER{let _=KillTimer(Some(hwnd),osd::OSD_TIMER);a.flush_osd();return LRESULT(0)}} ,
         WM_MOUSEACTIVATE=>return LRESULT(MA_NOACTIVATE as isize),WM_ERASEBKGND=>return LRESULT(1),
         WM_PAINT=>{let mut p=PAINTSTRUCT::default();let _=BeginPaint(hwnd,&mut p);let _=EndPaint(hwnd,&p);a.dirty=true;return LRESULT(0)},
-        WM_LBUTTONDOWN=>{let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;a.pressed=a.hit(x,y);if a.can_swipe(a.pressed){a.swipe=Some(activities::Swipe::new(x,y));}a.dirty=true;if a.pressed==2{a.activate(2);a.pressed=0;}else{SetCapture(hwnd);if a.pressed==10&&a.snapshot["canSeek"]==true{a.seeking=true;a.update_seek(x);}}return LRESULT(0)},
-        WM_MOUSEMOVE=>{if let Some(swipe)=&mut a.swipe{let scale=GetDpiForWindow(hwnd).max(96)as f64/96.;swipe.update((lparam.0 as u16 as i16)as f64/scale,((lparam.0>>16)as u16 as i16)as f64/scale);if swipe.active{a.pressed=-1;a.dirty=true;} }
+        WM_LBUTTONDOWN=>{let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;a.pressed=a.hit(x,y);if a.can_hide(a.pressed){a.hide_drag=Some(gestures::HideDrag::new(x,y));}if a.can_swipe(a.pressed){a.swipe=Some(activities::Swipe::new(x,y));}a.dirty=true;if a.pressed==2{a.activate(2);a.pressed=0;}else{SetCapture(hwnd);if a.pressed==10&&a.snapshot["canSeek"]==true{a.seeking=true;a.update_seek(x);}}return LRESULT(0)},
+        WM_MOUSEMOVE=>{let scale=GetDpiForWindow(hwnd).max(96)as f64/96.;
+            if a.swipe.is_some_and(|swipe|swipe.active){a.hide_drag=None;}
+            if let Some(drag)=&mut a.hide_drag{let mut screen=POINT::default();let _=GetCursorPos(&mut screen);drag.update((lparam.0 as u16 as i16)as f64/scale,((lparam.0>>16)as u16 as i16)as f64/scale,screen.y<=2);if drag.active{a.swipe=None;a.dismiss_offset.set(drag.offset());a.pressed=-1;a.dirty=true;}}
+            if let Some(swipe)=&mut a.swipe{let scale=GetDpiForWindow(hwnd).max(96)as f64/96.;swipe.update((lparam.0 as u16 as i16)as f64/scale,((lparam.0>>16)as u16 as i16)as f64/scale);if swipe.active{a.pressed=-1;a.dirty=true;} }
             if let Some(swipe)=a.swipe.filter(|s|s.active){let direction=if swipe.dx<0.{1}else{-1};let n=a.components.len();if n>1{let i=a.components.iter().position(|c|c==&a.selected).unwrap_or(0);let target=a.components[(i as i32+direction).rem_euclid(n as i32)as usize].clone();if target!=a.drag_target{a.drag_panel=a.component_panel(&target);a.drag_target=target;}}}if a.seeking{let s=GetDpiForWindow(hwnd).max(96)as f64/96.;a.update_seek((lparam.0 as u16 as i16)as f64/s);}return LRESULT(0)},
-        WM_LBUTTONUP=>{let _=ReleaseCapture();let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;let hit=a.hit(x,y);if let Some(swipe)=a.swipe.take(){if a.finish_swipe(swipe){return LRESULT(0)}}if a.seeking{a.seeking=false;a.command("seek",a.seek_fraction*a.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.));}else if hit==a.pressed&&hit>=0{a.activate(hit)}a.pressed=0;a.dirty=true;return LRESULT(0)},
-        WM_CAPTURECHANGED|WM_CANCELMODE=>{if let Some(swipe)=a.swipe.take(){if swipe.active{a.slide.set(swipe.dx);a.slide_outgoing=false;a.switching=a.flag("Animation",true);}}a.drag_target.clear();a.drag_panel=None;a.seeking=false;a.pressed=0;a.dirty=true;return LRESULT(0)},
+        WM_LBUTTONUP=>{let hide=a.hide_drag.take();let swipe=a.swipe.take();let _=ReleaseCapture();
+            if let Some(drag)=hide.filter(|drag|drag.active){if drag.dismiss(){a.hide_by_gesture()}else{a.pressed=0;a.dirty=true;}return LRESULT(0)}
+            a.swipe=swipe;let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;let hit=a.hit(x,y);if let Some(swipe)=a.swipe.take(){if a.finish_swipe(swipe){return LRESULT(0)}}if a.seeking{a.seeking=false;a.command("seek",a.seek_fraction*a.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.));}else if hit==a.pressed&&hit>=0{a.activate(hit)}a.pressed=0;a.dirty=true;return LRESULT(0)},
+        WM_CAPTURECHANGED|WM_CANCELMODE=>{a.hide_drag=None;if let Some(swipe)=a.swipe.take(){if swipe.active{a.slide.set(swipe.dx);a.slide_outgoing=false;a.switching=a.flag("Animation",true);}}a.drag_target.clear();a.drag_panel=None;a.seeking=false;a.pressed=0;a.dirty=true;return LRESULT(0)},
         WM_DPICHANGED|WM_DISPLAYCHANGE=>{if let Err(e)=a.position(){a.error=Some(e.to_string());}return LRESULT(0)},
-        WM_WTSSESSION_CHANGE=>{let mut session=0u32;let _=ProcessIdToSessionId(GetCurrentProcessId(),&mut session);if lparam.0 as u32==session{if wparam.0 as u32==WTS_SESSION_LOCK{a.pending_osd=0;if a.osd_banner.visible(){let now=a.start.elapsed().as_secs_f64();let(r,rad)=a.layout.shape(a.frame.card_reveal,a.options().radius);a.osd_banner.dismiss(r,rad,now,false);}a.on_lock();}else if wparam.0 as u32==WTS_SESSION_UNLOCK{a.osd.resync();a.on_unlock();}}return LRESULT(0)},
+        WM_WTSSESSION_CHANGE=>{let mut session=0u32;let _=ProcessIdToSessionId(GetCurrentProcessId(),&mut session);if lparam.0 as u32==session{if wparam.0 as u32==WTS_SESSION_LOCK{a.pending_osd=0;if a.osd_banner.visible(){let now=a.start.elapsed().as_secs_f64();let(r,rad)=a.shape();a.osd_banner.dismiss(r,rad,now,false);}a.on_lock();}else if wparam.0 as u32==WTS_SESSION_UNLOCK{a.osd.resync();a.on_unlock();}}return LRESULT(0)},
         WM_HOTKEY=>{if wparam.0==1{a.pending_action=Some("quickReminder".into());a.show_settings_page("overview");}return LRESULT(0)},
         WM_SETTINGS=>{let requests=REQUESTS.get_or_init(Default::default).lock().map(|mut q|std::mem::take(&mut *q)).unwrap_or_default();for (r,tx) in requests{let response=a.request(r);let _=tx.send(response);}return LRESULT(0)},
         WM_TRAY=>{if lparam.0 as u32==WM_RBUTTONUP{let mut p=POINT::default();let _=GetCursorPos(&mut p);let menu=CreatePopupMenu();if let Ok(menu)=menu{for (id,text) in [(1,w!("展开灵动岛")),(2,w!("显示 / 隐藏灵动岛")),(3,w!("设置")),(5,w!("重启点屿")),(4,w!("退出"))]{let _=AppendMenuW(menu,MF_STRING,id,text);}let active=a.flag("NotificationsEnabled",true)&&!a.flag("PauseNotifications",false);
             let label=if !a.flag("NotificationsEnabled",true){w!("开启通知")}else if a.flag("PauseNotifications",false){w!("恢复通知（已暂停）")}else{w!("暂停通知（已开启）")};
             let flags=if active{MF_STRING|MF_CHECKED}else{MF_STRING|MF_UNCHECKED};let _=InsertMenuW(menu,3,flags|MF_BYPOSITION,6,label);
             let _=SetForegroundWindow(hwnd);let selected=TrackPopupMenuEx(menu,(TPM_RETURNCMD|TPM_RIGHTBUTTON).0,p.x,p.y,hwnd,None).0;let _=DestroyMenu(menu);let command=match selected{1=>"expand",2=>"toggleVisibility",3=>"settings",5=>"restart",6=>"toggleNotifications",4=>"exit",_=>""};if !command.is_empty(){a.request(json!({"version":1,"command":command}));}}}else if lparam.0 as u32==WM_LBUTTONDBLCLK{a.request(json!({"version":1,"command":"expand"}));}return LRESULT(0)},
-        WM_CLOSE=>{a.osd.uninstall();let _=a.timers.persist();let _=a.rules.persist_usage();let _=WTSUnRegisterSessionNotification(hwnd);let _=UnregisterHotKey(Some(hwnd),1);let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
+        WM_CLOSE=>{a.bottom_osd.clear();a.osd.uninstall();let _=a.timers.persist();let _=a.rules.persist_usage();let _=WTSUnRegisterSessionNotification(hwnd);let _=UnregisterHotKey(Some(hwnd),1);let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
     }}}DefWindowProcW(hwnd,msg,wparam,lparam)
 }
 fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/NotoSansSC.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")}
@@ -677,21 +734,30 @@ unsafe fn create(a:&mut App,owner:*const RefCell<App>,hidden:bool)->Result<()> {
 }
 unsafe fn tray(a:&App)->Result<()> {
     let path=a.base.join("Assets/LyricIsland-v2.ico").to_string_lossy().encode_utf16().chain(Some(0)).collect::<Vec<_>>();let icon=LoadImageW(None,PCWSTR(path.as_ptr()),IMAGE_ICON,0,0,LR_LOADFROMFILE|LR_DEFAULTSIZE).ok().map(|i|HICON(i.0)).unwrap_or(LoadIconW(None,IDI_APPLICATION)?);
-    let mut nid=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:a.hwnd,uID:1,uFlags:NIF_MESSAGE|NIF_ICON|NIF_TIP,uCallbackMessage:WM_TRAY,hIcon:icon,..Default::default()};let tip="DotIsle · 点屿".encode_utf16().collect::<Vec<_>>();nid.szTip[..tip.len()].copy_from_slice(&tip);let _=Shell_NotifyIconW(NIM_ADD,&nid);Ok(())
+    let mut nid=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:a.hwnd,uID:1,uFlags:NIF_MESSAGE|NIF_ICON|NIF_TIP,uCallbackMessage:WM_TRAY,hIcon:icon,..Default::default()};let tip=format!("DotIsle · 点屿 {}",env!("CARGO_PKG_VERSION")).encode_utf16().collect::<Vec<_>>();let tip=&tip[..tip.len().min(127)];nid.szTip[..tip.len()].copy_from_slice(&tip);let _=Shell_NotifyIconW(NIM_ADD,&nid);Ok(())
 }
 fn traces(directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(directory)?;let mut cases=vec![];
+    for style in [motion::Style::Classic,motion::Style::Fluid]{
+    let tag=if style==motion::Style::Classic{"Classic"}else{"Fluid"};
     for damping in [10.,30.,2.*(420_f64*0.8).sqrt(),80.]{let mut o=Options::default();o.spring.damping=damping;
-        for expanded in [true,false]{let t=Transition::new(expanded,if expanded{Frame::hidden(o)}else{Frame::expanded()},o,Frame::default(),false);
-            for ms in (0..=1400).step_by(5){cases.push(json!({"damping":damping,"expanded":expanded,"time":ms,"sample":t.sample(ms as f64),"velocity":t.velocity(ms as f64)}));}
-            for ms in [40.,90.,180.,320.]{let rev=Transition::new(!expanded,t.sample(ms),o,t.velocity(ms),false);for after in [0.,1.,20.,80.,180.,400.]{cases.push(json!({"damping":damping,"expanded":!expanded,"reverseAt":ms,"time":after,"sample":rev.sample(after),"velocity":rev.velocity(after)}));}}
+        for expanded in [true,false]{let t=Transition::styled(style,expanded,if expanded{Frame::hidden(o)}else{Frame::expanded()},o,Frame::default(),false);
+            for ms in (0..=1400).step_by(5){cases.push(json!({"style":tag,"damping":damping,"expanded":expanded,"time":ms,"sample":t.sample(ms as f64),"velocity":t.velocity(ms as f64)}));}
+            for ms in [40.,90.,180.,320.]{let rev=Transition::styled(style,!expanded,t.sample(ms),o,t.velocity(ms),false);for after in [0.,1.,20.,80.,180.,400.]{cases.push(json!({"style":tag,"damping":damping,"expanded":!expanded,"reverseAt":ms,"time":after,"sample":rev.sample(after),"velocity":rev.velocity(after)}));}}
         }
-    }std::fs::write(directory.join("native-motion.json"),serde_json::to_vec(&cases)?)?;Ok(())
+    }}std::fs::write(directory.join("native-motion.json"),serde_json::to_vec(&cases)?)?;Ok(())
 }
 unsafe fn preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(directory)?;a.renderer=None;a.renderer=Some(Renderer::new(a.visual_hwnd,a.layout.host.w as u32,a.layout.host.h as u32,96.,&a.base.join("Assets/Fonts/NotoSansSC.ttf"))?);a.poll();a.opacity=1.;let o=a.options();
-    for (name,expanded,count) in [("opening",true,34),("closing",false,29)]{let t=Transition::new(expanded,if expanded{Frame::hidden(o)}else{Frame::expanded()},o,Frame::default(),false);a.transition=Some(t);a.expanded=expanded;
-        for i in 0..count{let ms=i as f64*20.;a.frame=t.sample(ms);let mut renderer=a.renderer.take().unwrap();let mut scene=a.scene();scene.time_ms=0.;scene.lyric_age_ms=1000.;scene.cover_opacity=1.;scene.progress=83./236.;let mut activity=motion::Activity::new();activity.retarget(true,0.,true);scene.activity_scales=activity.sample(330.+ms,true).0;scene.activity_opacity=0.9;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("{name}-{:03}ms.png",i*20)))?;a.renderer=Some(renderer);}
+    // Both curves, same instants, so the 灵动岛流体动画 switch can be judged side by side instead
+    // of remembered. The classic frames keep their old names so an existing script still finds them.
+    for (name,expanded,count) in [("opening",true,34),("closing",false,29)]{
+        for (style,label) in [(motion::Style::Classic,"classic"),(motion::Style::Fluid,"fluid")]{
+            let t=Transition::styled(style,expanded,if expanded{Frame::hidden(o)}else{Frame::expanded()},o,Frame::default(),false);a.transition=Some(t);a.expanded=expanded;
+            for i in 0..count{let ms=i as f64*20.;if ms>t.duration_ms+20.{break}a.frame=t.sample(ms);let mut renderer=a.renderer.take().unwrap();let mut scene=a.scene();scene.time_ms=0.;scene.lyric_age_ms=1000.;scene.cover_opacity=1.;scene.progress=83./236.;let mut activity=motion::Activity::new();activity.retarget(true,0.,true);scene.activity_scales=activity.sample(330.+ms,true).0;scene.activity_opacity=0.9;renderer.render(&scene,false)?;
+                let file=if style==motion::Style::Classic{format!("{name}-{:03}ms.png",i*20)}else{format!("{name}-{label}-{:03}ms.png",i*20)};
+                renderer.snapshot(&directory.join(file))?;a.renderer=Some(renderer);}
+        }
     }traces(directory)?;Ok(())
 }
 unsafe fn tools_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
@@ -712,7 +778,7 @@ unsafe fn notification_preview(a:&mut App,directory:&Path)->std::result::Result<
         for amount in [0.,0.5,1.]{let mut s=a.scene();s.notification=None;s.notification_mix=0.;s.layout_scale=scale;s.lyric_age_ms=1000.;s.highlight=amount;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("font-{dpi:.0}-{}.png",(amount*100.)as i32)))?;}
         {let mut s=a.scene();s.notification=None;s.notification_mix=0.;s.frame=Frame::expanded();s.layout_scale=scale;s.lyric_age_ms=1000.;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("toolbar-{dpi:.0}.png")))?;}
         let notice=notifications::Notice::example(&a.base);renderer.set_notification_icon(notice.icon.as_deref())?;
-        a.banner=banner::Banner::default();let (base,radius)=a.layout.shape(a.frame.card_reveal,a.options().radius);let height=renderer.notification_height(&notice,440_f64.min(a.layout.host.w-48.))?;a.banner.show(notice,base,radius,a.layout.host.w,height,0.,true);
+        a.banner=banner::Banner::default();let (base,radius)=a.shape();let height=renderer.notification_height(&notice,440_f64.min(a.layout.host.w-48.))?;a.banner.show(notice,base,radius,a.layout.host.w,height,0.,true);
         for ms in [0.,40.,80.,120.,200.,320.,640.]{let (r,rad,mix)=a.banner.presentation(ms/1000.);let mut s=a.scene();s.notification_rect=r;s.notification_radius=rad;s.notification_mix=mix;s.layout_scale=scale;s.lyric_age_ms=1000.;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("notification-{dpi:.0}-{ms:03.0}.png")))?;}
         a.banner.dismiss(base,radius,0.64,true);
         for ms in [640.,680.,720.,800.,960.,1280.]{let (r,rad,mix)=a.banner.presentation(ms/1000.);let mut s=a.scene();s.notification_rect=r;s.notification_radius=rad;s.notification_mix=mix;s.layout_scale=scale;s.lyric_age_ms=1000.;renderer.render(&s,false)?;renderer.snapshot(&directory.join(format!("dismiss-{dpi:.0}-{ms:04.0}.png")))?;}
@@ -736,11 +802,9 @@ unsafe fn icon_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<d
         let mut scene=a.scene();scene.layout_scale=scale;scene.lyric_age_ms=1000.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("icons-{dpi:.0}.png")))?;std::fs::write(directory.join(format!("icons-{dpi:.0}.json")),serde_json::to_vec(&renderer.icon_bounds()?)?)?;
     }Ok(())
 }
-// An explicit portable marker survives OTA overlays and suppresses installer migration.
-fn legacy_install_transition(base:&Path)->bool{!base.join("Portable.json").is_file()&&!base.join("Installed.json").exists()}
 fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let args=std::env::args().collect::<Vec<_>>();
-    if args.len()==1&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none(){let base=font_base();if legacy_install_transition(&base){let pointer=PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("DotIsle/install.json");let marker=io::read_settings(&pointer);if let Some(target)=marker["target"].as_str(){let target=PathBuf::from(target);if target!=base&&target.join("Installed.json").is_file()&&target.join("LyricIsland.exe").is_file(){std::process::Command::new(target.join("LyricIsland.exe")).spawn()?;return Ok(())}}}}
+
     if let Some(i)=args.iter().position(|s|s=="--restart-after"){
         let pid=args.get(i+1).and_then(|s|s.parse::<u32>().ok()).ok_or("invalid restart PID")?;
         if let Ok(parent)=OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000),false,pid){let result=WaitForSingleObject(parent,15000);let _=CloseHandle(parent);if result!=WAIT_OBJECT_0{return Err("等待旧实例退出超时".into())}}
@@ -765,14 +829,35 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
-    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=args.get(1).is_some_and(|s|s=="--integration-preview")||tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else if base.join("Installed.json").exists(){let marker=io::read_settings(&base.join("Installed.json"));marker["dataDirectory"].as_str().map(PathBuf::from).unwrap_or_else(||io::data_directory())}else{base.join("Data")};
+    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=args.get(1).is_some_and(|s|s=="--integration-preview")||tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");
+    // One island per desktop, so a second copy must not start. It used to exit without a word,
+    // which made a freshly built portable copy look broken: double-clicking it did nothing at all
+    // while the installed version answered every click. The mutex is taken before any window is
+    // created so the refused copy never flashes an island on its way out.
+    let test_pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_default();
+    let mutex_name=if test_pipe.starts_with("LyricIsland.Settings.test."){format!("Local.LyricIsland.Native.Test.{test_pipe}")}else{"Local.LyricIsland.Native.Direct2D.v1".into()};let mutex_name=mutex_name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mutex=CreateMutexW(None,true,PCWSTR(mutex_name.as_ptr()))?;
+    if GetLastError()==ERROR_ALREADY_EXISTS{
+        let _=CloseHandle(mutex);
+        // Not while logging in: a dialog nobody asked for, before the desktop has settled, is
+        // worse than staying quiet.
+        if !preview_mode&&!args.iter().any(|s|s=="--startup"){
+            let current=io::pipe_request("LyricIsland.Native.Settings.v1",&json!({"version":1,"command":"state"})).unwrap_or_default();
+            let message=format!("已有点屿 {} 正在运行。\r\n你正在启动的是此目录的 {}，不会跳转或改用安装版。\r\n\r\n请先从托盘退出正在运行的点屿，再启动这一份。",current["version"].as_str().unwrap_or("（版本未知）"),env!("CARGO_PKG_VERSION"));let text=message.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            let title=format!("点屿 · DotIsle {}",env!("CARGO_PKG_VERSION")).encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            MessageBoxW(None,PCWSTR(text.as_ptr()),PCWSTR(title.as_ptr()),MB_OK|MB_ICONINFORMATION|MB_SETFOREGROUND);
+        }
+        return Ok(())
+    }
+let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else if !base.join("Portable.json").is_file()&&base.join("Installed.json").exists(){let marker=io::read_settings(&base.join("Installed.json"));marker["dataDirectory"].as_str().map(PathBuf::from).unwrap_or_else(||io::data_directory())}else{base.join("Data")};
+    if !demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&!base.join("Portable.json").is_file()&&base.join("Installed.json").is_file()&&base.join("Uninstall.exe").is_file(){let _=std::process::Command::new(base.join("Uninstall.exe")).arg("--repair-if-needed").arg(&base).spawn();}
     let owner=Box::new(RefCell::new(App::new(base,data,demo)));let owner_ptr=&*owner as *const RefCell<App>;let mut app=owner.borrow_mut();create(&mut app,owner_ptr,preview_mode)?;
     if cover_mode{
         let dir=Path::new(args.get(2).ok_or("missing directory")?);std::fs::create_dir_all(dir)?;
         app.poll();app.opacity=1.;app.frame=Frame::expanded();let mut r=app.renderer.take().unwrap();
         for name in ["red","blue","white"]{
             r.set_cover(Some(&std::fs::read(dir.join(format!("{name}.png")))?))?;
-            for enabled in [false,true]{let mut scene=app.scene();scene.cover_background=enabled;scene.lyric_age_ms=1000.;r.render(&scene,false)?;r.snapshot(&dir.join(format!("{name}-{enabled}.png")))?;}
+            for enabled in [false,true]{let mut scene=app.scene();scene.cover_background=enabled;scene.lyric_age_ms=1000.;scene.cover_age_ms=1000.;r.render(&scene,false)?;r.snapshot(&dir.join(format!("{name}-{enabled}.png")))?;}
         }
         let _=DestroyWindow(app.hwnd);return Ok(())
     }
@@ -781,7 +866,12 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
         app.opacity=1.;app.frame=Frame::expanded();app.lyric="最後の最後に答え合わせをしよう".into();
         let base=app.base.clone();app.renderer=None;
         for dpi in [96.,144.,192.]{let scale=dpi/96.;let mut renderer=Renderer::new(app.visual_hwnd,(app.layout.host.w*scale)as u32,(app.layout.host.h*scale)as u32,dpi as f32,&base.join("Assets/Fonts/NotoSansSC.ttf"))?;renderer.set_cover(Some(&std::fs::read(base.join("Assets/LyricIsland-v2.png"))?))?;
-            for (name,mix) in [("side",0.),("separated",1.)]{app.music_mix=mix;app.layout.card.h=264.+20.*mix;let mut scene=app.scene();scene.music_layout=if mix>0.5{layout::MusicLayout::Separated}else{layout::MusicLayout::SideBySide};scene.layout_scale=scale;scene.lyric_age_ms=1000.;scene.title="ハウル";scene.artist="LiSA";scene.secondary="在最后的最后来核对答案吧";scene.highlight=0.55;scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("music-{name}-{dpi:.0}.png")))?;}
+            for (name,mix) in [("side",0.),("separated",1.),("focus",2.)]{app.music_mix=mix;app.layout.card.h=layout::music_height(mix,12.5);let mut scene=app.scene();scene.music_layout=if mix>1.5{layout::MusicLayout::LyricFocus}else if mix>0.5{layout::MusicLayout::Separated}else{layout::MusicLayout::SideBySide};scene.layout_scale=scale;scene.lyric_age_ms=1000.;scene.title="ハウル";scene.artist="LiSA";scene.secondary="在最后的最后来核对答案吧";scene.highlight=0.55;scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("music-{name}-{dpi:.0}.png")))?;}
+            renderer.set_cover(Some(&std::fs::read(base.join("Assets/DeviceIcons/headphones-128.png"))?))?;
+            app.music_mix=1.;app.layout.card.h=layout::music_height(1.,12.5);
+            for ms in [0.,60.,120.,140.,180.,240.,280.]{let mut scene=app.scene();scene.cover_age_ms=ms;scene.layout_scale=scale;scene.lyric_age_ms=1000.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("cover-flip-{dpi:.0}-{ms:03.0}.png")))?;}
+            app.layout.card.h=200.;let mut clocks=timers::Store::new(PathBuf::new());
+            for (name,value) in [("timer",json!({"mode":"countdown","duration":300})),("stopwatch",json!({"mode":"stopwatch"})),("pomodoro",json!({"mode":"pomodoro","focus":1500})),("workflow",json!({"mode":"workflow","stages":[{"name":"专注","seconds":1500},{"name":"休息","seconds":300}]}))]{let id=clocks.create(&value).unwrap();let t=clocks.items.iter_mut().find(|t|t.id==id).unwrap();t.elapsed_ms=if name=="stopwatch"{3830}else{5000};let panel=t.panel();let mut scene=app.scene();scene.layout_scale=scale;scene.panel=Some(&panel);scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("island-{name}-{dpi:.0}.png")))?;}
             app.layout.card.h=264.;app.updates.state=json!({"phase":"downloading","version":"演示","percent":43,"receivedBytes":4300000,"totalBytes":10000000});let panel=app.updates.panel();let mut scene=app.scene();scene.layout_scale=scale;scene.panel=Some(&panel);scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("update-{dpi:.0}.png")))?;
             for kind in [devices::Kind::Usb,devices::Kind::Volume,devices::Kind::Phone,devices::Kind::Headphones,devices::Kind::Speaker,devices::Kind::Gamepad,devices::Kind::Mouse,devices::Kind::Keyboard]{let notice=devices::Event::new("preview".into(),kind,true,format!("{} · 示例设备",kind.label())).notice();let mut scene=app.scene();scene.layout_scale=scale;scene.notification=Some(&notice);scene.notification_rect=Rect::new(24.,24.,440.,110.);scene.notification_radius=26.;scene.notification_mix=1.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("device-{}-{dpi:.0}.png",kind.key())))?;}
         }let _=DestroyWindow(app.hwnd);return Ok(())
@@ -791,14 +881,12 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     if tool_mode{tools_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if notice_mode{notification_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if preview_mode{preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
-    let test_pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_default();
-    let mutex_name=if test_pipe.starts_with("LyricIsland.Settings.test."){format!("Local.LyricIsland.Native.Test.{test_pipe}")}else{"Local.LyricIsland.Native.Direct2D.v1".into()};let mutex_name=mutex_name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let mutex=CreateMutexW(None,true,PCWSTR(mutex_name.as_ptr()))?;if GetLastError()==ERROR_ALREADY_EXISTS{let _=CloseHandle(mutex);return Ok(())}
-    if !app.demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&legacy_install_transition(&app.base)&&app.base.join("OtaInstall.json").exists()&&app.base.join("DotIsle.Setup.exe").exists(){
+        if !app.demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&!app.base.join("Portable.json").is_file()&&!app.base.join("Installed.json").exists()&&app.base.join("OtaInstall.json").exists()&&app.base.join("DotIsle.Setup.exe").exists(){
         let offered=app.data.join(format!("install-offer-{}.txt",env!("CARGO_PKG_VERSION")));
-        if !offered.exists(){let _=std::fs::create_dir_all(&app.data);if std::process::Command::new(app.base.join("DotIsle.Setup.exe")).arg("--migrate-data").arg(&app.data).spawn().is_ok(){let _=std::fs::write(offered,b"offered");}}
+        if !offered.exists(){let _=std::fs::create_dir_all(&app.data);if std::process::Command::new(app.base.join("DotIsle.Setup.exe")).arg(format!("/MIGRATEDATA={}",app.data.display())).spawn().is_ok(){let _=std::fs::write(offered,b"offered");}}
     }
     tray(&app)?;let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());app._server=Some(Server::new(&pipe,settings_callback));
+    if !app.demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&!app.flag("GestureTutorialSeen",false){app.show_settings_page("island");}
     if args.iter().any(|s|s=="--expanded"){app.held=true;app.retarget(true)}
     let until=args.iter().position(|s|s=="--run-ms").and_then(|i|args.get(i+1)).and_then(|s|s.parse::<u64>().ok()).map(|ms|Instant::now()+Duration::from_millis(ms));
     drop(app);let mut msg=MSG::default();'events:loop{
@@ -829,7 +917,7 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         let mut a=app();a.settings["ClickAnywhereExpand"]=json!(true);let before=a.snapshot["isPlaying"].clone();
         a.activate(0);assert!(a.expanded&&a.held);assert_eq!(a.snapshot["isPlaying"],before);
         a.frame=Frame::expanded();a.transition=None;
-        let c=a.layout.card;assert_eq!(a.hit(c.x+c.w/2.,c.y+228.),4);
+        let c=a.layout.card;let g=layout::music_geometry(c.w,layout::MusicLayout::SideBySide,0.,1.,12.5);let button=g.buttons[3].1;assert_eq!(a.hit(c.x+button.x+button.w/2.,c.y+button.y+button.h/2.),4);
         a.activate(4);assert!(a.expanded);assert_eq!(a.snapshot["isPlaying"],false);
     }}
     #[test]fn body_click_option_is_boolean_and_preserves_other_settings(){
@@ -837,6 +925,52 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         let updated=config::validate_setting(json!({"key":"ClickAnywhereExpand","value":true,"settings":original})).unwrap();
         assert_eq!(updated["ClickAnywhereExpand"],true);assert_eq!(updated["Motion"],original["Motion"]);
         assert!(config::validate_setting(json!({"key":"ClickAnywhereExpand","value":"true","settings":original})).is_err());
+    }
+    #[test]fn island_fluid_motion_defaults_on_and_stays_switchable(){
+        let s=config::defaults();
+        assert_eq!(s["IslandFluidMotion"],json!(true));
+        // Off must survive validation, because "关闭 = 回到 2.0.0" is the whole promise.
+        let off=config::validate_setting(json!({"key":"IslandFluidMotion","value":false,"settings":s.clone()})).unwrap();
+        assert_eq!(off["IslandFluidMotion"],json!(false));
+        assert!(config::validate_setting(json!({"key":"IslandFluidMotion","value":"true","settings":s.clone()})).is_err());
+        // An older settings.json has no such key; the shipped default decides, not the file.
+        let loaded=config::load(std::path::Path::new("no-such-settings-from-an-older-build.json"));
+        assert_eq!(loaded["IslandFluidMotion"],json!(true));
+        // Both curves stay in the binary: the switch only picks between them.
+        let o=Options::default();
+        let classic=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
+        let off_style=Transition::styled(motion::Style::Classic,true,Frame::hidden(o),o,Frame::default(),false);
+        assert_eq!(classic.duration_ms,off_style.duration_ms);
+        assert_eq!(classic.sample(120.).values(),off_style.sample(120.).values());
+    }
+    /// Mouse and keyboard reconnect several times a day on their own — a wireless mouse waking up,
+    /// a KVM switching — so they are the two device reminders that turn into noise. Off by default,
+    /// carried over once for installs that inherited 2.0.0's bundle default.
+    #[test]fn mouse_and_keyboard_reminders_default_off(){
+        let s=config::defaults();
+        for key in ["MouseConnectionRemindersEnabled","KeyboardConnectionRemindersEnabled"]{
+            assert_eq!(s[key],json!(false),"{key}");
+            // Still a real switch: turning it on must validate and stick.
+            assert_eq!(config::validate_setting(json!({"key":key,"value":true,"settings":s.clone()})).unwrap()[key],json!(true),"{key}");
+            assert!(config::validate_setting(json!({"key":key,"value":1,"settings":s.clone()})).is_err(),"{key}");
+        }
+        // Everything else in the device bundle keeps its 2.0.0 default.
+        for key in ["HeadphoneConnectionRemindersEnabled","SpeakerConnectionRemindersEnabled","GamepadConnectionRemindersEnabled","DeviceDisconnectRemindersEnabled"]{
+            assert_eq!(s[key],json!(true),"{key}");
+        }
+        // A 2.0.0 install persisted `true` for both without anyone choosing it.
+        let legacy=std::env::temp_dir().join(format!("dotisle-device-defaults-{}.json",std::process::id()));
+        std::fs::write(&legacy,r#"{"DefaultsOnboardingVersion":1,"MouseConnectionRemindersEnabled":true,"KeyboardConnectionRemindersEnabled":true}"#).unwrap();
+        let migrated=config::load(&legacy);
+        assert_eq!(migrated["DeviceDefaultsVersion"],json!(1));
+        assert_eq!(migrated["MouseConnectionRemindersEnabled"],json!(false));
+        assert_eq!(migrated["KeyboardConnectionRemindersEnabled"],json!(false));
+        // Once the marker is stamped, a user who turns them back on keeps that choice.
+        std::fs::write(&legacy,r#"{"DefaultsOnboardingVersion":1,"DeviceDefaultsVersion":1,"MouseConnectionRemindersEnabled":true,"KeyboardConnectionRemindersEnabled":true}"#).unwrap();
+        let chosen=config::load(&legacy);
+        assert_eq!(chosen["MouseConnectionRemindersEnabled"],json!(true));
+        assert_eq!(chosen["KeyboardConnectionRemindersEnabled"],json!(true));
+        let _=std::fs::remove_file(&legacy);
     }
     #[test]fn swipe_notifications_and_devices_default_on(){
         let s=config::defaults();
@@ -926,20 +1060,6 @@ fn history_clear_rejects_unknown_kinds_and_can_target_one(){let mut a=app();a.en
 fn island_presence_follows_need_not_switches(){assert!(island_needed(true,true,true,false,false,false,false,false));assert!(island_needed(true,false,false,false,false,false,false,false));assert!(!island_needed(true,false,true,false,false,false,false,false));assert!(island_needed(false,false,true,true,false,false,false,false));assert!(island_needed(false,false,true,false,false,true,false,false));assert!(island_needed(false,false,true,false,true,false,false,false));assert!(island_needed(false,false,true,false,false,false,true,false));assert!(island_needed(false,false,true,false,false,false,false,true));assert!(!island_needed(false,false,true,false,false,false,false,false));}
 }
 
-#[cfg(test)]mod portable_tests{
-    use super::*;
-    #[test]fn portable_stays_portable_after_legacy_ota_overlay(){
-        let base=std::env::temp_dir().join(format!("dotisle-portable-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&base).unwrap();
-        assert!(legacy_install_transition(&base));
-        std::fs::write(base.join("Portable.json"),b"{}").unwrap();
-        assert!(!legacy_install_transition(&base));
-        for name in ["OtaInstall.json","DotIsle.Setup.exe"]{std::fs::write(base.join(name),b"test").unwrap();}
-        assert!(!legacy_install_transition(&base));
-        std::fs::remove_file(base.join("Portable.json")).unwrap();
-        assert!(legacy_install_transition(&base));
-        std::fs::write(base.join("Installed.json"),b"{}").unwrap();
-        assert!(!legacy_install_transition(&base));
-        std::fs::remove_dir_all(base).unwrap();
-    }
+#[cfg(test)]mod hide_gesture_tests{use super::*;
+ #[test]fn hide_is_available_with_one_component_and_preserves_timers(){let mut a=App::new(PathBuf::new(),PathBuf::new(),true);assert!(a.can_hide(0));assert!(a.can_hide(1));for hit in [2,3,4,5,6,7,9,10,11,12,30,31]{assert!(!a.can_hide(hit));}let id=a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.hide_by_gesture();assert!(a.user_hidden);assert!(!a.held);assert!(a.timers.items.iter().any(|t|t.id==id&&t.running));a.settings["SwipeUpHide"]=json!(false);assert!(!a.can_hide(0));}
 }

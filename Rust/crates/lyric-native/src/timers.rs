@@ -10,13 +10,20 @@ pub struct Workflow{
 #[derive(Clone,Debug,Serialize,Deserialize)]#[serde(rename_all="camelCase")]
 pub struct Timer{
  pub id:String,pub name:String,pub mode:String,pub duration:u64,pub focus:u64,pub rest:u64,pub rounds:u32,pub round:u32,pub phase:String,pub elapsed_ms:u64,pub running:bool,pub finished:bool,
- #[serde(default)]pub todo_id:Option<String>,#[serde(default)]pub workflow:Option<Workflow>,#[serde(default)]pub pause_reason:Option<String>,#[serde(default)]pub revision:u64,
+ #[serde(default)]pub todo_id:Option<String>,#[serde(default)]pub workflow:Option<Workflow>,#[serde(default)]pub pause_reason:Option<String>,#[serde(default)]pub revision:u64,#[serde(default)]pub laps:Vec<u64>,#[serde(default)]pub count_up:bool,
 }
 impl Timer{
+ pub fn primary_action(&self)->&'static str{if self.finished{"restart"}else if self.mode=="workflow"&&self.workflow.as_ref().is_some_and(|w|w.waiting){"next"}else if self.running{"pause"}else{"resume"}}
+ pub fn panel(&self)->crate::activities::Panel{
+  let stopwatch=self.mode=="stopwatch";let waiting=self.workflow.as_ref().is_some_and(|w|w.waiting);
+  let primary=match self.primary_action(){"restart"=>"重新开始","next"=>"下一阶段","pause"=>"暂停",_=>"继续"};
+  crate::activities::Panel{kind:1,title:self.name.clone(),value:self.clock(),subtitle:self.subtitle(),progress:self.progress(),running:self.running,accent:0xffa9e6cd,
+   timer:Some(crate::activities::TimerPresentation{label:if stopwatch{"累计时间"}else if self.count_up{"已过时间"}else{"剩余时间"}.into(),elapsed:if stopwatch{"精确到百分秒".into()}else{format!("已过 {}",format_time(self.elapsed_ms/1000))},footnote:if stopwatch{format!("{} 次计次",self.laps.len())}else if self.finished{"已完成".into()}else if waiting{"等待确认".into()}else{"到时提醒".into()},primary:primary.into(),expanded_value:if stopwatch{format!("{}.{:02}",format_time(self.elapsed_ms/1000),self.elapsed_ms/10%100)}else{self.clock()},indefinite:stopwatch}),..Default::default()}
+ }
  fn stage(&self)->Option<&Stage>{self.workflow.as_ref().and_then(|w|w.stages.get(w.stage_index))}
  pub fn limit_ms(&self)->u64{1000*if self.mode=="workflow"{self.stage().map(|s|s.seconds).unwrap_or(0).max(1)}else if self.mode=="pomodoro"{if self.phase=="rest"{self.rest}else{self.focus}}else{self.duration}}
  pub fn remaining_ms(&self)->u64{self.limit_ms().saturating_sub(self.elapsed_ms)}
- pub fn clock(&self)->String{format_time(if self.mode=="stopwatch"{self.elapsed_ms/1000}else{self.remaining_ms().div_ceil(1000)})}
+ pub fn clock(&self)->String{format_time(if self.mode=="stopwatch"||self.count_up{self.elapsed_ms/1000}else{self.remaining_ms().div_ceil(1000)})}
  pub fn progress(&self)->f64{if self.mode=="stopwatch"{(self.elapsed_ms%60000)as f64/60000.}else{(self.elapsed_ms as f64/self.limit_ms().max(1)as f64).clamp(0.,1.)}}
  pub fn subtitle(&self)->String{
   if self.finished{return "已完成".into()}
@@ -68,7 +75,7 @@ pub fn stages_ok(stages:&[Stage])->bool{
 fn valid(t:&Timer)->bool{
  if !matches!(t.mode.as_str(),"countdown"|"pomodoro"|"stopwatch"|"workflow"){return false}
  if t.mode=="workflow"{return t.workflow.as_ref().is_some_and(|w|stages_ok(&w.stages)&&w.stage_index<w.stages.len())}
- t.duration>0&&t.focus>0&&t.rest>0&&(1..=16).contains(&t.rounds)
+ t.duration>0&&t.focus>0&&t.rest>0&&(1..=16).contains(&t.rounds)&&t.laps.len()<=200&&t.laps.windows(2).all(|p|p[0]<p[1])&&t.laps.last().map_or(true,|last|*last<=t.elapsed_ms)
 }
 pub struct Store{path:PathBuf,pub items:Vec<Timer>,pub error:Option<String>}
 impl Store{
@@ -78,13 +85,14 @@ impl Store{
  pub fn create(&mut self,v:&Value)->Result<String,String>{
   if self.items.len()>=8{return Err("最多同时保留 8 个计时器，请先移除不用的项目".into())}
   let mode=v["mode"].as_str().unwrap_or("countdown");if !matches!(mode,"countdown"|"pomodoro"|"stopwatch"|"workflow"){return Err("未知计时模式".into())}
+  let count_up=match v.get("countUp"){Some(value)=>value.as_bool().ok_or("计时方向无效")?,None=>false};if count_up&&!matches!(mode,"pomodoro"|"workflow"){return Err("只有番茄钟可切换计时方向".into())}
   let number=|key,default,max|->Result<u64,String>{match v.get(key){Some(value)=>value.as_u64().filter(|n|*n>=1&&*n<=max).ok_or_else(||format!("{key} 超出有效范围")),None=>Ok(default)}};
   let (duration,focus,rest,rounds,workflow)=if mode=="workflow"{(0,0,0,0,Some(Workflow{stages:stages_from(&v["stages"])?,stage_index:0,waiting:false,template_id:v["templateId"].as_str().filter(|s|!s.is_empty()).map(str::to_owned)}))}else{(number("duration",300,86400)?,number("focus",1500,14400)?,number("rest",300,3600)?,number("rounds",4,16)?as u32,None)};
   let name=v["name"].as_str().unwrap_or("").trim();if name.chars().count()>60||name.chars().any(char::is_control){return Err("计时器名称过长或包含无效字符".into())}
-  let name=if name.is_empty(){match mode{"pomodoro"=>"番茄钟","stopwatch"=>"正向计时","workflow"=>"流程",_=>"倒计时"}}else{name};
+  let name=if name.is_empty(){match mode{"pomodoro"=>"番茄钟","stopwatch"=>"正向计时","workflow"=>"流程",_=>"计时器"}}else{name};
   let todo_id=match v["todoId"].as_str(){Some(s)if !s.is_empty()=>{if s.len()>80||!s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){return Err("关联待办标识无效".into())}Some(s.to_owned())},_=>None};
   let id=format!("clock-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
-  self.items.push(Timer{id:id.clone(),name:name.into(),mode:mode.into(),duration,focus,rest,rounds,round:1,phase:"focus".into(),elapsed_ms:0,running:true,finished:false,todo_id,workflow,pause_reason:None,revision:1});
+  self.items.push(Timer{id:id.clone(),name:name.into(),mode:mode.into(),duration,focus,rest,rounds,round:1,phase:"focus".into(),elapsed_ms:0,running:true,finished:false,todo_id,workflow,pause_reason:None,revision:1,laps:vec![],count_up});
   if let Err(e)=self.persist(){self.items.pop();return Err(e)}Ok(id)
  }
  /// Legacy toggle/reset/delete entry point kept for callers that do not track revisions.
@@ -93,14 +101,15 @@ impl Store{
   let old=self.items.clone();
   if action=="delete"{if !self.items.iter().any(|t|t.id==id){return Err("计时器不存在".into())}self.items.retain(|t|t.id!=id);if let Err(e)=self.persist(){self.items=old;return Err(e)}return Ok(())}
   let t=self.items.iter_mut().find(|t|t.id==id).ok_or("计时器不存在")?;
-  if matches!(action,"next"|"skip"|"extend5"|"end"|"restart")&&t.mode!="workflow"{return Err("该操作仅适用于流程计时".into())}
+  if matches!(action,"next"|"skip"|"extend5"|"end")&&t.mode!="workflow"{return Err("该操作仅适用于流程计时".into())}
   if let Some(expected)=revision{if expected!=t.revision{return Err("计时状态已变化，请刷新后重试".into())}}
   match action{
    "toggle"=>{if t.finished{return Err("计时已结束，请使用重新开始".into())}if t.mode=="workflow"{let Some(w)=&t.workflow else{return Err("流程数据缺失".into())};if w.waiting{return Err("当前阶段已完成，请点击下一阶段".into())}}t.running=!t.running;t.pause_reason=if t.running{None}else{Some("manual".into())};},
    "pause"=>{if t.finished{return Err("计时已结束".into())}if t.mode=="workflow"&&t.workflow.as_ref().is_some_and(|w|w.waiting){return Err("当前阶段已完成，请点击下一阶段".into())}t.running=false;t.pause_reason=Some("manual".into());},
    "resume"=>{if t.finished{return Err("计时已结束".into())}if t.mode=="workflow"&&t.workflow.as_ref().is_some_and(|w|w.waiting){return Err("当前阶段已完成，请点击下一阶段".into())}t.running=true;t.pause_reason=None;},
-   "reset"=>{t.running=false;t.finished=false;t.elapsed_ms=0;t.round=1;t.phase="focus".into();t.pause_reason=None;if let Some(w)=&mut t.workflow{w.stage_index=0;w.waiting=false;}},
-   "restart"=>{t.running=true;t.finished=false;t.elapsed_ms=0;t.round=1;t.phase="focus".into();t.pause_reason=None;if let Some(w)=&mut t.workflow{w.stage_index=0;w.waiting=false;}},
+   "lap"=>{if t.mode!="stopwatch"||!t.running||t.finished{return Err("仅运行中的秒表可以计次".into())}if t.laps.len()>=200{return Err("最多记录200次".into())}if t.elapsed_ms==0||t.laps.last().is_some_and(|last|*last>=t.elapsed_ms){return Err("本次尚未产生新的计时".into())}t.laps.push(t.elapsed_ms);},
+   "reset"=>{t.running=false;t.finished=false;t.elapsed_ms=0;t.laps.clear();t.round=1;t.phase="focus".into();t.pause_reason=None;if let Some(w)=&mut t.workflow{w.stage_index=0;w.waiting=false;}},
+   "restart"=>{t.running=true;t.finished=false;t.elapsed_ms=0;t.laps.clear();t.round=1;t.phase="focus".into();t.pause_reason=None;if let Some(w)=&mut t.workflow{w.stage_index=0;w.waiting=false;}},
    "next"=>{let Some(w)=&mut t.workflow else{return Err("流程数据缺失".into())};if t.finished{return Err("流程已结束".into())}if !w.waiting{return Err("当前阶段尚未完成".into())}if w.stage_index+1>=w.stages.len(){t.finish_workflow()}else{w.stage_index+=1;w.waiting=false;t.elapsed_ms=0;t.running=true;t.pause_reason=None;}},
    "skip"=>{let Some(w)=&mut t.workflow else{return Err("流程数据缺失".into())};if t.finished{return Err("流程已结束".into())}if w.stage_index+1>=w.stages.len(){t.finish_workflow()}else{w.stage_index+=1;w.waiting=false;t.elapsed_ms=0;t.running=true;t.pause_reason=None;}},
    "extend5"=>{let Some(w)=&mut t.workflow else{return Err("流程数据缺失".into())};if t.finished{return Err("流程已结束".into())}let index=w.stage_index;let current=w.stages[index].seconds;let next=(current+300).min(14400);if next==current{return Err("当前阶段已达 240 分钟上限".into())}let total=w.stages.iter().map(|s|s.seconds).sum::<u64>()+(next-current);if total>86400{return Err("流程总时长不能超过 24 小时".into())}w.stages[index].seconds=next;w.waiting=false;t.running=true;t.pause_reason=None;},
@@ -109,6 +118,13 @@ impl Store{
   }
   t.revision=t.revision.saturating_add(1);
   if let Err(e)=self.persist(){self.items=old;return Err(e)}Ok(())
+ }
+ /// Change only the displayed direction; the monotonic elapsed clock and deadlines stay intact.
+ pub fn set_direction(&mut self,id:&str,count_up:bool,revision:Option<u64>)->Result<(),String>{
+  let old=self.items.clone();let t=self.items.iter_mut().find(|t|t.id==id).ok_or("计时器不存在")?;
+  if !matches!(t.mode.as_str(),"pomodoro"|"workflow"){return Err("只有番茄钟可切换计时方向".into())}
+  if revision.is_some_and(|expected|expected!=t.revision){return Err("计时状态已变化，请刷新后重试".into())}
+  if t.count_up==count_up{return Ok(())}t.count_up=count_up;t.revision+=1;if let Err(e)=self.persist(){self.items=old;return Err(e)}Ok(())
  }
  pub fn advance(&mut self,ms:u64)->Vec<Timer>{let mut events=vec![];for t in &mut self.items{if t.advance(ms){events.push(t.clone());}}events}
  /// Pause every running pomodoro focus timer for the current lock generation.
@@ -161,4 +177,18 @@ impl Templates{
  #[test]fn workflow_restarts_paused_at_the_same_stage_and_templates_are_copied(){let p=std::env::temp_dir().join(format!("LyricIsland.Workflow.{}.{}.json",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));let mut s=Store::new(p.clone());let id=s.create(&json!({"mode":"workflow","stages":stages(),"templateId":"flow-1"})).unwrap();s.act(&id,"skip",None).unwrap();let s=Store::new(p.clone());let t=s.items.iter().find(|t|t.id==id).unwrap();assert!(!t.running);assert_eq!(t.workflow.as_ref().unwrap().stage_index,1);assert_eq!(s.error,None);let instance=t.workflow.as_ref().unwrap().stages.clone();let mut templates=Templates::new(PathBuf::new());let template=templates.save(&json!({"name":"学习流程","stages":stages()})).unwrap();templates.save(&json!({"id":template,"name":"改名","stages":[{"name":"a","seconds":60},{"name":"b","seconds":60}]})).unwrap();assert_eq!(s.items[0].workflow.as_ref().unwrap().stages,instance);assert!(templates.delete(&template).is_ok());let _=std::fs::remove_file(p);}
  #[test]fn lock_pauses_only_running_focus_and_resume_needs_the_generation(){let mut s=store();let focus=s.create(&json!({"mode":"pomodoro","focus":60})).unwrap();let rest=s.create(&json!({"mode":"pomodoro","focus":60,"rest":30})).unwrap();let countdown=s.create(&json!({"mode":"countdown","duration":60})).unwrap();s.items.iter_mut().find(|t|t.id==rest).unwrap().phase="rest".into();assert_eq!(s.pause_for_lock(3).unwrap(),vec![focus.clone()]);assert!(s.items.iter().find(|t|t.id==rest).unwrap().running);assert!(s.items.iter().find(|t|t.id==countdown).unwrap().running);assert!(s.resume_focus(&[focus.clone()],2).is_err());assert_eq!(s.resume_focus(&[focus.clone()],3).unwrap(),vec![focus.clone()]);assert!(s.resume_focus(&[focus.clone()],3).is_err());s.pause_for_lock(4).unwrap();s.clear_lock_pauses().unwrap();assert!(s.resume_focus(&[focus],4).is_err());}
  #[test]fn old_three_mode_files_still_load(){let p=std::env::temp_dir().join(format!("LyricIsland.OldTimers.{}.{}.json",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::write(&p,r#"[{"id":"clock-1","name":"倒计时","mode":"countdown","duration":300,"focus":1500,"rest":300,"rounds":4,"round":1,"phase":"focus","elapsedMs":0,"running":true,"finished":false}]"#).unwrap();let s=Store::new(p.clone());assert_eq!(s.error,None);assert_eq!(s.items.len(),1);assert!(!s.items[0].running);assert!(s.items[0].pause_reason.is_some());let _=std::fs::remove_file(p);}
+}
+
+#[cfg(test)]mod lap_tests{use super::*;
+#[test]fn stopwatch_laps_are_authoritative_independent_and_resettable(){let mut s=Store::new(PathBuf::new());let id=s.create(&json!({"mode":"stopwatch"})).unwrap();s.advance(3180);s.act(&id,"lap",Some(1)).unwrap();s.advance(650);let rev=s.items[0].revision;s.act(&id,"lap",Some(rev)).unwrap();assert_eq!(s.items[0].laps,vec![3180,3830]);s.action(&id,"pause").unwrap();assert!(s.action(&id,"lap").is_err());s.action(&id,"reset").unwrap();assert!(s.items[0].laps.is_empty());assert_eq!(s.items[0].elapsed_ms,0);let other=s.create(&json!({"mode":"countdown"})).unwrap();assert!(s.action(&other,"lap").is_err());}
+}
+
+#[cfg(test)]mod direction_tests{use super::*;
+#[test]fn reversing_display_keeps_phase_and_completion_deadline(){let mut s=Store::new(PathBuf::new());let id=s.create(&json!({"mode":"pomodoro","focus":10,"rounds":1})).unwrap();s.advance(3100);assert_eq!(s.items[0].clock(),"00:07");s.set_direction(&id,true,Some(1)).unwrap();assert_eq!(s.items[0].clock(),"00:03");assert_eq!(s.items[0].elapsed_ms,3100);assert!(s.items[0].running);assert!(s.set_direction(&id,false,Some(1)).is_err());assert_eq!(s.advance(6900).len(),1);assert!(s.items[0].finished);assert_eq!(s.items[0].clock(),"00:10");assert!(s.advance(5000).is_empty());}
+#[test]fn count_up_workflow_still_waits_and_direction_survives_restart(){let p=std::env::temp_dir().join(format!("DotIsle.Direction.{}.json",std::process::id()));let mut s=Store::new(p.clone());let id=s.create(&json!({"mode":"workflow","countUp":true,"stages":[{"name":"专注","seconds":60},{"name":"休息","seconds":60}]})).unwrap();s.advance(60000);assert_eq!(s.items[0].clock(),"01:00");assert!(s.items[0].workflow.as_ref().unwrap().waiting);s.set_direction(&id,false,None).unwrap();assert_eq!(s.items[0].clock(),"00:00");assert!(s.items[0].workflow.as_ref().unwrap().waiting);let copy=Store::new(p.clone());assert_eq!(copy.error,None);assert!(!copy.items[0].count_up);assert!(copy.items[0].workflow.as_ref().unwrap().waiting);let _=std::fs::remove_file(p);assert!(s.create(&json!({"mode":"countdown","countUp":true})).is_err());assert!(s.create(&json!({"mode":"pomodoro","countUp":"true"})).is_err());}
+}
+
+#[cfg(test)]mod island_presentation_tests{use super::*;
+#[test]fn island_actions_match_finished_and_waiting_states(){let mut s=Store::new(PathBuf::new());let id=s.create(&json!({"duration":1})).unwrap();s.advance(1000);assert_eq!(s.items[0].primary_action(),"restart");s.action(&id,"restart").unwrap();assert!(s.items[0].running&&!s.items[0].finished);assert_eq!(s.items[0].elapsed_ms,0);let flow=s.create(&json!({"mode":"workflow","stages":[{"name":"a","seconds":60},{"name":"b","seconds":60}]})).unwrap();s.advance(60000);assert_eq!(s.items[1].primary_action(),"next");s.action(&flow,"next").unwrap();assert_eq!(s.items[1].workflow.as_ref().unwrap().stage_index,1);}
+#[test]fn stopwatch_expansion_shares_a_single_fractional_readout(){let mut s=Store::new(PathBuf::new());s.create(&json!({"mode":"stopwatch"})).unwrap();s.advance(3830);let panel=s.items[0].panel();assert_eq!(panel.value,"00:03");let detail=panel.timer.unwrap();assert_eq!(detail.expanded_value,"00:03.83");assert!(detail.indefinite);assert_eq!(detail.primary,"暂停");}
 }

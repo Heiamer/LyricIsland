@@ -1,10 +1,12 @@
 # Current application workspace: lyric core, media backend, native island and GPUI settings.
 [workspace]
 resolver = "2"
-members = ["crates/lyric-core", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
+members = ["crates/lyric-core", "crates/lyric-archive", "crates/lyric-bootstrap", "crates/lyric-tools", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
+# Vendored third-party crate: built as a path dependency, its own tests stay out of `cargo test --workspace`.
+exclude = ["vendor/material-colors-0.4.2"]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.0.2"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"

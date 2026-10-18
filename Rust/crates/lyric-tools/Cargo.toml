@@ -1,0 +1,18 @@
+[package]
+name = "lyric-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lyric-tools"
+path = "src/main.rs"
+
+[dependencies]
+lyric-archive = { path = "../lyric-archive" }
+lyric-bootstrap = { path = "../lyric-bootstrap" }
+serde_json.workspace = true
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_LibraryLoader",
+] }

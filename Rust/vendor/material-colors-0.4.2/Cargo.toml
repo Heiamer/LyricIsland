@@ -1,0 +1,35 @@
+# Vendored from crates.io material-colors 0.4.2 (MIT OR Apache-2.0), a Rust port of
+# Google's material-color-utilities. Manifest trimmed: dev-dependencies, integration
+# tests and profiles removed so the workspace can build fully offline.
+[package]
+name = "material-colors"
+version = "0.4.2"
+edition = "2021"
+description = "Up-to-date material-color-utilities port"
+documentation = "https://docs.rs/material-colors"
+homepage = "https://github.com/Aiving/material-colors"
+repository = "https://github.com/Aiving/material-colors.git"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+rust-version = "1.63.0"
+autotests = false
+autobenches = false
+autoexamples = false
+
+[lib]
+name = "material_colors"
+path = "src/lib.rs"
+
+[dependencies]
+ahash = { version = "0.8.11", default-features = false }
+indexmap = { version = "2.3.0", default-features = false }
+images = { package = "image", version = "0.25.2", optional = true }
+serde = { version = "1.0.205", features = ["derive"], optional = true }
+libm = { version = "0.2.8", optional = true }
+
+[features]
+default = ["std"]
+std = ["serde/std", "indexmap/std", "ahash/std", "ahash/runtime-rng"]
+image = ["dep:images"]
+serde = ["dep:serde"]
+libm = ["dep:libm"]

@@ -119,8 +119,8 @@ fn notification_settings_rows(state:&Value,view:&SettingsApp,cx:&mut Context<Set
   toggle_row("NotificationWhitelistEnabled","启用通知白名单","关闭时不限制应用；开启后只提醒选中的应用。",flag(state,"NotificationWhitelistEnabled",false),view, cx),
  ];
  if flag(state,"NotificationWhitelistEnabled",false){
-  for(id,title)in[("QQNT","QQNT"),("QQ","QQ（旧版及系统通知）")]{let allowed=notification_allowed(state,id);rows.push(check_row(SharedString::from(format!("notification-app:{id}")),title,"仅能接收该应用发送到 Windows 通知中心的消息。",allowed,cx));}
-  if let Some(apps)=notifications["apps"].as_array(){for app in apps{let(Some(id),Some(name))=(app["id"].as_str(),app["name"].as_str())else{continue};if["QQNT","QQ"].contains(&id){continue}let allowed=notification_allowed(state,id);rows.push(check_row(SharedString::from(format!("notification-app:{id}")),name,id,allowed,cx));}}
+  for(id,title)in[("QQNT","QQNT"),("QQ","QQ（旧版及系统通知）")]{let allowed=notification_allowed(state,id);rows.push(check_row(SharedString::from(format!("notification-app:{id}")),title,"仅能接收该应用发送到 Windows 通知中心的消息。",allowed,view,cx));}
+  if let Some(apps)=notifications["apps"].as_array(){for app in apps{let(Some(id),Some(name))=(app["id"].as_str(),app["name"].as_str())else{continue};if["QQNT","QQ"].contains(&id){continue}let allowed=notification_allowed(state,id);rows.push(check_row(SharedString::from(format!("notification-app:{id}")),name,id,allowed,view,cx));}}
   rows.push(div().flex().flex_col().gap_2().w_full().min_w_0().py(px(16.0))
    .child(div().text_size(px(14.)).text_color(t::text()).child("允许的应用"))
    .child(div().w_full().child(view.notification_apps.clone()))
@@ -132,7 +132,7 @@ fn notification_settings_rows(state:&Value,view:&SettingsApp,cx:&mut Context<Set
   let blocked=setting(state,"NotificationBlockedApps").as_array().cloned().unwrap_or_default();let mut apps=Vec::<(String,String)>::new();
   if let Some(known)=notifications["apps"].as_array(){for app in known{if let Some(id)=app["id"].as_str(){apps.push((id.into(),app["name"].as_str().unwrap_or(id).into()));}}}
   for item in &blocked{if let Some(id)=item.as_str(){if !apps.iter().any(|(key,_)|key.eq_ignore_ascii_case(id)){apps.push((id.into(),id.into()));}}}
-  for(id,name)in apps{let selected=blocked.iter().any(|v|v.as_str().is_some_and(|s|s.eq_ignore_ascii_case(&id)));rows.push(check_row(SharedString::from(format!("notification-blocked:{id}")),&name,&id,selected,cx));}
+  for(id,name)in apps{let selected=blocked.iter().any(|v|v.as_str().is_some_and(|s|s.eq_ignore_ascii_case(&id)));rows.push(check_row(SharedString::from(format!("notification-blocked:{id}")),&name,&id,selected,view,cx));}
   rows.push(div().flex().flex_col().gap_2().w_full().min_w_0().py(px(16.)).child(div().text_size(px(14.)).text_color(t::text()).child("添加需要屏蔽的应用"))
    .child(div().text_size(px(11.)).text_color(t::text_dim()).child("从已识别应用勾选，或输入完整AUMID并按Enter。关闭黑名单会保留名单；不删除已有历史记录。"))
    .child(view.notification_blocked.clone()).into_any_element());tally();
@@ -143,26 +143,11 @@ fn notification_settings_rows(state:&Value,view:&SettingsApp,cx:&mut Context<Set
   rows.push(toggle_row("HeadphoneConnectionRemindersEnabled","耳机连接提醒","有线与蓝牙耳机接入时提醒；切换默认输出不会重复提醒。",flag(state,"HeadphoneConnectionRemindersEnabled",true),view, cx));
   rows.push(toggle_row("SpeakerConnectionRemindersEnabled","音响连接提醒","音响或扬声器接入时提醒。",flag(state,"SpeakerConnectionRemindersEnabled",true),view, cx));
   rows.push(toggle_row("GamepadConnectionRemindersEnabled","手柄连接提醒","XInput 与标准 HID 手柄接入时提醒。",flag(state,"GamepadConnectionRemindersEnabled",true),view, cx));
-  rows.push(toggle_row("MouseConnectionRemindersEnabled","鼠标连接提醒","只识别设备接入与移除，不记录任何操作内容。",flag(state,"MouseConnectionRemindersEnabled",true),view, cx));
-  rows.push(toggle_row("KeyboardConnectionRemindersEnabled","键盘连接提醒","只识别设备接入与移除，不影响正常输入。",flag(state,"KeyboardConnectionRemindersEnabled",true),view, cx));
+  rows.push(toggle_row("MouseConnectionRemindersEnabled","鼠标连接提醒","默认关闭：无线鼠标休眠唤醒、KVM 切换会反复重连，每次都弹一次反而成了噪音。只识别接入与移除，不记录任何操作内容。",flag(state,"MouseConnectionRemindersEnabled",false),view, cx));
+  rows.push(toggle_row("KeyboardConnectionRemindersEnabled","键盘连接提醒","默认关闭：键盘同样会因休眠或切换设备反复重连。只识别接入与移除，不影响正常输入。",flag(state,"KeyboardConnectionRemindersEnabled",false),view, cx));
   rows.push(toggle_row("DeviceDisconnectRemindersEnabled","断开提醒","设备断开时也提醒；关闭时只提醒接入。",flag(state,"DeviceDisconnectRemindersEnabled",true),view, cx));
  }
  rows.push(device_test_row(cx));
- rows.push(toggle_row("SystemStateHintsEnabled","启用系统状态提示","大写锁定、小键盘、麦克风静音与触控板变化时短暂提示；暂停通知时同样不提示。默认开启。",flag(state,"SystemStateHintsEnabled",true),view, cx));
- if flag(state,"SystemStateHintsEnabled",true){
-  rows.push(toggle_row("CapsLockHintEnabled","大写锁定提示","按 Caps Lock 切换时显示当前锁定状态。",flag(state,"CapsLockHintEnabled",true),view, cx));
-  rows.push(toggle_row("NumLockHintEnabled","小键盘锁定提示","按 Num Lock 切换时显示小键盘状态。",flag(state,"NumLockHintEnabled",true),view, cx));
-  rows.push(toggle_row("MicrophoneMuteHintEnabled","麦克风静音提示","默认录音端点静音状态变化时提示；不表示正在录音。",flag(state,"MicrophoneMuteHintEnabled",true),view, cx));
-  rows.push(toggle_row("TouchpadHintEnabled","触控板状态提示","精密触控板开关变化时提示；部分厂商硬件开关无法读取。",flag(state,"TouchpadHintEnabled",true),view, cx));
-  rows.push(system_test_row(cx));
-  let system=&state["systemState"];
-  if !system.is_null(){
-   let mic=match (system["mic"].as_bool(),system["micSupported"].as_bool()){(_,Some(false))=>"此设备暂不支持",(Some(true),Some(true))=>"已静音",(Some(false),Some(true))=>"未静音",_=>"等待检测"};
-   let touch=match (system["touch"].as_bool(),system["touchSupported"].as_bool()){(_,Some(false))=>"此设备暂不支持",(Some(true),Some(true))=>"已开启",(Some(false),Some(true))=>"已关闭",_=>"等待检测"};
-   rows.push(info_row("麦克风状态",mic,"读取默认录音端点的系统静音状态；厂商硬件断麦可能无法读取。",view,cx));
-   rows.push(info_row("触控板状态",touch,"读取 Precision Touchpad 的开关配置；不覆盖所有厂商硬件开关。",view,cx));
-  }
- }
  rows.push(toggle_row("NotificationHistoryEnabled","保留通知记录","仅记录点屿实际收到的通知。",flag(state,"NotificationHistoryEnabled",true),view, cx));
  let days=setting(state,"NotificationHistoryDays").as_u64().map(|days|days.to_string()).unwrap_or_else(||"7".into());
  rows.push(segmented_row("notice-history-days","NotificationHistoryDays","记录保留时间","超出的记录自动清理；只影响点屿自己的记录。",&[("1","1 天"),("7","7 天"),("30","30 天")],&days,cx));

@@ -92,3 +92,11 @@ Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Sour
 ## roxmltree（通知 XML 解析）
 
 https://github.com/RazrFalcon/roxmltree · 0.20.0 · MIT OR Apache-2.0。采用 MIT 许可副本，见 licenses/roxmltree-MIT.txt。
+
+## material-colors（封面 Monet 取色）
+
+https://github.com/Aiving/material-colors · 0.4.2 · MIT OR Apache-2.0。它是 Google Material Color Utilities（https://github.com/material-foundation/material-color-utilities，Apache-2.0）的社区 Rust 移植，不是 Google 官方实现。源码随附于 `Rust/vendor/material-colors-0.4.2`，采用 MIT 许可副本，见 licenses/material-colors-MIT.txt。
+
+## Inno Setup（安装向导）
+
+安装器由 Inno Setup 6.7.3 编译，许可见 licenses/Inno-Setup-License.txt。

@@ -26,10 +26,26 @@ pub fn control_diagnostics()->Result<serde_json::Value>{
 }
 pub fn normalize_source(source:&str)->String{
     let s=source.to_lowercase();
-    for (needles,name) in [(&["twilightecho"][..],"TwilightEcho"),(&["qqmusic"][..],"QQMusic"),(&["cloudmusic","netease","163music","music.163","wyy"][..],"Netease"),(&["kugou"][..],"Kugou"),(&["kwmusic","kuwo"][..],"Kuwo"),(&["spotify"][..],"Spotify"),(&["foobar"][..],"Foobar2000"),(&["musicbee"][..],"MusicBee"),(&["aimp"][..],"AIMP"),(&["chrome","msedge","firefox","browser","opera","brave","vivaldi"][..],"Browser")]{
+    for (needles,name) in [(&["qqmusic"][..],"QQMusic"),(&["cloudmusic","netease","163music","music.163","wyy"][..],"Netease"),(&["kugou"][..],"Kugou"),(&["kwmusic","kuwo"][..],"Kuwo"),(&["spotify"][..],"Spotify"),(&["sodamusic"][..],"SodaMusic"),(&["applemusic","apple music"][..],"AppleMusic"),(&["youtubemusic","youtube music"][..],"YouTubeMusic"),(&["potplayer"][..],"PotPlayer"),(&["saltplayer","salt player"][..],"SaltPlayer"),(&["lx-music","lxmusic"][..],"LXMusic"),(&["musicfree"][..],"MusicFree"),(&["yesplaymusic"][..],"YesPlayMusic"),(&["cider"][..],"Cider"),(&["foobar"][..],"Foobar2000"),(&["musicbee"][..],"MusicBee"),(&["aimp"][..],"AIMP"),(&["chrome","msedge","firefox","browser","opera","brave","vivaldi"][..],"Browser")]{
         if needles.iter().any(|n|s.contains(n)){return name.into()}
     }
     source.into()
+}
+/// Which media sessions may drive the island.
+///
+/// Expressed as exclusions, not as an allow-list: a session responds unless its source is named in
+/// `ignored`. That is what lets a player nobody has heard of work without being added first — the
+/// old allow-list silently ignored 汽水音乐, PotPlayer and every local player that was not one of the
+/// six defaults. `only` is the diagnostic counterpart: the verification harnesses pin the island to
+/// a single session with it, and it stays empty in normal operation.
+#[derive(Debug,Clone,Default)]
+pub struct SourceFilter{pub ignored:Vec<String>,pub only:Vec<String>}
+impl SourceFilter{
+    pub fn allows(&self,source:&str)->bool{
+        if blocked(source){return false}
+        if !self.only.is_empty()&&!self.only.iter().any(|rule|matches(rule,source)){return false}
+        !self.ignored.iter().any(|rule|matches(rule,source))
+    }
 }
 pub fn matches(rule:&str,source:&str)->bool{
     if rule.eq_ignore_ascii_case(source)||rule.eq_ignore_ascii_case(&normalize_source(source)){return true}
@@ -37,8 +53,8 @@ pub fn matches(rule:&str,source:&str)->bool{
     let r=program(rule);r==program(source)||!r.contains('.')&&source.to_lowercase().split(['.','!','/','\\',':']).any(|p|p==r)
 }
 pub fn blocked(source:&str)->bool{let s=source.to_lowercase();["explorer","shellexperiencehost","searchhost","startmenuexperiencehost"].iter().any(|p|s.contains(p))}
-pub fn netease_window_metadata(allowed:&[String])->Option<(String,String)>{
-    if !allowed.iter().any(|r|matches(r,"cloudmusic.exe")){return None}
+pub fn netease_window_metadata(filter:&SourceFilter)->Option<(String,String)>{
+    if !filter.allows("cloudmusic.exe"){return None}
     type Cache=(Instant,Option<(String,String)>);
     static CACHE:std::sync::OnceLock<std::sync::Mutex<Cache>>=std::sync::OnceLock::new();
     let mut cache=CACHE.get_or_init(||std::sync::Mutex::new((Instant::now()-Duration::from_secs(2),None))).lock().ok()?;
@@ -72,13 +88,12 @@ impl Media{
         let count=events.clone();let b=manager.CurrentSessionChanged(&TypedEventHandler::new(move|_,_|{count.fetch_add(1,Ordering::Relaxed);Ok(())}))?;
         Ok(Self{manager,active:None,events,manager_tokens:(a,b),session_tokens:None,cached_properties:None,properties_at:Instant::now(),properties_events:u64::MAX,cached_cover:None,cover_key:String::new(),cover_retry:Instant::now()})
     }
-    pub fn read(&mut self,allowed:&[String])->Result<MediaSample>{
-        let sessions=self.manager.GetSessions()?;let current=self.manager.GetCurrentSession().ok();let mut best=None;let mut priority=(true,usize::MAX,true);
+    pub fn read(&mut self,filter:&SourceFilter)->Result<MediaSample>{
+        let sessions=self.manager.GetSessions()?;let current=self.manager.GetCurrentSession().ok();let mut best=None;let mut priority=(true,true);
         for i in 0..sessions.Size()?{
-            let s=sessions.GetAt(i)?;let source=s.SourceAppUserModelId()?.to_string();if blocked(&source){continue}
-            let Some(rank)=allowed.iter().position(|r|matches(r,&source))else{continue};
+            let s=sessions.GetAt(i)?;let source=s.SourceAppUserModelId()?.to_string();if !filter.allows(&source){continue}
             let playing=s.GetPlaybackInfo().ok().and_then(|p|p.PlaybackStatus().ok())==Some(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
-            let candidate=(!playing,rank,current.as_ref()!=Some(&s));if candidate<priority{priority=candidate;best=Some(s)}
+            let candidate=(!playing,current.as_ref()!=Some(&s));if candidate<priority{priority=candidate;best=Some(s)}
         }
         let Some(session)=best else{self.set_active(None);return Ok(MediaSample{playback:PlaybackSnapshot::idle(),updated_ms:0,raw:0.,status:"Closed".into(),rate:1.,cover_identity:String::new()})};
         self.set_active(Some(session.clone()));
@@ -90,7 +105,7 @@ impl Media{
         let props=self.cached_properties.as_ref().unwrap();
         let mut title=props.Title()?.to_string();let mut artist=props.Artist()?.to_string();
         if artist.trim().is_empty(){artist=props.AlbumArtist().map(|s|s.to_string()).unwrap_or_default()}
-        if source=="Netease"&&(title.trim().is_empty()||title.eq_ignore_ascii_case("Unknown Title")){if let Some((name,singer))=netease_window_metadata(allowed){title=name;artist=singer;}}
+        if source=="Netease"&&(title.trim().is_empty()||title.eq_ignore_ascii_case("Unknown Title")){if let Some((name,singer))=netease_window_metadata(filter){title=name;artist=singer;}}
         let mut song_id=None;if let Ok(genres)=props.Genres(){for i in 0..genres.Size().unwrap_or(0){if let Ok(genre)=genres.GetAt(i){let genre=genre.to_string();let prefix=if source=="Netease"{"NCM-"}else if source=="QQMusic"{"QQ-"}else{""};if !prefix.is_empty(){if let Some(id)=genre.strip_prefix(prefix){song_id=Some(id.to_string());break}}}}}
         let album=props.AlbumTitle()?.to_string();let info=session.GetPlaybackInfo()?;let status=info.PlaybackStatus()?;
         let playing=status==GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
@@ -133,6 +148,27 @@ impl Media{
     }
 }
 impl Drop for Media{fn drop(&mut self){self.set_active(None);let _=self.manager.RemoveSessionsChanged(self.manager_tokens.0);let _=self.manager.RemoveCurrentSessionChanged(self.manager_tokens.1);}}
-#[cfg(test)]mod tests{use super::*;#[test]fn rules_preserve_whitelist_boundaries(){assert!(matches("QQMusic","QQMusic.exe"));assert!(matches("Browser","chrome.exe"));assert!(!matches("Spotify","chrome.exe"));assert!(blocked("Microsoft.Windows.ShellExperienceHost"));}}
+#[cfg(test)]mod tests{use super::*;#[test]fn rules_preserve_whitelist_boundaries(){assert!(matches("QQMusic","QQMusic.exe"));assert!(matches("Browser","chrome.exe"));assert!(!matches("Spotify","chrome.exe"));assert!(blocked("Microsoft.Windows.ShellExperienceHost"));}
+/// The filter answers "does this respond?" for every player the app has never heard of, which is the
+/// whole point of turning the old allow-list around. Only what is named here stays silent.
+#[test]fn only_named_players_are_excluded(){
+    let filter=SourceFilter{ignored:vec!["Browser".into()],only:vec![]};
+    assert!(filter.allows("SodaMusic.exe"));
+    assert!(filter.allows("PotPlayerMini64.exe"));
+    assert!(filter.allows("QQMusic.exe"));
+    assert!(!filter.allows("chrome.exe"));
+    assert!(!filter.allows("Microsoft.Windows.ShellExperienceHost"));
+}
+/// A blocked built-in still reaches its aliases: 网易云 is one session id in SMTC and another in the
+/// window-title fallback, and both have to go quiet together.
+#[test]fn exclusion_follows_aliases_and_the_diagnostic_pin(){
+    let netease=SourceFilter{ignored:vec!["Netease".into()],only:vec![]};
+    assert!(!netease.allows("cloudmusic.exe"));
+    assert!(!netease.allows("Netease"));
+    assert!(netease.allows("QQMusic.exe"));
+    let pinned=SourceFilter{ignored:vec![],only:vec!["LyricIsland.Verify13".into()]};
+    assert!(pinned.allows("LyricIsland.Verify13"));
+    assert!(!pinned.allows("QQMusic.exe"));
+}}
 
 

@@ -5,19 +5,42 @@
 use lyric_backend::io;
 use serde_json::{json, Value};
 
-/// Known players offered as toggles on the whitelist page.
-pub const PLAYERS: [(&str, &str); 10] = [
-    ("Netease", "网易云音乐"),
-    ("QQMusic", "QQ 音乐"),
-    ("Kugou", "酷狗音乐"),
-    ("Kuwo", "酷我音乐"),
-    ("Spotify", "Spotify"),
-    ("TwilightEcho", "TwilightEcho"),
-    ("Foobar2000", "Foobar2000"),
-    ("MusicBee", "MusicBee"),
-    ("AIMP", "AIMP"),
-    ("Browser", "浏览器媒体"),
+/// Every player the 不响应的播放器 page offers, grouped the way a person thinks about them rather
+/// than the way the session ids are spelled. The page draws one grid per group; nothing here is a
+/// gate — a player that is not on this list still responds, it simply cannot be excluded by name.
+pub const PLAYER_GROUPS: [(&str, &[(&str, &str)]); 4] = [
+    ("国内平台", &[
+        ("Netease", "网易云音乐"),
+        ("QQMusic", "QQ 音乐"),
+        ("Kugou", "酷狗音乐"),
+        ("Kuwo", "酷我音乐"),
+        ("SodaMusic", "汽水音乐"),
+    ]),
+    ("国外平台", &[
+        ("Spotify", "Spotify"),
+        ("AppleMusic", "Apple Music"),
+        ("YouTubeMusic", "YouTube Music"),
+    ]),
+    ("本地播放器", &[
+        ("PotPlayer", "PotPlayer"),
+        ("Foobar2000", "Foobar2000"),
+        ("MusicBee", "MusicBee"),
+        ("AIMP", "AIMP"),
+        ("SaltPlayer", "Salt Player"),
+    ]),
+    ("其它", &[
+        ("Browser", "浏览器媒体"),
+        ("LXMusic", "洛雪音乐"),
+        ("MusicFree", "MusicFree"),
+        ("Cider", "Cider"),
+        ("YesPlayMusic", "YesPlayMusic"),
+    ]),
 ];
+
+/// The flat id list the validators need, in the same order the page draws them.
+pub fn player_ids() -> impl Iterator<Item = &'static str> {
+    PLAYER_GROUPS.iter().flat_map(|(_, players)| players.iter().map(|(id, _)| *id))
+}
 
 /// Notification commands that take no value.
 const NOTIFICATION_COMMANDS: [&str; 1] = ["notificationPreview"];
@@ -115,8 +138,9 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
         return request("update", json!({"key": key, "value": text}));
     }
     // A layout type, never a raw boolean pair.
+    if key=="SystemStateHintPlacement"{if !["Island","Bottom"].contains(&text){return Err("提示位置无效".into())}return request("update",json!({"key":key,"value":text}));}
     if key == "MusicExpandedLayout" {
-        if !["Separated", "SideBySide"].contains(&text) {
+        if !["Separated", "SideBySide", "LyricFocus"].contains(&text) {
             return Err("布局选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
@@ -129,28 +153,30 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
         return request(key, json!(seconds));
     }
     let (key, value) = if let Some(id) = key.strip_prefix("source:") {
-        let mut allowed = state["settings"]["AllowedSources"].as_array().cloned().unwrap_or_default();
-        allowed.retain(|s| !s.as_str().is_some_and(|s| s.eq_ignore_ascii_case(id)));
+        // The tile is a switch for "this player stays silent", so `true` adds it to the exclusions
+        // rather than granting it. Everything not named here keeps responding.
+        let mut ignored = state["settings"]["IgnoredSources"].as_array().cloned().unwrap_or_else(|| vec![json!("Browser")]);
+        ignored.retain(|s| !s.as_str().is_some_and(|s| s.eq_ignore_ascii_case(id)));
         if text == "true" {
-            allowed.push(json!(id));
+            ignored.push(json!(id));
         }
-        ("AllowedSources", Value::Array(allowed))
+        ("IgnoredSources", Value::Array(ignored))
     } else if key == "customSources" {
         let custom = text.split(['\r', '\n', ',', '，', ';', '；']).map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>();
         if custom.iter().any(|s| s.len() > 256 || s.chars().any(char::is_control) || s.contains(['*', '?', '"'])) {
             return Err("请输入有效程序名，不支持通配符和启动参数。".into());
         }
-        let mut allowed = state["settings"]["AllowedSources"].as_array().cloned().unwrap_or_default();
-        allowed.retain(|s| s.as_str().is_some_and(|s| PLAYERS.iter().any(|(id, _)| id.eq_ignore_ascii_case(s))));
+        let mut ignored = state["settings"]["IgnoredSources"].as_array().cloned().unwrap_or_else(|| vec![json!("Browser")]);
+        ignored.retain(|s| s.as_str().is_some_and(|s| player_ids().any(|id| id.eq_ignore_ascii_case(s))));
         for s in custom {
-            if !allowed.iter().any(|v| v.as_str().is_some_and(|v| v.eq_ignore_ascii_case(s))) {
-                allowed.push(json!(s));
+            if !ignored.iter().any(|v| v.as_str().is_some_and(|v| v.eq_ignore_ascii_case(s))) {
+                ignored.push(json!(s));
             }
         }
-        if allowed.len() > 32 {
-            return Err("最多允许 32 个播放器。".into());
+        if ignored.len() > 32 {
+            return Err("最多 32 个程序。".into());
         }
-        ("AllowedSources", Value::Array(allowed))
+        ("IgnoredSources", Value::Array(ignored))
     } else if key.ends_with("Color") {
         let value = if text == "default" {
             match key {

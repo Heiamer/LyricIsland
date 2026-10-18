@@ -26,6 +26,7 @@
 //! ```
 
 pub mod cache;
+pub mod hotkey;
 pub mod json_store;
 pub mod memory_scan;
 pub mod crypto;

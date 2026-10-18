@@ -49,6 +49,8 @@ pub struct TextField {
     marked: Option<Range<usize>>,
     placeholder: SharedString,
     on_commit: OnCommit,
+    /// Called when Escape cancels an inline edit. `None` keeps the field's usual behaviour.
+    on_cancel: Option<Rc<dyn Fn(&mut App)>>,
     /// Self-check hook: publish this field's rectangle once so an automated test can click it.
     watched: bool,
     /// Written during paint, read from the platform input callbacks.
@@ -141,6 +143,7 @@ impl TextField {
             marked: None,
             placeholder: placeholder.into(),
             on_commit,
+            on_cancel: None,
             watched,
             painted: Rc::new(RefCell::new(Painted::default())),
             dragging: false,
@@ -148,6 +151,12 @@ impl TextField {
     }
 
     pub fn set_text(&mut self,text:&str,cx:&mut Context<Self>){self.text=text.to_owned();self.selected=self.text.len()..self.text.len();self.marked=None;cx.notify();}
+
+    /// Start an inline edit: fill the field and select everything so typing replaces the old name.
+    pub fn edit(&mut self,text:&str,cx:&mut Context<Self>){let text=sanitize(text);self.selected=0..text.len();self.text=text;self.reversed=false;self.marked=None;cx.notify();}
+
+    /// Register the Escape handler. A field without one leaves Escape to the rest of the window.
+    pub fn set_cancel_handler(&mut self,handler:Option<Rc<dyn Fn(&mut App)>>){self.on_cancel=handler;}
 
     /// Current contents. A form reads its values back through this rather than keeping a second
     /// copy in sync, so what is submitted is always exactly what the field shows.
@@ -327,9 +336,21 @@ impl TextField {
             "end" => self.move_to(self.text.len(), cx),
             // Enter submits. During a composition it belongs to the IME instead, which is what
             // makes "pick a candidate, then submit" behave the way every other field does.
+            // The callback runs deferred: handlers routinely update this same field (commit
+            // normalizes the text, cancel restores it), and touching a leased entity panics.
             "enter" => {
                 if self.marked.is_none() {
-                    (self.on_commit)(self.text.trim(), cx);
+                    let commit = self.on_commit.clone();
+                    let text = self.text.trim().to_owned();
+                    cx.defer(move |cx| commit(&text, cx));
+                }
+            }
+            // Escape first abandons an IME composition; with nothing composing it cancels the
+            // inline edit the field was opened for.
+            "escape" if self.marked.is_some() => self.unmark_text(window, cx),
+            "escape" => {
+                if let Some(cancel) = self.on_cancel.clone() {
+                    cx.defer(move |cx| cancel(cx));
                 }
             }
             "a" if command => self.select_all(cx),

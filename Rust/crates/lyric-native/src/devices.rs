@@ -20,10 +20,10 @@ const AUDIO_RENDER:GUID=GUID::from_u128(0xe6327cad_dcec_4949_ae8a_991e976a79d2);
 /// One alert family. A typed value instead of magic numbers keeps the setting map, the icon map
 /// and the filter in one place.
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Hash)]
-pub enum Kind{Usb,Volume,Phone,Headphones,Speaker,Gamepad,Mouse,Keyboard,Audio}
+pub enum Kind{Usb,Volume,Phone,Headphones,Speaker,Gamepad,Mouse,Keyboard}
 impl Kind{
-    pub fn key(self)->&'static str{match self{Self::Usb=>"Usb",Self::Volume=>"Volume",Self::Phone=>"Phone",Self::Headphones=>"Headphones",Self::Speaker=>"Speaker",Self::Gamepad=>"Gamepad",Self::Mouse=>"Mouse",Self::Keyboard=>"Keyboard",Self::Audio=>"Audio"}}
-    pub fn label(self)->&'static str{match self{Self::Usb=>"USB 设备",Self::Volume=>"移动磁盘",Self::Phone=>"手机 / 便携设备",Self::Headphones=>"耳机",Self::Speaker=>"音响",Self::Gamepad=>"手柄",Self::Mouse=>"鼠标",Self::Keyboard=>"键盘",Self::Audio=>"音频设备"}}
+    pub fn key(self)->&'static str{match self{Self::Usb=>"Usb",Self::Volume=>"Volume",Self::Phone=>"Phone",Self::Headphones=>"Headphones",Self::Speaker=>"Speaker",Self::Gamepad=>"Gamepad",Self::Mouse=>"Mouse",Self::Keyboard=>"Keyboard"}}
+    pub fn label(self)->&'static str{match self{Self::Usb=>"USB 设备",Self::Volume=>"移动磁盘",Self::Phone=>"手机 / 便携设备",Self::Headphones=>"耳机",Self::Speaker=>"音响",Self::Gamepad=>"手柄",Self::Mouse=>"鼠标",Self::Keyboard=>"键盘"}}
     /// The three families that existed before 2.0 keep their own filters and disconnect behaviour.
     pub fn legacy(self)->bool{matches!(self,Self::Usb|Self::Volume|Self::Phone)}
 }
@@ -33,10 +33,7 @@ impl Gates{
     pub fn allows(&self,kind:Kind,connected:bool)->bool{
         if !self.master{return false}
         if !connected&&!kind.legacy()&&!self.disconnect{return false}
-        match kind{Kind::Headphones=>self.headphones,Kind::Speaker=>self.speaker,Kind::Gamepad=>self.gamepad,Kind::Mouse=>self.mouse,Kind::Keyboard=>self.keyboard,
-            // An unclassified endpoint is never folded into one category: it needs both audio
-            // families to be on, which is the only choice that does not invent a type.
-            Kind::Audio=>self.headphones&&self.speaker,_=>true}
+        match kind{Kind::Headphones=>self.headphones,Kind::Speaker=>self.speaker,Kind::Gamepad=>self.gamepad,Kind::Mouse=>self.mouse,Kind::Keyboard=>self.keyboard,_=>true}
     }
 }
 #[derive(Clone,Debug)]pub struct Event{pub key:String,pub kind:Kind,pub connected:bool,pub label:String,at:Instant}
@@ -112,7 +109,6 @@ impl Hub{
         if !gates.master{self.pending.clear();self.raw_pending.clear();self.audio_pending.clear();return vec![]}
         self.pending.retain(|e|gates.allows(e.kind,e.connected));
         self.raw_pending.retain(|e|gates.allows(e.kind,e.connected));
-        self.audio_pending.retain(|e|gates.allows(self.endpoints.get(&e.id).map(|i|i.kind).unwrap_or(Kind::Audio),e.connected));
         let mut ready=vec![];
         // Raw input: collapse multiple HID collections of one physical device into one notice.
         let mut keep_raw=Vec::new();
@@ -138,11 +134,13 @@ impl Hub{
             if item.connected{
                 let Some(enumerator)=&enumerator else{continue};
                 let Some((info,state))=(unsafe{audio_info(&item.id,enumerator)}) else{continue};
-                if state!=DEVICE_STATE_ACTIVE||self.endpoints.contains_key(&item.id){continue}
+                if state!=DEVICE_STATE_ACTIVE||self.endpoints.contains_key(&item.id)||!gates.allows(info.kind,true){continue}
                 self.endpoints.insert(item.id.clone(),info.clone());
                 let event=Event::new(info.container.clone().unwrap_or(item.id.clone()),info.kind,true,info.name);
                 if self.fresh(&event){ready.push(event);}
             }else{
+                let Some(kind)=self.endpoints.get(&item.id).map(|i|i.kind) else{continue};
+                if !gates.allows(kind,false){self.endpoints.remove(&item.id);continue}
                 let Some(info)=self.endpoints.remove(&item.id) else{continue};
                 let event=Event::new(info.container.clone().unwrap_or(item.id),info.kind,false,info.name);
                 if self.fresh(&event){ready.push(event);}
@@ -173,7 +171,11 @@ unsafe fn audio_info(id:&str,enumerator:&IMMDeviceEnumerator)->Option<(AudioInfo
 }
 unsafe fn info_from(device:&IMMDevice)->Option<(AudioInfo,DEVICE_STATE)>{
     let store=device.OpenPropertyStore(STGM_READ).ok()?;
-    let kind=read_u32(store.GetValue(&PKEY_AudioEndpoint_FormFactor).ok()?).map(|form|match form{3|5=>Kind::Headphones,1=>Kind::Speaker,_=>Kind::Audio}).unwrap_or(Kind::Audio);
+    // Only the two families the settings actually offer. Everything else — HDMI displays, S/PDIF
+    // passthrough, virtual cables, endpoints that report no form factor at all — used to fall back
+    // to a generic "音频设备" banner that only repeated what 耳机 / 音响 already say. Those
+    // endpoints are now simply not announced, so `None` here is the whole removal.
+    let kind=read_u32(store.GetValue(&PKEY_AudioEndpoint_FormFactor).ok()?).and_then(|form|match form{3|5=>Some(Kind::Headphones),1=>Some(Kind::Speaker),_=>None})?;
     let name=read_string(store.GetValue(&PKEY_Device_FriendlyName).ok()?).filter(|n|!n.trim().is_empty()).unwrap_or_else(||kind.label().into());
     let container=read_guid(store.GetValue(&PKEY_Device_ContainerId).ok()?);
     let state=device.GetState().ok()?;
@@ -185,9 +187,12 @@ fn read_guid(mut value:PROPVARIANT)->Option<String>{let v=unsafe{&value.Anonymou
 #[cfg(test)]mod tests{use super::*;
 fn gates()->Gates{Gates{master:true,disconnect:false,headphones:true,speaker:false,gamepad:true,mouse:true,keyboard:true}}
 #[test]fn duplicate_interface_events_and_generic_usb_are_coalesced(){let mut h=Hub::default();h.record(Event::new("usb-x".into(),Kind::Usb,true,"USB".into()));h.record(Event::new("usb-x".into(),Kind::Usb,true,"USB".into()));assert_eq!(h.pending.len(),1);h.record(Event::new("drive-E".into(),Kind::Volume,true,"E:".into()));assert_eq!(h.pending.len(),1);assert_eq!(h.pending[0].kind,Kind::Volume);assert!(h.poll(&Gates{master:false,disconnect:false,headphones:true,speaker:false,gamepad:false,mouse:false,keyboard:false}).is_empty());assert!(h.pending.is_empty());}
-#[test]fn category_switches_filter_without_inventing_a_type(){let g=gates();assert!(g.allows(Kind::Headphones,true));assert!(!g.allows(Kind::Speaker,true));assert!(!g.allows(Kind::Audio,true),"an unclassified endpoint needs both audio families");
-    assert!(!g.allows(Kind::Headphones,false),"disconnect reminders are opt-in");assert!(g.allows(Kind::Usb,false),"legacy removals keep working");
-    let both=Gates{headphones:true,speaker:true,..gates()};assert!(both.allows(Kind::Audio,true));}
+#[test]fn audio_banners_are_limited_to_the_two_families_the_settings_offer(){let g=gates();assert!(g.allows(Kind::Headphones,true));assert!(!g.allows(Kind::Speaker,true),"the speaker switch is off in this fixture");
+    let both=Gates{headphones:true,speaker:true,..gates()};assert!(both.allows(Kind::Headphones,true)&&both.allows(Kind::Speaker,true));
+    assert!(!both.allows(Kind::Headphones,false),"disconnect reminders are opt-in");assert!(both.allows(Kind::Usb,false),"legacy removals keep working");
+    // There is no catch-all audio family left to gate: an endpoint that is neither is dropped at
+    // classification, which the type system now enforces instead of a runtime check.
+}
 #[test]fn raw_collections_merge_and_disconnect_needs_opt_in(){let mut h=Hub::default();h.raw_pending.push(RawPending{kind:Kind::Mouse,connected:true,at:Instant::now()-Duration::from_millis(1000)});h.raw_pending.push(RawPending{kind:Kind::Mouse,connected:true,at:Instant::now()-Duration::from_millis(1000)});
     let events=h.poll(&gates());assert_eq!(events.len(),1,"two collections of one mouse must not stack notices");assert_eq!(events[0].kind,Kind::Mouse);
     let mut h=Hub::default();h.raw_pending.push(RawPending{kind:Kind::Keyboard,connected:false,at:Instant::now()-Duration::from_millis(1000)});assert!(h.poll(&gates()).is_empty());

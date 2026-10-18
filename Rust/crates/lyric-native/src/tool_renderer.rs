@@ -15,17 +15,23 @@ impl Renderer{
             for (t,r) in p.tasks.iter().zip(crate::layout::todo_rows(w,p.tasks.len())){let y=r.y;self.fill(r,9.,0xff000000|crate::cover_color::mix(0x171d24,t.color,0.10));self.fill(Rect::new(r.x+8.,y+7.,3.,18.),1.5,t.color);self.text(&t.title,Rect::new(r.x+19.,y+1.,w-100.,18.),11.5,500,0xfff4f6f8)?;self.text(&t.detail,Rect::new(r.x+19.,y+18.,w-100.,12.),8.5,400,0xff9faab6)?;self.brush.SetColor(&color(0xff79828c));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(w-38.,y+16.),radiusX:8.,radiusY:8.},&self.brush,1.3,None);}
             let footer=crate::layout::todo_footer(w);self.fill(footer,10.,0x08ffffff);self.text("打开待办清单",Rect::new(footer.x+10.,footer.y+2.,footer.w-42.,20.),10.5,500,accent)?;self.text("＋",Rect::new(footer.x+footer.w-27.,footer.y+1.,20.,20.),13.,400,accent)?;
         }else{
-            let cx=69.;let cy=91.;let radius=38.;
-            self.fill(Rect::new(cx-44.,cy-44.,88.,88.),44.,0x08ffffff);
-            self.brush.SetColor(&color(0xff343e49));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(cx,cy),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);
-            let progress=p.progress.clamp(0.,1.);let end=-std::f64::consts::FRAC_PI_2+progress*std::f64::consts::TAU;
-            if progress>0.{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;sink.BeginFigure(point(cx,cy-radius),D2D1_FIGURE_BEGIN_HOLLOW);sink.AddArc(&D2D1_ARC_SEGMENT{point:point(cx+radius*end.cos(),cy+radius*end.sin()),size:D2D_SIZE_F{width:radius as f32,height:radius as f32},rotationAngle:0.,sweepDirection:D2D1_SWEEP_DIRECTION_CLOCKWISE,arcSize:if progress>0.5{D2D1_ARC_SIZE_LARGE}else{D2D1_ARC_SIZE_SMALL}});sink.EndFigure(D2D1_FIGURE_END_OPEN);sink.Close()?;self.brush.SetColor(&color(accent));if progress>=0.9999{self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(cx,cy),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);}else{self.dc.DrawGeometry(&path,&self.brush,3.,None);}}
-            self.fill(Rect::new(cx+radius*end.cos()-3.,cy+radius*end.sin()-3.,6.,6.),3.,accent);
-            for i in 0..60{let a=i as f64/60.*std::f64::consts::TAU;let inner=if i%5==0{26.}else{29.};self.line((cx+inner*a.sin(),cy-inner*a.cos()),(cx+32.*a.sin(),cy-32.*a.cos()),if i%5==0{0xff9aa5b0}else{0xff53606c},if i%5==0{1.2}else{0.7});}
-            let a=progress*std::f64::consts::TAU;self.line((cx,cy),(cx+21.*a.sin(),cy-21.*a.cos()),accent,1.8);self.line((cx,cy),(cx-11.,cy-7.),0xffd5dce2,2.);self.fill(Rect::new(cx-2.5,cy-2.5,5.,5.),2.5,accent);
-            self.text_family(&p.value,Rect::new(128.,62.,w-148.,44.),if p.value.len()>5{28.}else{36.},400,0xfff4f6f8,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(44.))?;self.text_family(&p.subtitle,Rect::new(125.,109.,w-145.,20.),10.,400,0xffa9b3bf,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;
-            self.fill(Rect::new(w/2.-50.,139.,100.,38.),19.,accent);self.text_family(if p.running{"暂停"}else{"开始"},Rect::new(w/2.-50.,148.,100.,20.),12.,600,0xff162128,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;
-            self.text("重置",Rect::new(20.,151.,52.,22.),11.,500,0xffbec7d1)?;self.text("设置",Rect::new(w-66.,151.,52.,22.),11.,500,0xffbec7d1)?;
+            let detail=p.timer.clone().unwrap_or_else(||crate::activities::TimerPresentation{label:"剩余时间".into(),elapsed:String::new(),footnote:p.subtitle.clone(),primary:if p.running{"暂停"}else{"继续"}.into(),expanded_value:p.value.clone(),indefinite:false});
+            let accent=0xffa9e6cd;self.fill(Rect::new(24.,49.,4.,4.),2.,accent);
+            self.text(&detail.label,Rect::new(34.,44.,w/2.-42.,16.),10.,400,0xffa9b3bf)?;
+            self.text_family(&p.subtitle,Rect::new(w/2.,44.,w/2.-24.,16.),9.,400,0xff9ca8b4,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+            // One layout paints every digit, including hundredths, on a single baseline.
+            let clock=&detail.expanded_value;let size=if clock.len()>8{29.}else if clock.len()>5{34.}else{40.};
+            self.text_family(clock,Rect::new(24.,65.,w-48.,48.),size,500,0xfff4f6f8,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(48.))?;
+            self.fill(Rect::new(24.,122.,w-48.,3.),1.5,0xff35404a);
+            if !detail.indefinite{self.fill(Rect::new(24.,122.,(w-48.)*p.progress.clamp(0.,1.),3.),1.5,accent);}
+            self.text(&detail.elapsed,Rect::new(24.,132.,w/2.-24.,14.),9.,400,0xffa9b3bf)?;
+            self.text_family(&detail.footnote,Rect::new(w/2.,132.,w/2.-24.,14.),9.,400,0xffa9b3bf,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+            for(id,r)in crate::layout::timer_buttons(w){let hovered=s.hover==id;let pressed=s.pressed==id;
+             if id==30{self.fill(r,12.,if pressed{0xff076b57}else if hovered{0xff169a7d}else{0xff0f8a70});}
+             else{self.fill(r,10.,if pressed{0x22ffffff}else if hovered{0x14ffffff}else{0x08ffffff});}
+             let label=if id==30{detail.primary.as_str()}else if id==31{"重置"}else{"设置"};
+             self.text_family(label,Rect::new(r.x,r.y+7.,r.w,18.),11.,if id==30{600}else{500},if id==30{0xffffffff}else{0xffbec7d1},"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(18.))?;
+            }
         }Ok(())
     }
     unsafe fn compact_view(&mut self,s:&Scene<'_>)->Result<()>{if let Some(p)=s.panel{self.tool_compact(s,p)}else{self.compact_content(s)}}
@@ -96,7 +102,7 @@ impl Renderer{unsafe fn device_icon(&mut self,r:Rect,kind:&str)->Result<()>{
         if let Some(bitmap)=self.device_bitmaps.get(asset){self.dc.DrawBitmap(bitmap,Some(&rect(r)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);return Ok(())}
     }
     let ink=0xffd6e8ef;
-    self.fill(r,10.,match kind{"Phone"|"Headphones"|"Speaker"|"Audio"=>0xff364b63,_=>0xff355a50});
+    self.fill(r,10.,match kind{"Phone"|"Headphones"|"Speaker"=>0xff364b63,_=>0xff355a50});
     match kind{
         "Phone"=>{let body=Rect::new(r.x+11.,r.y+6.,18.,29.);self.brush.SetColor(&color(ink));self.dc.DrawRoundedRectangle(&rounded(body,4.),&self.brush,1.8,None);self.line((r.x+17.,r.y+10.),(r.x+23.,r.y+10.),ink,1.4);self.fill(Rect::new(r.x+18.,r.y+30.,4.,2.),1.,ink);}
         "Headphones"=>{
@@ -114,7 +120,6 @@ impl Renderer{unsafe fn device_icon(&mut self,r:Rect,kind:&str)->Result<()>{
         "Keyboard"=>{self.brush.SetColor(&color(ink));self.dc.DrawRoundedRectangle(&rounded(Rect::new(r.x+8.,r.y+11.,24.,18.),3.5),&self.brush,1.7,None);
             for row in 0..2{for col in 0..5{self.fill(Rect::new(r.x+12.5+col as f64*4.,r.y+15.5+row as f64*4.2,1.7,1.7),0.8,ink);}}
             self.line((r.x+15.,r.y+24.8),(r.x+25.,r.y+24.8),ink,1.5);}
-        "Audio"=>{for (i,h) in [7.,12.,18.,11.,6.].iter().enumerate(){self.fill(Rect::new(r.x+11.5+i as f64*4.,r.y+20.-h/2.,2.,*h),1.,ink);}}
         _=>{self.fill(Rect::new(r.x+11.,r.y+15.,18.,20.),5.,0xffc9e7d9);self.brush.SetColor(&color(ink));self.dc.DrawRoundedRectangle(&rounded(Rect::new(r.x+14.,r.y+5.,12.,14.),2.),&self.brush,1.6,None);self.fill(Rect::new(r.x+17.,r.y+8.,2.,4.),0.5,ink);self.fill(Rect::new(r.x+22.,r.y+8.,2.,4.),0.5,ink);}
     }
     Ok(())

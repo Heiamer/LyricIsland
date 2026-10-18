@@ -63,6 +63,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.3.4",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1557,8 +1570,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lyric-archive"
+version = "2.0.2"
+dependencies = [
+ "flate2",
+ "sha2",
+]
+
+[[package]]
 name = "lyric-backend"
-version = "2.0.0"
+version = "2.0.2"
 dependencies = [
  "aes",
  "base64",
@@ -1572,8 +1593,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lyric-bootstrap"
+version = "2.0.2"
+dependencies = [
+ "flate2",
+ "lyric-archive",
+ "regex",
+ "serde_json",
+ "sha2",
+ "windows",
+]
+
+[[package]]
 name = "lyric-core"
-version = "2.0.0"
+version = "2.0.2"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -1587,11 +1620,13 @@ dependencies = [
 
 [[package]]
 name = "lyric-native"
-version = "2.0.0"
+version = "2.0.2"
 dependencies = [
  "base64",
  "image",
  "lyric-backend",
+ "lyric-core",
+ "material-colors",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
@@ -1602,15 +1637,35 @@ dependencies = [
 
 [[package]]
 name = "lyric-settings"
-version = "2.0.0"
+version = "2.0.2"
 dependencies = [
  "embed-manifest",
  "gpui-pre",
  "gpui-pre-windows",
  "lyric-backend",
+ "lyric-core",
  "raw-window-handle",
  "serde_json",
  "windows",
+]
+
+[[package]]
+name = "lyric-tools"
+version = "2.0.2"
+dependencies = [
+ "lyric-archive",
+ "lyric-bootstrap",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
+name = "material-colors"
+version = "0.4.2"
+dependencies = [
+ "ahash",
+ "indexmap",
+ "serde",
 ]
 
 [[package]]
