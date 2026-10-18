@@ -87,14 +87,12 @@ def check_defaults(state):
     settings = state["settings"]
     expected = {
         # New in 1.3.
-        "AutoCompactWidth": False,
+        "AutoCompactWidth": True,
         "AutoCompactMaxWidth": 420.0,
-        "SwipeActivities": False,
-        "DeviceRemindersEnabled": False,
         "DeviceVolume": 55.0,
         "TodoIslandEnabled": True,
         "CompactTranslation": True,
-        "ChineseTwoLine": False,
+        "ChineseTwoLine": True,
         "NotificationSoundEnabled": True,
         "TodoSoundEnabled": True,
         "NotificationSound": "Soft",
@@ -103,11 +101,16 @@ def check_defaults(state):
         "TodoVolume": 45.0,
         "NotificationSoundPath": "",
         "TodoSoundPath": "",
+        # Flipped to on in 1.5: a first run should do something without any setup.
+        "SwipeActivities": True,
+        "DeviceRemindersEnabled": True,
+        "NotificationsEnabled": True,
+        # The one-time upgrade marker must reach the persisted state as well.
+        "DefaultsOnboardingVersion": 1,
         # Carried over from 1.2.2 and must not have moved.
         "CoverBackground": True,
         "NotificationClickOpenApp": True,
         "MusicClickOpenApp": False,
-        "NotificationsEnabled": False,
         "PauseNotifications": False,
         "NotificationWhitelistEnabled": False,
         "ClickAnywhereExpand": True,
@@ -175,6 +178,27 @@ def check_persistence(runtime, data):
     return restarted
 
 
+
+def check_sound_persistence(runtime):
+    """All three sound selectors retain each built-in tone over a restart."""
+    keys = ["NotificationSound", "TodoSound", "DeviceSound"]
+    tones = ["Soft", "Glass", "Bell", "Connect"]
+    for key in ["NotificationVolume", "TodoVolume", "DeviceVolume"]:
+        assert request(runtime.pipe, "update", {"key": key, "value": 0})["success"]
+    for round_index in range(4):
+        expected = {key: tones[(round_index + index) % 4] for index, key in enumerate(keys)}
+        for key, value in expected.items():
+            assert request(runtime.pipe, "update", {"key": key, "value": value})["success"]
+        stored = json.loads((runtime.data / "settings.json").read_text(encoding="utf8"))
+        assert all(stored[key] == value for key, value in expected.items()), stored
+        runtime.stop()
+        state = runtime.start()
+        assert all(state["settings"][key] == value for key, value in expected.items()), state["settings"]
+        for command, value in [("soundPreview", {"todo": False}), ("soundPreview", {"todo": True}), ("deviceSoundPreview", None)]:
+            assert request(runtime.pipe, command, value)["success"]
+    return {"combinations": 12, "restarts": 4, "previewCommandsAcceptedAtZeroVolume": 12}
+
+
 def check_settings_updates(runtime):
     """The new keys must go through the same validator as everything else."""
     accepted = request(runtime.pipe, "update", {"key": "AutoCompactWidth", "value": True})
@@ -227,7 +251,7 @@ def check_adaptive_width(runtime):
 
 
 def check_settings_selfcheck(runtime, workspace):
-    """The settings window walks all eleven pages and reports its own regressions."""
+    """The settings window walks all seven routes and reports its own regressions."""
     directory = workspace / "settings-smoke"
     directory.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ, LYRICISLAND_TEST_PIPE=runtime.pipe, LYRICISLAND_NATIVE_DATA=str(runtime.data), LYRICISLAND_SMOKE_REGRESSIONS="1")
@@ -238,9 +262,12 @@ def check_settings_selfcheck(runtime, workspace):
     )
     report = json.loads((directory / "report.json").read_text(encoding="utf8"))
     assert completed.returncode == 0 and report["success"] is True, (completed.returncode, report)
-    assert report["pages"] == 11, report
+    assert report["pages"] == 7, report
     assert report["todoRegression"] is True, report
     assert report["whitelistExpandCollapse"] is True, report
+    assert report["settingsTabs"] is True, report
+    assert report["sharedSettingsNav"] is True, report
+    assert report["soundSelection"] == {"success": True, "combinations": 12, "invalidRejected": 18}, report
     return report
 
 
@@ -302,6 +329,17 @@ def check_tools(runtime):
     return {"concurrentTimers":True,"pauseResetResume":True,"cycleWithSwipeDisabled":True,"adaptiveMaximum":True,"pastelColor":True,"pausedSessionRestore":True,"devicePreview":True,"realHardwareTested":False}
 
 
+def check_diagnostics(runtime):
+    """The About page's log bundle must be written next to the island's own logs."""
+    reply = request(runtime.pipe, "collectLogs")
+    assert reply["success"] is True, reply
+    path = Path(reply["path"])
+    assert path.is_file() and path.parent.resolve() == (runtime.data / "Logs").resolve(), (path, runtime.data)
+    text = path.read_text(encoding="utf-8-sig")
+    assert "DotIsle 诊断日志" in text and "错误摘要" in text and "日志尾部" in text, text[:200]
+    return {"success": True, "file": path.name, "bytes": path.stat().st_size}
+
+
 def check_bootstrap(share, workspace, version="1.3"):
     """The single-file launcher must extract the payload and report 1.3."""
     directory = workspace / "bootstrap"
@@ -313,8 +351,7 @@ def check_bootstrap(share, workspace, version="1.3"):
 
 
 RELEASE_FILES = [
-    "DotIsle-1.3-Portable.zip",
-    "DotIsle-1.3.exe",
+    "DotIsle-1.3-Setup.exe",
     "DotIsle-1.3-Source.zip",
     "DotIsle-1.3-SHA256.txt",
 ]
@@ -361,8 +398,10 @@ def main():
         report["settingsValidation"] = True
         report["adaptiveWidth"] = check_adaptive_width(runtime)
         report["tools"] = check_tools(runtime)
+        report["diagnostics"] = check_diagnostics(runtime)
         report["settingsSelfCheck"] = check_settings_selfcheck(runtime, workspace)
 
+        report["soundPersistence"] = check_sound_persistence(runtime)
         runtime = check_persistence(runtime, data)
         report["todoPersistence"] = True
         runtime.stop()
@@ -370,7 +409,7 @@ def main():
         if options.artifacts:
             artifacts = options.artifacts.resolve()
             report["digests"] = digests(artifacts, options.version)
-            share = artifacts / ("DotIsle-"+options.version+".exe")
+            share = artifacts / ("DotIsle-"+options.version+"-Setup.exe")
             if share.is_file():
                 report["bootstrap"] = check_bootstrap(share, workspace, options.version)
         report["success"] = True

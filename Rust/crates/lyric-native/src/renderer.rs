@@ -17,12 +17,14 @@ fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:
 pub struct Scene<'a>{
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
     pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
-    pub cover_background:bool,pub demo:bool,pub animate:bool,
+    pub lyric_cover_color:bool,pub cover_background:bool,pub demo:bool,pub animate:bool,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
+    pub osd:Option<&'a crate::notifications::Notice>,pub osd_rect:Rect,pub osd_radius:f64,pub osd_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
     pub lyric:&'a str,pub previous_lyric:&'a str,pub compact_secondary:&'a str,pub previous_compact_secondary:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
     pub title:&'a str,pub artist:&'a str,pub playing:bool,pub highlight:f64,
     pub progress:f64,pub elapsed:f64,pub duration:f64,pub font_size:f64,
+    pub music_layout:crate::layout::MusicLayout,pub music_mix:f64,
     pub text_color:u32,pub component_color:u32,pub progress_color:u32,
     pub hover:i32,pub pressed:i32,pub opacity:f32,
     pub transparent:bool,pub floating:bool,pub favorite_enabled:bool,pub has_track:bool,pub layout_scale:f64,
@@ -32,7 +34,7 @@ pub struct Scene<'a>{
 pub struct Renderer{
     surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
     cover_tint:u32,shadow_shape:Option<(Rect,f64)>,
-    notification_icon:Option<ID2D1Bitmap1>,
+    notification_icon:Option<ID2D1Bitmap1>,device_bitmaps:HashMap<String,ID2D1Bitmap1>,
     factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
     _device:ID3D11Device,_composition:IDCompositionDevice,_target:IDCompositionTarget,_visual:IDCompositionVisual,
     screen:ID2D1Bitmap1,compact:ID2D1Bitmap1,expanded:ID2D1Bitmap1,shadow:ID2D1Bitmap1,
@@ -97,7 +99,7 @@ impl Renderer{
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
         dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,width,height,dpi,blur,shadow_fx})
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,surface_brush:None,highlight_brush:None,cover_tint:0x1b1f25,shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
         use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
@@ -209,7 +211,7 @@ impl Renderer{
         let with_alpha=|c:u32|if disabled{0x4d000000|(c&0xffffff)}else{c};
         if id==4{self.fill(Rect::new(x,y,size,size),size/2.,with_alpha(scene.component_color))}
         if scene.hover==id{self.fill(Rect::new(x,y,size,size),size/2.,0x18ffffff)}
-        let scale=if scene.pressed==id&&!disabled{0.94}else{1.};let ox=x+(size-16.*scale)/2.;let oy=y+(size-16.*scale)/2.;let c=with_alpha(if id==4{0xff12251d}else if id==8{0xff8c99a8}else{scene.component_color});
+        let scale=if scene.pressed==id&&!disabled{0.94}else{1.};let ox=x+(size-16.*scale)/2.;let oy=y+(size-16.*scale)/2.;let c=with_alpha(if id==4{0xff12251d}else{scene.component_color});
         let l=|a:(f64,f64),b:(f64,f64)|self.line((ox+a.0*scale,oy+a.1*scale),(ox+b.0*scale,oy+b.1*scale),c,if id==4{2.}else{1.4});
         match id{
             2=>{l((8.,1.),(8.,15.));l((1.,8.),(15.,8.));for (a,b) in [((5.,4.),(8.,1.)),((8.,1.),(11.,4.)),((4.,5.),(1.,8.)),((1.,8.),(4.,11.)),((5.,12.),(8.,15.)),((8.,15.),(11.,12.)),((12.,5.),(15.,8.)),((15.,8.),(12.,11.))]{l(a,b)}},
@@ -218,7 +220,6 @@ impl Renderer{
             5=>{l((13.,2.),(13.,14.));l((2.,2.),(11.,8.));l((11.,8.),(2.,14.));l((2.,14.),(2.,2.));},
             6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),13.,c,"Noto Sans SC",true);},
             7=>{let _=self.centered_icon("\u{e713}",Rect::new(x,y,size,size),13.,c,"Segoe Fluent Icons",false);},
-            8=>{l((3.,10.),(8.,5.));l((8.,5.),(13.,10.));},
             9=>{let result=(||->Result<()>{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;let p=|x:f64,y:f64|point(ox+x*scale,oy+y*scale);sink.BeginFigure(p(8.,14.),D2D1_FIGURE_BEGIN_HOLLOW);for v in [[4.,11.,1.,8.,1.,5.],[1.,1.,6.,0.,8.,4.],[10.,0.,15.,1.,15.,5.],[15.,8.,12.,11.,8.,14.]]{sink.AddBezier(&D2D1_BEZIER_SEGMENT{point1:p(v[0],v[1]),point2:p(v[2],v[3]),point3:p(v[4],v[5])});}sink.EndFigure(D2D1_FIGURE_END_CLOSED);sink.Close()?;self.brush.SetColor(&color(c));self.dc.DrawGeometry(&path,&self.brush,1.4,None);Ok(())})();let _=result;},_=>{}
         }
     }
@@ -247,33 +248,36 @@ impl Renderer{
         }
         if double{if t<1.&&!s.previous_compact_secondary.is_empty(){self.text_family(s.previous_compact_secondary,Rect::new(viewport.x,line_y+line_h+1.-5.*ease,viewport.w,secondary_h),secondary_size,400,((160.*(1.-t))as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}self.text_family(s.compact_secondary,Rect::new(viewport.x,line_y+line_h+1.+dy,viewport.w,secondary_h),secondary_size,400,((190.*t)as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
         self.dc.PopAxisAlignedClip();
-        for (i,h) in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+c.h/2.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.component_color&0xffffff));}
+        for (i,h) in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+c.h/2.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.progress_color&0xffffff));}
         Ok(())
     }
     unsafe fn expanded_content(&mut self,s:&Scene<'_>)->Result<()>{
         let w=s.layout.card.w;
-        let secondary=0xb8000000|(if s.cover_background&&self.cover.is_some(){s.component_color}else{s.text_color}&0xffffff);
-        // A shared 20 px inset anchors artwork, status, timeline and controls.
-        self.cover_with_opacity(20.,20.,66.,s.cover_opacity as f32,s.demo)?;
-        let title_width=w-152.;
-        self.text(s.title,Rect::new(102.,18.,title_width,24.),16.,600,s.text_color)?;
-        self.text(s.artist,Rect::new(102.,44.,w-148.,19.),11.5,400,secondary)?;
+        let g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale);
+        let secondary=0xb8000000|(s.text_color&0xffffff);
+        // Artwork, text, status, timeline and controls all share one geometry with hit testing.
+        self.cover_with_opacity(g.cover.x,g.cover.y,g.cover.w,s.cover_opacity as f32,s.demo)?;
+        self.text(s.title,Rect::new(g.title.x,g.title.y,g.title.w,g.title.h),16.,600,s.text_color)?;
+        self.text(s.artist,Rect::new(g.artist.x,g.artist.y,g.artist.w,g.artist.h),11.5,400,secondary)?;
         let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=4.*(1.-lyric_t).powi(3);
-        self.text_family(s.lyric,Rect::new(102.,69.+lyric_y,w-122.,22.),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(s.text_color&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(22.))?;
-        self.text(s.secondary,Rect::new(102.,94.,w-122.,18.),10.5,400,secondary)?;
+        let boundary=g.lyric.x+self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w)*s.highlight.clamp(0.,1.);
+        for (clip,ink) in [(Rect::new(g.lyric.x,g.lyric.y,(boundary-g.lyric.x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(g.lyric.x+g.lyric.w-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(g.lyric.x,g.lyric.y+lyric_y,g.lyric.w,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(27.))?;self.dc.PopAxisAlignedClip();}}
+
+        self.text(s.secondary,Rect::new(g.secondary.x,g.secondary.y,g.secondary.w,g.secondary.h),10.5,400,secondary)?;
         let breath=if s.playing&&s.animate{0.68+0.32*(s.time_ms/2600.*std::f64::consts::TAU).sin()}else{1.};
         let dot=4.+if s.playing&&s.animate{0.8*breath}else{0.};
-        self.fill(Rect::new(23.-dot/2.,101.-dot/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(s.progress_color&0xffffff));
-        self.text(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},Rect::new(31.,93.,62.,18.),9.,400,secondary)?;
-        let track=Rect::new(20.,120.,w-40.,3.);let progress=track.w*s.progress.clamp(0.,1.);
+        let cx=g.status_dot.x+g.status_dot.w/2.;let cy=g.status_dot.y+g.status_dot.h/2.;
+        self.fill(Rect::new(cx-dot/2.,cy-dot/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(s.progress_color&0xffffff));
+        self.text_family(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},g.status_text,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(15.))?;
+        let track=g.track;let progress=track.w*s.progress.clamp(0.,1.);
         self.fill(track,1.5,if s.cover_background&&self.cover.is_some(){0xff000000|crate::cover_color::mix(self.cover_tint,s.component_color,0.18)}else{0xff343b45});
         self.fill(Rect::new(track.x,track.y,progress,track.h),1.5,s.component_color);
         let size=if s.pressed==10{13.}else if s.hover==10{11.}else{7.};
         self.fill(Rect::new(track.x+progress-size/2.,track.y+track.h/2.-size/2.,size,size),size/2.,s.component_color);
-        self.text(&time(s.elapsed),Rect::new(20.,129.,70.,16.),9.,400,secondary)?;
+        self.text(&time(s.elapsed),g.elapsed,9.,400,secondary)?;
         let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};
-        self.text_family(&total,Rect::new(w-90.,129.,70.,16.),9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
-        for (id,r) in crate::layout::buttons(w,s.layout_scale){self.button(id,r.x,r.y,r.w,s);}
+        self.text_family(&total,g.total,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+        for (id,r) in g.buttons{self.button(id,r.x,r.y,r.w,s);}
         Ok(())
     }
     unsafe fn draw_layer(&self,bitmap:&ID2D1Bitmap1,blur:f64,opacity:f32,transform:Matrix3x2,clip:(Rect,f64))->Result<()>{
@@ -283,10 +287,10 @@ impl Renderer{
         self.dc.PopLayer();self.dc.SetTransform(&identity());Ok(())
     }
     pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{
-        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if themed.cover_background&&self.cover.is_some(){let accent=0xff000000|crate::cover_color::accent(self.cover_tint);themed.component_color=accent;themed.progress_color=accent;}let s=&themed;
+        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if themed.cover_background&&self.cover.is_some(){let accent=0xff000000|crate::cover_color::accent(self.cover_tint);themed.component_color=accent;if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
         let (base_shape,base_radius)=s.layout.shape(s.frame.card_reveal,s.radius);let p=s.frame.card_reveal;
-        let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else{(base_shape,base_radius)};
-        let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else{1.};
+        let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
+        let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
         if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
             if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,0.));self.compact_view(&neighbor)?;}
             if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width+s.swipe_offset,0.));self.compact_view(&old)?;}
@@ -325,8 +329,9 @@ impl Renderer{
         if alpha>0.001{self.draw_layer(&self.expanded,if s.resizing{s.frame.card_blur}else{0.},alpha as f32,matrix(content_scale,tx,ty),(shape,radius))?;}
         let alpha=(1.-blend(p,0.06,0.46))*music_alpha;
         if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,identity(),(s.layout.capsule,s.layout.capsule.h/2.))?;}
-        if s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none(){self.satellite(s)?;}
+        if s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none()&&s.osd.is_none(){self.satellite(s)?;}
         if let Some(notice)=s.notification{self.clip(shape,radius,s.notification_mix as f32)?;self.notification_content(notice,shape)?;self.dc.PopLayer();}
+        if let Some(osd)=s.osd{self.clip(shape,radius,s.osd_mix as f32)?;self.osd_content(osd,shape)?;self.dc.PopLayer();}
         self.dc.PopLayer();self.dc.EndDraw(None,None)?;
         if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;}Ok(())
     }
@@ -358,7 +363,7 @@ impl Renderer{
     }
     unsafe fn notification_content(&mut self,n:&crate::notifications::Notice,r:Rect)->Result<()>{
         let x=r.x;let y=r.y;let icon=Rect::new(x+18.,y+(r.h-40.)/2.,40.,40.);self.clip(icon,10.,1.)?;
-        if n.app_id.starts_with("LyricIsland.Device"){self.device_icon(icon,n.app_id.ends_with("Phone"))?;}else if let Some(bitmap)=&self.notification_icon{self.dc.DrawBitmap(bitmap,Some(&rect(icon)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
+        if n.app_id.starts_with("LyricIsland.Device"){self.device_icon(icon,n.app_id.strip_prefix("LyricIsland.Device.").unwrap_or(""))?;}else if let Some(bitmap)=&self.notification_icon{self.dc.DrawBitmap(bitmap,Some(&rect(icon)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
         else{let initial=n.app_name.chars().next().unwrap_or('•').to_string();self.fill(icon,10.,0xff3188ee);self.text(&initial,Rect::new(icon.x+10.,icon.y+4.,24.,32.),22.,600,0xffffffff)?;}
         self.dc.PopLayer();
         self.notification_text(&n.app_name,Rect::new(x+76.,y+10.,r.w-160.,17.),11.5,500,0xffb6bdc8)?;

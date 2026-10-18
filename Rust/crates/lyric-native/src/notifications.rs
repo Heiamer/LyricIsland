@@ -8,20 +8,19 @@ impl Notice {
     pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"点屿".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v2.png")).ok()}}
 }
 #[derive(Clone,Default)]
-pub struct Policy {pub enabled:bool,pub paused:bool,pub whitelist_enabled:bool,pub allowed:Vec<String>}
+pub struct Policy {pub enabled:bool,pub paused:bool,pub whitelist_enabled:bool,pub allowed:Vec<String>,pub blacklist_enabled:bool,pub blocked:Vec<String>}
 impl Policy {
-    pub fn from_settings(v:&Value)->Self {Self{enabled:v["NotificationsEnabled"].as_bool().unwrap_or(false),paused:v["PauseNotifications"].as_bool().unwrap_or(false),whitelist_enabled:v["NotificationWhitelistEnabled"].as_bool().unwrap_or(false),allowed:v["NotificationAllowedApps"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_else(||vec!["QQNT".into(),"QQ".into()])}}
-    pub fn permits(&self,id:&str,name:&str)->bool {
-        if !self.whitelist_enabled{return true}
-        self.allowed.iter().any(|rule| {
-            if rule.eq_ignore_ascii_case(id) {return true}
-            let id=id.to_lowercase();let name=name.trim().to_lowercase();let r=rule.trim().to_lowercase();
-            let tokens=id.split(['.','!','/','\\',':','_']).collect::<Vec<_>>();
-            let nt=name=="qqnt"||name=="qq nt"||tokens.contains(&"qqnt")||(tokens.contains(&"qq")&&tokens.contains(&"nt"));
-            if r=="qqnt" {return nt}
-            if r=="qq" {return !nt&&(["qq","腾讯qq","腾讯 qq"].contains(&name.as_str())||tokens.contains(&"qq"))}
-            false // Custom applications are matched by exact AUMID, never substring.
-        })
+    pub fn from_settings(v:&Value)->Self {Self{blacklist_enabled:v["NotificationBlacklistEnabled"].as_bool().unwrap_or(false),blocked:v["NotificationBlockedApps"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default(),enabled:v["NotificationsEnabled"].as_bool().unwrap_or(true),paused:v["PauseNotifications"].as_bool().unwrap_or(false),whitelist_enabled:v["NotificationWhitelistEnabled"].as_bool().unwrap_or(false),allowed:v["NotificationAllowedApps"].as_array().map(|a|a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_else(||vec!["QQNT".into(),"QQ".into()])}}
+    fn matches(rule:&str,id:&str,name:&str)->bool{
+        if rule.eq_ignore_ascii_case(id){return true}
+        let id=id.to_lowercase();let name=name.trim().to_lowercase();let rule=rule.trim().to_lowercase();
+        let tokens=id.split(['.','!','/','\\',':','_']).collect::<Vec<_>>();
+        let nt=name=="qqnt"||name=="qq nt"||tokens.contains(&"qqnt")||(tokens.contains(&"qq")&&tokens.contains(&"nt"));
+        if rule=="qqnt"{return nt}if rule=="qq"{return !nt&&(["qq","腾讯qq","腾讯 qq"].contains(&name.as_str())||tokens.contains(&"qq"))}false
+    }
+    pub fn permits(&self,id:&str,name:&str)->bool{
+        if self.blacklist_enabled&&self.blocked.iter().any(|rule|Self::matches(rule,id,name)){return false}
+        !self.whitelist_enabled||self.allowed.iter().any(|rule|Self::matches(rule,id,name))
     }
     pub fn should_show(&self)->bool{self.enabled&&!self.paused}
 }
@@ -42,7 +41,7 @@ impl Listener {
                 let mut state=json!({"enabled":p.enabled,"paused":p.paused,"access":"disabled","source":"database","message":"通知提醒已关闭","apps":apps_cache});
                 if p.enabled {
                     match store.poll(&p){
-                        Ok(notices)=>{state["access"]=json!("compatible");state["message"]=json!(if p.paused{"通知已暂停，恢复后只接收新消息"}else if p.whitelist_enabled{"通知接收已连接，按白名单提醒新通知"}else{"通知接收已连接，提醒各应用的新通知"});
+                        Ok(notices)=>{state["access"]=json!("compatible");state["message"]=json!(if p.paused{"通知已暂停，恢复后只接收新消息"}else if p.blacklist_enabled{"通知接收已连接，屏蔽黑名单中的应用"}else if p.whitelist_enabled{"通知接收已连接，按白名单提醒新通知"}else{"通知接收已连接，提醒各应用的新通知"});
                             for notice in notices{if !apps_cache.as_array().is_some_and(|a|a.iter().any(|a|a["id"]==notice.app_id)){if apps_cache.as_array().is_none_or(|a|a.len()>=32){apps_cache=json!([]);}apps_cache.as_array_mut().unwrap().push(json!({"id":notice.app_id,"name":notice.app_name}));}let _=tx.send(Event::Notice(notice));}
                             state["apps"]=apps_cache.clone();
                         },Err(error)=>{state["access"]=json!("unavailable");state["message"]=json!(error);}
@@ -74,3 +73,8 @@ pub fn diagnostics()->Value {json!({"packaged":windows::ApplicationModel::Packag
 }
 
 #[cfg(test)]mod whitelist_option_tests{use super::*;#[test]fn defaults_off_and_filters_only_when_enabled(){let mut p=Policy::from_settings(&json!({}));assert!(!p.whitelist_enabled);assert!(p.permits("Example.Other","Other"));p.whitelist_enabled=true;assert!(!p.permits("Example.Other","Other"));assert!(p.permits("QQNT","QQNT"));}}
+
+#[cfg(test)]mod blacklist_tests{use super::*;
+#[test]fn deny_takes_precedence_and_disabled_list_preserves_rules(){let mut policy=Policy::from_settings(&json!({"NotificationBlacklistEnabled":true,"NotificationWhitelistEnabled":true,"NotificationAllowedApps":["Example.App"],"NotificationBlockedApps":["example.app"]}));assert!(!policy.permits("Example.App","Example"));policy.blacklist_enabled=false;assert!(policy.permits("Example.App","Example"));assert_eq!(policy.blocked.len(),1);}
+#[test]fn blocked_custom_ids_do_not_match_lookalikes(){let policy=Policy::from_settings(&json!({"NotificationBlacklistEnabled":true,"NotificationBlockedApps":["Example.App_1!Main"]}));assert!(!policy.permits("Example.App_1!Main","App"));assert!(policy.permits("Example.App_1!Other","App"));assert!(policy.permits("FakeExample.App_1!Main","App"));}
+}

@@ -2,12 +2,12 @@
 // The settings defaults are one large json! literal; the default macro recursion
 // budget is not enough for it once the 1.3 keys are included.
 #![recursion_limit = "256"]
-mod activation;mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
-mod devices;mod timers;mod activities;mod compact;mod sound;mod todos;
+mod update_activity;mod activation;mod notification_store;mod cover_color;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
+mod devices;mod osd;mod timers;mod activities;mod compact;mod sound;mod todos;mod history;mod quick_reminder;mod app_rules;mod foreground;mod diagnostics;
 use std::{cell::RefCell,path::{Path,PathBuf},sync::{Arc,Mutex,OnceLock,mpsc},time::{Instant,Duration},ffi::{c_char,CStr}};
 use serde_json::{Value,json};
 use base64::Engine;
-use windows::{core::{w,PCWSTR,Result},Win32::{Foundation::*,System::{Com::*,LibraryLoader::GetModuleHandleW,Threading::*},Graphics::Gdi::*,UI::{WindowsAndMessaging::*,Shell::*,Input::KeyboardAndMouse::*,HiDpi::*}}};
+use windows::{core::{w,PCWSTR,Result},Win32::{Foundation::*,System::{Com::*,LibraryLoader::GetModuleHandleW,Threading::*,RemoteDesktop::{ProcessIdToSessionId,NOTIFY_FOR_THIS_SESSION,WTSRegisterSessionNotification,WTSUnRegisterSessionNotification},WindowsProgramming::QueryUnbiasedInterruptTime},Graphics::Gdi::*,UI::{WindowsAndMessaging::*,Shell::*,Input::KeyboardAndMouse::*,HiDpi::*}}};
 use lyric_backend::{runtime::Backend,io,ipc::Server,shell};
 use motion::{Frame,Options,Transition};use layout::{Layout,Rect};use renderer::{Renderer,Scene};
 const WM_TRAY:u32=WM_APP+1;const WM_SETTINGS:u32=WM_APP+2;
@@ -17,12 +17,26 @@ const TODO_APP_ID:&str="LyricIsland.Todo";
 type Pending=(Value,mpsc::Sender<Value>);
 /// One queued banner. Reminder banners are tracked by todo id so a completion or
 /// deletion can cancel a banner that has not been presented yet.
-struct Queued{pub notice:notifications::Notice,pub todo:Option<String>}
+struct Queued{pub notice:notifications::Notice,pub todo:Option<String>,pub chime:bool}
+/// A parsed reminder awaiting an explicit commit. The token, not the original
+/// text, is what commit accepts, so "明天"/"N分钟后" is never reinterpreted.
+struct QuickPreview{pub token:String,pub title:String,pub date:String,pub time:String,pub expires:Instant}
+/// Focus timers parked by the current lock. Kept after restart only as ordinary
+/// paused state; nothing resumes automatically without a matching generation.
+struct FocusResume{pub generation:u64,pub ids:Vec<String>,pub prompted:bool}
+fn hotkey_code(name:&str)->Option<(HOT_KEY_MODIFIERS,u32)>{match name{"Ctrl+Alt+R"=>Some((MOD_CONTROL|MOD_ALT,'R' as u32)),"Ctrl+Shift+R"=>Some((MOD_CONTROL|MOD_SHIFT,'R' as u32)),"Ctrl+Alt+N"=>Some((MOD_CONTROL|MOD_ALT,'N' as u32)),_=>None}}
+fn awake_ms()->u64{let mut value=0u64;unsafe{let _=QueryUnbiasedInterruptTime(&mut value);}(value/10_000)as u64}
 static REQUESTS:OnceLock<Mutex<Vec<Pending>>>=OnceLock::new();static WINDOW:OnceLock<isize>=OnceLock::new();
 fn inside_round_rect(r:Rect,radius:f64,x:f64,y:f64)->bool{
     if !r.contains(x,y){return false}let radius=radius.min(r.w/2.).min(r.h/2.).max(0.);
     let cx=x.clamp(r.x+radius,r.x+r.w-radius);let cy=y.clamp(r.y+radius,r.y+r.h-radius);
     (x-cx).powi(2)+(y-cy).powi(2)<=radius*radius
+}
+/// "Appear when needed, retract once handled": decide whether the island must be
+/// present from what is asking for attention right now. A feature merely being
+/// switched on, or merely being selectable, is not a reason to stay on screen.
+fn island_needed(valid:bool,playing:bool,hide_when_paused:bool,running_timer:bool,banner:bool,queue:bool,held:bool,manual:bool)->bool{
+    valid&&(playing||!hide_when_paused)||running_timer||banner||queue||held||manual
 }
 unsafe extern "C" fn settings_callback(request:*const c_char)->*mut c_char {
     let response=std::panic::catch_unwind(||{
@@ -34,18 +48,23 @@ unsafe extern "C" fn settings_callback(request:*const c_char)->*mut c_char {
     let bytes=response.to_string();let p=CoTaskMemAlloc(bytes.len()+1)as *mut u8;if !p.is_null(){std::ptr::copy_nonoverlapping(bytes.as_ptr(),p,bytes.len());*p.add(bytes.len())=0;}p as _
 }
 struct App {
-    banner:banner::Banner,notification_preview:bool,banner_todo:Option<String>,notification_listener:Option<notifications::Listener>,notification_state:Value,
+    banner:banner::Banner,osd_banner:banner::Banner,osd:osd::Hub,pending_osd:u32,notification_preview:bool,banner_todo:Option<String>,notification_listener:Option<notifications::Listener>,notification_state:Value,
     hwnd:HWND,visual_hwnd:HWND,input_region:Option<[i32;10]>,dragging:Option<(POINT,RECT)>,renderer:Option<Renderer>,base:PathBuf,data:PathBuf,settings:Value,backend:Option<Arc<Backend>>,
     _server:Option<Server>,snapshot:Value,cover_version:u64,demo:bool,
     layout:Layout,frame:Frame,transition:Option<Transition>,transition_start:Instant,sampled_ms:f64,
     expanded:bool,held:bool,hover:i32,pressed:i32,seeking:bool,seek_fraction:f64,command_busy:Arc<std::sync::atomic::AtomicBool>,
     start:Instant,last_poll:Instant,lyric:String,previous_lyric:String,compact_secondary:String,previous_compact_secondary:String,lyric_start:Instant,
-    compact_width:compact::Width,compact_key:String,compact_height:f64,last_compact:Instant,todos:todos::Store,todo_now:todos::Now,last_schedule:Instant,queue:std::collections::VecDeque<Queued>,pending_page:Option<String>,
+    compact_width:compact::Width,compact_key:String,compact_height:f64,last_compact:Instant,todos:todos::Store,todo_now:todos::Now,last_schedule:Instant,history:history::Store,last_history_prune:Instant,queue:std::collections::VecDeque<Queued>,pending_page:Option<String>,
+    updates:update_activity::Hub,update_return:String,update_until:Option<Instant>,
     devices:devices::Hub,
     timers:timers::Store,selected:String,components:Vec<String>,panel:Option<activities::Panel>,previous_panel:Option<activities::Panel>,drag_panel:Option<activities::Panel>,drag_target:String,slide_outgoing:bool,switching:bool,slide:activities::Spring,slide_direction:f64,swipe:Option<activities::Swipe>,last_timer:Instant,timer_fraction:u128,last_checkpoint:Instant,
-    cursor_inside:bool,leave_at:Option<Instant>,last_left:bool,user_hidden:bool,display_wanted:bool,missing_since:Option<Instant>,
+    cursor_inside:bool,leave_at:Option<Instant>,last_left:bool,user_hidden:bool,display_wanted:bool,missing_since:Option<Instant>,manual_until:Option<Instant>,
     opacity:f64,fade_from:f64,fade_to:f64,fade_start:Instant,hide_at:Option<Instant>,dirty:bool,
     settings_process:Option<std::process::Child>,renderer_generation:u64,render_frames:u64,error:Option<String>,transparent:bool,activity:motion::Activity,cover_start:Instant,progress:progress::PlaybackProgress,outgoing_opacity:f64,outgoing_y:f64,
+    quick:Vec<QuickPreview>,quick_commits:Vec<(String,String)>,pending_action:Option<String>,templates:timers::Templates,
+    rules:app_rules::Store,foreground:foreground::Watcher,usage_date:String,last_awake:u64,last_rules_checkpoint:Instant,
+    lock_generation:u64,session_locked:bool,focus_resume:Option<FocusResume>,
+    music_mix:f64,music_from:f64,music_start:Instant,
 }
 impl App {
     fn new(base:PathBuf,data:PathBuf,demo:bool)->Self{
@@ -56,27 +75,39 @@ impl App {
         // Demo runs must never touch the user's real todo file.
         let todos=todos::Store::new(if demo{PathBuf::new()}else{data.join("todos.json")});let todo_now=todos::Now::local();
         let timers=timers::Store::new(if demo{PathBuf::new()}else{data.join("timers.json")});
+        let templates=timers::Templates::new(if demo{PathBuf::new()}else{data.join("workflows.json")});
+        let foreground=foreground::Watcher::new();
+        let mut rules=app_rules::Store::new(if demo{PathBuf::new()}else{data.join("rules.json")},if demo{PathBuf::new()}else{data.join("usage.json")},&todo_now.date);
+        rules.baseline_now(foreground.path.as_deref(),foreground.segment);
+        let usage_date=todo_now.date.clone();
+        let mut history=history::Store::new(if demo{PathBuf::new()}else{data.join("history.json")});
+        let history_days=||settings["NotificationHistoryDays"].as_u64().unwrap_or(7).clamp(1,30)as u32;
+        let epoch=||std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()as i64;
+        history.prune(history_days(),epoch());
         let compact_width=compact::Width::new(settings["CompactWidth"].as_f64().unwrap_or(260.));
-        Self{banner:banner::Banner::default(),notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout:Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.)),settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_width,compact_key:String::new(),compact_height:40.,last_compact:now,todos,todo_now,last_schedule:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.}
+        let music_mix=if settings["MusicExpandedLayout"].as_str()==Some("Separated"){1.}else{0.};
+        let mut layout=Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.));layout.card.h=264.+20.*music_mix;
+        let updates=update_activity::Hub::new(&data);
+        Self{updates,update_return:"music".into(),update_until:None,banner:banner::Banner::default(),osd_banner:banner::Banner::default(),osd:osd::Hub::default(),pending_osd:0,notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout,settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_width,compact_key:String::new(),compact_height:40.,last_compact:now,todos,todo_now,last_schedule:now,history,last_history_prune:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,manual_until:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.,music_mix,music_from:music_mix,music_start:now,quick:vec![],quick_commits:vec![],pending_action:None,templates,rules,foreground,usage_date,last_awake:awake_ms(),last_rules_checkpoint:now,lock_generation:0,session_locked:false,focus_resume:None}
     }
     fn refresh_components(&mut self){
-        let mut components=vec![];if self.demo||self.snapshot["track"].is_object(){components.push("music".to_string());}
+        let mut components=vec![];if self.updates.selectable(){components.push("update".into());}if self.demo||self.snapshot["track"].is_object(){components.push("music".to_string());}
         if self.flag("TodoIslandEnabled",true)&&self.todos.items.iter().any(|t|!t.done(&self.todo_now)){components.push("todos".into());}
         for t in &self.timers.items{components.push(format!("timer:{}",t.id));}if components.is_empty(){components.push("music".into());}
         if !components.contains(&self.selected){self.selected=components[0].clone();}self.components=components;
         self.panel=self.component_panel(&self.selected);
     }
     fn component_panel(&self,id:&str)->Option<activities::Panel>{
-        if id=="todos"{let tasks=self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).take(3).map(|t|activities::Task{id:t.id.clone(),title:t.title.clone(),detail:format!("{} {}{}",t.date,t.time,if t.daily{" · 每天"}else{""}),color:0xff000000|u32::from_str_radix(t.color.trim_start_matches('#'),16).unwrap_or(0xf3d79b)}).collect();Some(activities::Panel{kind:2,title:"待办清单".into(),value:format!("{} 项待办",self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).count()),subtitle:"记住重要的小事".into(),accent:0xfff3d79b,tasks,..Default::default()})}
-        else if let Some(id)=id.strip_prefix("timer:"){self.timers.items.iter().find(|t|t.id==id).map(|t|activities::Panel{kind:1,title:t.name.clone(),value:t.clock(),subtitle:t.subtitle(),progress:t.progress(),running:t.running,accent:if t.mode=="pomodoro"{if t.phase=="rest"{0xff87cbb0}else{0xffe7a185}}else if t.mode=="stopwatch"{0xffb1e8d1}else{0xffadcaf0},tasks:vec![]})}else{None}
+        if id=="update"{Some(self.updates.panel())}else if id=="todos"{let tasks=self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).take(3).map(|t|activities::Task{id:t.id.clone(),title:t.title.clone(),detail:format!("{} {}{}",t.date,t.time,if t.daily{" · 每天"}else{""}),color:0xff000000|u32::from_str_radix(t.color.trim_start_matches('#'),16).unwrap_or(0xf3d79b)}).collect();Some(activities::Panel{kind:2,title:"待办清单".into(),value:format!("{} 项待办",self.todos.items.iter().filter(|t|!t.done(&self.todo_now)).count()),subtitle:"记住重要的小事".into(),accent:0xfff3d79b,tasks,..Default::default()})}
+        else if let Some(id)=id.strip_prefix("timer:"){self.timers.items.iter().find(|t|t.id==id).map(|t|activities::Panel{kind:1,title:t.name.clone(),value:t.clock(),subtitle:t.subtitle(),progress:t.progress(),running:t.running,accent:if t.mode=="pomodoro"{if t.phase=="rest"{0xff87cbb0}else{0xffe7a185}}else if t.mode=="workflow"{0xffc9bce5}else if t.mode=="stopwatch"{0xffb1e8d1}else{0xffadcaf0},tasks:vec![]})}else{None}
     }
     fn select_component(&mut self,id:&str,direction:i32){
         if !self.components.iter().any(|c|c==id)||self.selected==id{return}
-        self.hide_at=None;self.slide_outgoing=true;self.previous_panel=self.panel.clone();self.selected=id.into();self.refresh_components();self.compact_key.clear();
+        self.hide_at=None;self.manual_until=Some(Instant::now()+Duration::from_secs(6));self.slide_outgoing=true;self.previous_panel=self.panel.clone();self.selected=id.into();self.refresh_components();self.compact_key.clear();
         self.slide_direction=if direction<0{-1.}else{1.};self.switching=self.flag("Animation",true);self.slide.set(if self.switching{self.slide_direction*if self.expanded{self.layout.card.w}else{self.layout.capsule.w}}else{0.});self.dirty=true;
     }
     fn cycle_component(&mut self,direction:i32){self.refresh_components();let n=self.components.len();if n<2{return}let i=self.components.iter().position(|c|c==&self.selected).unwrap_or(0);let next=(i as i32+direction).rem_euclid(n as i32)as usize;let id=self.components[next].clone();self.select_component(&id,direction);}
-    fn can_swipe(&self,hit:i32)->bool{self.flag("SwipeActivities",false)&&!self.banner.visible()&&self.components.len()>1&&matches!(hit,0|1|13|40..=42)}
+    fn can_swipe(&self,hit:i32)->bool{self.flag("SwipeActivities",true)&&!self.banner.visible()&&self.components.len()>1&&matches!(hit,0|1|13|40..=42)}
     fn finish_swipe(&mut self,swipe:activities::Swipe)->bool{
         if !swipe.active{return false}
         let direction=swipe.direction();let width=if self.expanded{self.layout.card.w}else{self.layout.capsule.w};let offset=swipe.dx.clamp(-width,width);
@@ -86,9 +117,27 @@ impl App {
     }
     fn active_timer_action(&mut self,action:&str){if let Some(id)=self.selected.strip_prefix("timer:"){if let Err(e)=self.timers.action(id,action){self.error=Some(e);}self.refresh_components();self.dirty=true;}}
     fn flag(&self,k:&str,default:bool)->bool{self.settings[k].as_bool().unwrap_or(default)}
+    /// Prefer the single-file launcher when one extracted this copy: a versioned runtime folder
+    /// changes on every update, so registering it would break login startup after the next release.
+    fn startup_target(&self)->PathBuf{if self.base.join("Installed.json").exists(){return self.base.join("LyricIsland.exe")}
+        if let Ok(text)=std::fs::read_to_string(self.base.join("launcher.txt")){let path=PathBuf::from(text.trim());if path.is_file(){return path}}
+        std::env::current_exe().unwrap_or_else(|_|self.base.join("LyricIsland.exe"))
+    }
+    fn apply_startup(&mut self)->std::result::Result<(),String>{
+        shell::set_startup(self.flag("AutoStart",false),&self.startup_target().to_string_lossy(),&self.data.join("settings.json"),&self.settings,None)
+    }
+    fn music_target(&self)->f64{if self.settings["MusicExpandedLayout"].as_str()==Some("Separated"){1.}else{0.}}
+    /// Height is part of the shared geometry, so the window keeps the taller host
+    /// and only the card itself grows while the two layouts cross-fade.
+    fn start_music_shift(&mut self){
+        let target=self.music_target();if (target-self.music_mix).abs()<0.001{self.music_mix=target;return}
+        if self.expanded&&self.flag("Animation",true){self.music_from=self.music_mix;self.music_start=Instant::now();}
+        else{self.music_mix=target;self.music_from=target;}
+        self.dirty=true;
+    }
     fn options(&self)->Options{serde_json::from_value(self.settings["Motion"].clone()).unwrap_or_default()}
     unsafe fn position(&mut self)->Result<()> {
-        let base=self.compact_base();self.layout=Layout::new(base);self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
+        let base=self.compact_base();self.layout=Layout::new(base);self.layout.card.h=264.+20.*self.music_mix;self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
         let monitor=MonitorFromWindow(self.hwnd,MONITOR_DEFAULTTONEAREST);let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>()as u32,..Default::default()};let _=GetMonitorInfoW(monitor,&mut info);
         let dpi=GetDpiForWindow(self.hwnd).max(96)as f64;let scale=dpi/96.;let work=info.rcWork;let width=(self.layout.host.w*scale).ceil()as i32;let height=(self.layout.host.h*scale).ceil()as i32;
         let floating=self.flag("Floating",false);let center=if floating{self.settings["CenterX"].as_f64().unwrap_or(0.5)}else{0.5};
@@ -119,6 +168,97 @@ impl App {
         if !page.is_empty(){self.pending_page=Some(page.to_owned());}
         if self.settings_process.as_mut().is_some_and(|p|p.try_wait().ok().flatten().is_none()){return}
         let exe=self.base.join("LyricIsland.Settings.exe");if exe.exists(){self.settings_process=std::process::Command::new(exe).env("LYRICISLAND_TEST_PIPE",std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into())).env("LYRICISLAND_NATIVE_DATA",&self.data).current_dir(&self.base).spawn().ok();}else{self.error=Some("设置组件缺失，请完整解压运行包".into());}
+    }
+    /// Register the configured quick-reminder hotkey. The previous binding is
+    /// removed first; a conflict is reported so the caller can roll the setting back.
+    unsafe fn register_hotkey(&self)->std::result::Result<(),String>{
+        let _=UnregisterHotKey(Some(self.hwnd),1);
+        let name=self.settings["QuickReminderHotkey"].as_str().unwrap_or("");
+        let Some((mods,vk))=hotkey_code(name)else{return Ok(())};
+        RegisterHotKey(Some(self.hwnd),1,mods|MOD_NOREPEAT,vk).map_err(|e|format!("快捷键注册失败，可能已被其他程序占用：{e}"))
+    }
+    fn quick_preview(&mut self,text:&str)->Value{
+        if self.demo{return json!({"success":true,"previewToken":"demo","date":self.todo_now.date,"time":self.todo_now.time,"title":"演示","expiresAt":0,"minutePrecision":true})}
+        let now=todos::Now::local();
+        match quick_reminder::parse(text,&now){
+            Ok(draft)=>{
+                self.quick.retain(|p|p.expires>Instant::now());
+                if self.quick.len()>=8{self.quick.remove(0);}
+                let epoch=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let token=format!("qr-{}-{}",std::process::id(),epoch*1000+self.quick.len()as u64);
+                self.quick.push(QuickPreview{token:token.clone(),title:draft.title.clone(),date:draft.date.clone(),time:draft.time.clone(),expires:Instant::now()+Duration::from_secs(120)});
+                json!({"success":true,"previewToken":token,"date":draft.date,"time":draft.time,"title":draft.title,"expiresAt":epoch+120,"minutePrecision":true,"message":format!("将在 {} {} 提醒",draft.date,draft.time)})
+            }
+            Err(e)=>json!({"success":false,"code":e.code,"message":e.message})
+        }
+    }
+    fn quick_commit(&mut self,token:&str,request:&str)->Value{
+        let request=request.trim();
+        if request.is_empty()||request.len()>120{return json!({"success":false,"message":"缺少提交标识"})}
+        if let Some((_,id))=self.quick_commits.iter().find(|(r,_)|r==request){return json!({"success":true,"id":id,"todos":self.todos.list(&self.todo_now),"message":"已创建提醒"})}
+        if self.demo{return json!({"success":true,"id":"demo"})}
+        let now=todos::Now::local();
+        let Some(preview)=self.quick.iter().find(|p|p.token==token)else{return json!({"success":false,"message":"预览已过期，请重新解析"})};
+        if preview.expires<=Instant::now(){return json!({"success":false,"message":"预览已过期，请重新解析"})}
+        if format!("{} {}",preview.date,preview.time)<=format!("{} {}",now.date,now.time){return json!({"success":false,"message":"提醒时间已到，请重新解析"})}
+        let (title,date,time)=(preview.title.clone(),preview.date.clone(),preview.time.clone());
+        match self.todos.save(&json!({"title":title,"content":"","date":date,"time":time,"daily":false})){
+            Ok(id)=>{
+                self.quick.retain(|p|p.token!=token);self.quick_commits.push((request.into(),id.clone()));
+                if self.quick_commits.len()>32{self.quick_commits.remove(0);}
+                json!({"success":true,"id":id,"todos":self.todos.list(&self.todo_now),"message":"已创建提醒"})
+            }
+            Err(e)=>json!({"success":false,"message":e})
+        }
+    }
+    fn on_lock(&mut self){
+        if !self.flag("FocusPauseOnLock",false)||self.session_locked{return}
+        self.session_locked=true;self.lock_generation=self.lock_generation.wrapping_add(1);
+        match self.timers.pause_for_lock(self.lock_generation){
+            Ok(ids)if !ids.is_empty()=>self.focus_resume=Some(FocusResume{generation:self.lock_generation,ids,prompted:false}),
+            Ok(_)=>{},Err(e)=>self.error=Some(e)
+        }
+        self.last_awake=awake_ms();
+    }
+    fn on_unlock(&mut self){
+        if !self.session_locked{return}
+        self.session_locked=false;self.last_awake=awake_ms();
+        if !self.flag("FocusPauseOnLock",false){self.focus_resume=None;return}
+        let Some(mut resume)=self.focus_resume.take()else{return};
+        let reason=format!("lock:{}",resume.generation);
+        resume.ids.retain(|id|self.timers.items.iter().any(|t|&t.id==id&&!t.running&&!t.finished&&t.pause_reason.as_deref()==Some(reason.as_str())));
+        if resume.ids.is_empty(){return}
+        let notice=notifications::Notice{app_id:"LyricIsland.Focus".into(),app_name:"专注".into(),title:format!("继续刚才的 {} 项专注？",resume.ids.len()),body:"点击打开计时页，可逐项继续或暂不。".into(),icon:None};
+        self.enqueue(Queued{notice,todo:Some(format!("focus:{}",resume.generation)),chime:false});
+        resume.prompted=true;self.focus_resume=Some(resume);
+    }
+    fn fire_rule_hits(&mut self,hits:&[app_rules::Hit]){
+        let (title,body)=if hits.len()==1{(hits[0].1.clone(),hits[0].2.clone())}else{(format!("{} 条应用提醒",hits.len()),hits.iter().map(|(_,name,message)|format!("{name}：{message}")).collect::<Vec<_>>().join("\n"))};
+        let notice=notifications::Notice{app_id:"LyricIsland.AppRule".into(),app_name:"应用提醒".into(),title,body:body.clone(),icon:None};
+        self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("rule:{}",hits[0].0)),chime:true});
+        if self.flag("NotificationHistoryEnabled",true){for (id,name,message) in hits{self.history.record("automation","LyricIsland.AppRule",name,name,message,Some(id.clone()));}}
+    }
+    /// One shared foreground listener for F05/F06. Enter events are consumed even
+    /// while notifications are paused so they are never replayed later.
+    unsafe fn poll_app_rules(&mut self){
+        let entry=self.flag("AppEntryRemindersEnabled",false);let usage=self.flag("AppUsageRemindersEnabled",false);
+        if !entry&&!usage{self.last_awake=awake_ms();return}
+        let now=todos::Now::local();
+        if now.date!=self.usage_date{self.rules.roll_day(&now.date);self.usage_date=now.date.clone();}
+        let allowed=!self.flag("PauseNotifications",false);
+        let mut hits:Vec<app_rules::Hit>=vec![];
+        if let Some((path,segment))=self.foreground.poll(){if entry{hits.extend(self.rules.enter_hits(&path,segment,&now.date,&now,allowed));}}
+        let awake=awake_ms();
+        if usage{
+            if let Some(path)=self.foreground.path.clone(){
+                let delta=if self.session_locked||!allowed{0}else{awake.saturating_sub(self.last_awake).min(2000)};
+                if delta>0{self.rules.accumulate(&path,delta,&now.date);}
+                if allowed&&!self.session_locked{hits.extend(self.rules.due_usage(&path,&now.date));}
+            }
+        }
+        self.last_awake=awake;
+        if !hits.is_empty(){self.fire_rule_hits(&hits);}
+        if self.last_rules_checkpoint.elapsed()>=Duration::from_secs(60){self.last_rules_checkpoint=Instant::now();if usage{if let Err(e)=self.rules.persist_usage(){self.error=Some(e);}}}
     }
     fn save(&mut self)->std::result::Result<(),String>{if self.demo{return Ok(())}io::save_settings(&self.data.join("settings.json"),&self.settings)}
     /// The collapsed second line: the translation when one exists, otherwise the
@@ -152,7 +292,10 @@ impl App {
         while self.queue.len()>=limit{match self.queue.iter().position(|e|e.todo.is_none()){Some(i)=>{self.queue.remove(i);},None=>{if q.todo.is_none(){return}break}}}
         self.queue.push_back(q);
     }
-    fn enqueue_todo(&mut self,t:&todos::Todo){let body=if t.content.trim().is_empty(){if t.daily{"每日待办提醒".into()}else{"待办提醒".into()}}else{t.content.clone()};self.enqueue(Queued{notice:notifications::Notice{app_id:TODO_APP_ID.into(),app_name:"待办".into(),title:t.title.clone(),body,icon:None},todo:Some(t.id.clone())});}
+    fn enqueue_todo(&mut self,t:&todos::Todo){let body=if t.content.trim().is_empty(){if t.daily{"每日待办提醒".into()}else{"待办提醒".into()}}else{t.content.clone()};self.enqueue(Queued{notice:notifications::Notice{app_id:TODO_APP_ID.into(),app_name:"待办".into(),title:t.title.clone(),body:body.clone(),icon:None},todo:Some(t.id.clone()),chime:true});if self.flag("NotificationHistoryEnabled",true){self.history.record("todo",TODO_APP_ID,"待办",&t.title,&body,Some(t.id.clone()));}}
+    /// Only events that actually reached the user are kept: previews, paused
+    /// notifications and whitelist rejects never get here.
+    fn record_history(&mut self,kind:&str,notice:&notifications::Notice,todo_id:Option<String>){if self.flag("NotificationHistoryEnabled",true){self.history.record(kind,&notice.app_id,&notice.app_name,&notice.title,&notice.body,todo_id);}}
     /// Drop a reminder banner that has not been presented yet, and close it if it
     /// is on screen. Called after a todo is completed or deleted.
     fn cancel_todo(&mut self,id:&str){
@@ -176,7 +319,10 @@ impl App {
         if self.seeking&&previous["track"]["id"]!=self.snapshot["track"]["id"]{self.seeking=false;}
         if !self.demo {
             let valid=self.snapshot["track"]["title"].as_str().is_some_and(|s|!s.trim().is_empty())&&!self.snapshot["track"]["id"].as_str().unwrap_or("").ends_with("|ProcessFallback");
-            let wanted=if self.selected!="music"||self.components.len()>1{true}else if valid{self.missing_since=None;self.snapshot["isPlaying"]==true||!self.flag("HideWhenPaused",true)}else{let since=self.missing_since.get_or_insert(Instant::now());self.display_wanted&&since.elapsed()<Duration::from_millis(600)};
+            let flag=island_needed(valid,self.snapshot["isPlaying"]==true,self.flag("HideWhenPaused",true),self.timers.items.iter().any(|t|t.running&&!t.finished)||self.updates.busy(),self.banner.visible()||self.osd_banner.visible()||self.updates.busy(),!self.queue.is_empty(),self.held,self.manual_until.is_some_and(|t|Instant::now()<t));
+            let mut wanted=flag;
+            if valid{self.missing_since=None;}
+            else if !flag{let since=self.missing_since.get_or_insert(Instant::now());wanted=self.display_wanted&&since.elapsed()<Duration::from_millis(600);}
             if wanted!=self.display_wanted{
                 self.display_wanted=wanted;
                 if wanted{self.hide_at=None;if !self.user_hidden&&!self.banner.visible(){self.fade(1.);}}
@@ -192,16 +338,17 @@ impl App {
         let (shape,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
         if !inside_round_rect(shape,radius,x,y){return -1}
         if self.selected!="music"{
-            if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let x=(x-shape.x)/scale;let y=(y-shape.y)/scale-self.frame.content_offset_y;let w=self.layout.card.w;if Rect::new(w-42.,12.,30.,28.).contains(x,y){return 8}if self.selected=="todos"{for(i,r)in layout::todo_rows(w,self.panel.as_ref().map(|p|p.tasks.len()).unwrap_or(0)).enumerate(){if r.contains(x,y){return 40+i as i32;}}if layout::todo_footer(w).contains(x,y){return 7}}else{if Rect::new(w/2.-50.,137.,100.,40.).contains(x,y){return 30}if Rect::new(18.,145.,60.,32.).contains(x,y){return 31}if Rect::new(w-78.,145.,60.,32.).contains(x,y){return 7}}}
+            if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let x=(x-shape.x)/scale;let y=(y-shape.y)/scale-self.frame.content_offset_y;let w=self.layout.card.w;if self.selected=="update"{if Rect::new(24.,190.,w-48.,42.).contains(x,y){return 50}if Rect::new(w-48.,14.,30.,30.).contains(x,y){return 51}}else if self.selected=="todos"{for(i,r)in layout::todo_rows(w,self.panel.as_ref().map(|p|p.tasks.len()).unwrap_or(0)).enumerate(){if r.contains(x,y){return 40+i as i32;}}if layout::todo_footer(w).contains(x,y){return 7}}else{if Rect::new(w/2.-50.,137.,100.,40.).contains(x,y){return 30}if Rect::new(18.,145.,60.,32.).contains(x,y){return 31}if Rect::new(w-78.,145.,60.,32.).contains(x,y){return 7}}}
             return 0
         }
         if 1.-motion::blend(self.frame.card_reveal,0.06,0.46)>0.1&&self.layout.compact_cover(unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.}).contains(x,y){return 1}
         if self.expanded&&self.frame.content_opacity*motion::blend(self.frame.card_reveal,0.25,0.88)>0.01{
             let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let ty=shape.y+(shape.h-self.layout.card.h*scale)/2.;let x=(x-tx)/scale;let y=(y-ty)/scale-self.frame.content_offset_y;let w=self.layout.card.w;
-            if Rect::new(20.,20.,66.,66.).contains(x,y){return 1}
-            if self.flag("MusicClickOpenApp",false)&&Rect::new(102.,18.,w-150.,45.).contains(x,y){return 13}
-            if Rect::new(10.,112.,w-20.,20.).contains(x,y){return 10}
-            for (id,r) in layout::buttons(w,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.}){if r.contains(x,y){return id}}
+            let g=layout::music_geometry(w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.});
+            if g.cover.contains(x,y){return 1}
+            if self.flag("MusicClickOpenApp",false)&&g.text_hit.contains(x,y){return 13}
+            if g.progress_hit.contains(x,y){return 10}
+            for (id,r) in g.buttons{if r.contains(x,y){return id}}
         }0
     }
     unsafe fn sync_input_region(&mut self)->Result<()>{
@@ -221,51 +368,93 @@ impl App {
     }
     unsafe fn remember_position(&mut self){let mut bounds=RECT::default();let _=GetWindowRect(self.hwnd,&mut bounds);let monitor=MonitorFromWindow(self.hwnd,MONITOR_DEFAULTTONEAREST);let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>()as u32,..Default::default()};let _=GetMonitorInfoW(monitor,&mut info);let w=info.rcWork;let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;self.settings["CenterX"]=json!(((bounds.left+bounds.right)as f64/2.-w.left as f64)/(w.right-w.left).max(1)as f64);self.settings["TopFraction"]=json!(((bounds.top-w.top)as f64+24.*scale)/((w.bottom-w.top)as f64-40.*scale).max(1.));let _=self.save();}
     unsafe fn activate(&mut self,id:i32){match id {
+        50=>{if self.updates.phase()=="available"{self.request(json!({"version":1,"command":"updateDownload"}));}else if self.updates.phase()=="ready"{self.updates.action="apply".into();}else if self.updates.busy(){self.updates.action="cancel".into();}else{self.request(json!({"version":1,"command":"checkUpdate"}));}},
+        51=>{let target=self.update_return.clone();self.select_component(&target,-1);self.held=false;self.retarget(false);self.manual_until=None;},
         20=>self.cycle_component(1),21=>self.cycle_component(-1),30=>self.active_timer_action("toggle"),31=>self.active_timer_action("reset"),40..=42=>{let task=self.panel.as_ref().and_then(|p|p.tasks.get((id-40)as usize)).cloned();if let Some(task)=task{let _=self.todos.complete(&task.id,true,&self.todo_now);self.cancel_todo(&task.id);self.refresh_components();}},
         11|12=>{
             let todo=self.banner_todo.clone();
             if id==12&&!self.notification_preview{
-                if todo.as_ref().is_some_and(|id|id.starts_with("device:")){}else if todo.as_ref().is_some_and(|id|id.starts_with("timer:")){self.show_settings_page("timers");}else if todo.is_some(){self.show_settings_page("todos");}
+                if todo.as_ref().is_some_and(|id|id.starts_with("device:")){}else if todo.as_ref().is_some_and(|id|id.starts_with("timer:")){self.show_settings_page("timers");}else if todo.as_ref().is_some_and(|id|id.starts_with("focus:")){self.show_settings_page("timers");}else if todo.as_ref().is_some_and(|id|id.starts_with("rule:")){self.show_settings_page("notifications");}else if todo.is_some(){self.show_settings_page("todos");}
                 else if self.flag("NotificationClickOpenApp",true){if let Some(n)=&self.banner.notice{if let Err(e)=activation::open(&n.app_id){self.error=Some(e);}}}
             }
             let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
         0=>{if self.expanded{self.held=false;self.retarget(false)}else if self.flag("ClickAnywhereExpand",false){self.held=true;self.retarget(true)}},
         1|13=>{if self.flag("MusicClickOpenApp",false){if let Err(e)=activation::open(self.snapshot["sourceId"].as_str().unwrap_or("")){self.error=Some(e);}}else if id==1{self.held=!self.held;self.retarget(self.held)}},2=>{if self.flag("Floating",false){let mut cursor=POINT::default();let mut bounds=RECT::default();let _=GetCursorPos(&mut cursor);let _=GetWindowRect(self.hwnd,&mut bounds);self.dragging=Some((cursor,bounds));SetCapture(self.hwnd);}},
         3=>self.command("previous",0.),4=>{if self.demo{self.snapshot["isPlaying"]=json!(self.snapshot["isPlaying"]!=true)}else{self.command("toggle",0.)}},5=>self.command("next",0.),
-        6=>{self.settings["Translation"]=json!(!self.flag("Translation",true));let _=self.save();},7=>{if self.selected=="todos"{self.show_settings_page("todos")}else if self.selected.starts_with("timer:"){self.show_settings_page("timers")}else{self.show_settings()}},8=>{self.held=false;self.retarget(false)},
+        6=>{self.settings["Translation"]=json!(!self.flag("Translation",true));let _=self.save();},7=>{if self.selected=="todos"{self.show_settings_page("todos")}else if self.selected.starts_with("timer:"){self.show_settings_page("timers")}else{self.show_settings()}},
         9=>{let title=self.snapshot["track"]["title"].as_str().unwrap_or("").to_string();let source=self.snapshot["track"]["sourceApp"].as_str().unwrap_or("").to_string();std::thread::spawn(move||{shell::favorite(&title,&source,true);});},_=>{}}
         self.dirty=true;
     }
-    fn update_seek(&mut self,x:f64){let (shape,_)=self.layout.shape(self.frame.card_reveal,self.options().radius);let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;self.seek_fraction=((x-tx-20.*scale)/((self.layout.card.w-40.)*scale)).clamp(0.,1.);self.dirty=true;}
+    fn update_seek(&mut self,x:f64){let (shape,_)=self.layout.shape(self.frame.card_reveal,self.options().radius);let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let g=layout::music_geometry(self.layout.card.w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.});self.seek_fraction=((x-tx-g.track.x*scale)/(g.track.w*scale)).clamp(0.,1.);self.dirty=true;}
     fn progress_value(&self)->f64{self.progress.fraction(self.start.elapsed().as_secs_f64())}
     fn scene(&self)->Scene<'_>{
         let elapsed=self.progress.seconds(self.start.elapsed().as_secs_f64());let duration=self.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);let track=&self.snapshot["track"];let f=&self.snapshot["frame"];
         let col=|k:&str,default:u32|self.settings[k].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).map(|v|0xff000000|v).unwrap_or(default);
         let (notice_rect,notice_radius,notice_mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());
-        Scene{drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe.filter(|s|s.active).map(|s|s.dx.clamp(-if self.expanded{self.layout.card.w}else{self.layout.capsule.w},if self.expanded{self.layout.card.w}else{self.layout.capsule.w})).unwrap_or(0.),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
+        let (osd_rect,osd_radius,osd_mix)=self.osd_banner.presentation(self.start.elapsed().as_secs_f64());
+        Scene{drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe.filter(|s|s.active).map(|s|s.dx.clamp(-if self.expanded{self.layout.card.w}else{self.layout.capsule.w},if self.expanded{self.layout.card.w}else{self.layout.capsule.w})).unwrap_or(0.),lyric_cover_color:self.flag("LyricColorFromCover",true),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,osd:if self.banner.visible(){None}else{self.osd_banner.notice.as_ref()},osd_rect,osd_radius,osd_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),music_layout:layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),music_mix:self.music_mix,text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).0,activity_opacity:self.activity.sample(self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true)).1,cover_opacity:1.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
     }
     unsafe fn draw(&mut self)->Result<()>{// Take the renderer to split immutable scene data from mutable graphics state.
         if let Some(mut r)=self.renderer.take(){let result=r.render(&self.scene(),true);self.renderer=Some(r);result?;self.render_frames+=1;}self.dirty=false;Ok(())
     }
-    fn show_notice(&mut self,notice:notifications::Notice,preview:bool,todo:Option<String>){
+    fn show_notice(&mut self,notice:notifications::Notice,preview:bool,todo:Option<String>,chime:bool){
+        if !preview&&todo.is_none(){let policy=notifications::Policy::from_settings(&self.settings);if !policy.should_show()||!policy.permits(&notice.app_id,&notice.app_name){return}}
         let device=notice.app_id.starts_with("LyricIsland.Device");
         self.notification_preview=preview;self.banner_todo=todo.clone();
+        let now=self.start.elapsed().as_secs_f64();
+        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,now,false);}
         let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
         if let Some(r)=&mut self.renderer{let _=unsafe{r.set_notification_icon(notice.icon.as_deref())};}
         let width=440_f64.min(self.layout.host.w-48.);let height=self.renderer.as_mut().and_then(|r|unsafe{r.notification_height(&notice,width)}.ok()).unwrap_or(80.);
-        self.banner.show(notice,base,radius,self.layout.host.w,height,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));
+        self.banner.show(notice,base,radius,self.layout.host.w,height,now,self.flag("Animation",true));
         // The chime is bound to a banner actually appearing. Previews, paused
         // notifications, whitelist rejects and repeats never reach this point.
-        if !preview{if let Err(e)=if device{sound::play_device(&self.settings,false)}else{sound::play(&self.settings,todo.is_some(),false)}{self.error=Some(e);}}
+        if !preview&&chime{if let Err(e)=if device{sound::play_device(&self.settings,false)}else{sound::play(&self.settings,todo.is_some(),false)}{self.error=Some(e);}}
         self.hide_at=None;self.fade(1.);self.dirty=true;
     }
+    /// System hints share the island surface but never the notification queue: they are
+    /// ephemeral, so a newer state replaces the previous one instead of stacking.
+    fn show_osd(&mut self,hint:osd::Hint,preview:bool){
+        if !preview&&(!self.flag("SystemStateHintsEnabled",true)||self.flag("PauseNotifications",false)){return}
+        if self.demo&&!preview{return}
+        let now=self.start.elapsed().as_secs_f64();
+        // A message the user is reading always wins; the hint is transient and is dropped
+        // instead of cutting the notification short.
+        if self.banner.visible(){
+            if !preview{return}
+            let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,now,false);
+        }
+        let (base,radius)=self.layout.shape(self.frame.card_reveal,self.options().radius);
+        self.osd_banner.show_compact(hint.notice(),base,radius,self.layout.host.w,now,self.flag("Animation",true));
+        self.hide_at=None;self.fade(1.);self.dirty=true;
+    }
+    fn flush_osd(&mut self){
+        if !self.flag("SystemStateHintsEnabled",true){self.pending_osd=0;return}
+        let pending=std::mem::take(&mut self.pending_osd);
+        if pending==0{return}
+        for hint in self.osd.flush(pending,self.flag("CapsLockHintEnabled",true),self.flag("NumLockHintEnabled",true),self.flag("MicrophoneMuteHintEnabled",true)){self.show_osd(hint,false);}
+    }
+    fn apply_osd(&mut self){
+        if self.demo{return}
+        if self.flag("SystemStateHintsEnabled",true){unsafe{self.osd.install(self.hwnd);}}
+        else{
+            self.osd.uninstall();self.pending_osd=0;
+            if self.osd_banner.visible(){let now=self.start.elapsed().as_secs_f64();let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,now,false);}
+        }
+    }
     unsafe fn tick(&mut self)->Result<()> {
-        for event in self.devices.poll(self.flag("DeviceRemindersEnabled",false)&&!self.flag("PauseNotifications",false)){self.enqueue(Queued{notice:event.notice(),todo:Some(format!("device:{}",event.key))});}
+        if self.updates.tick(self.flag("AutoCheckUpdatesEnabled",true),self.demo){self.dirty=true;}
+        if self.updates.reminder{self.updates.reminder=false;if !self.flag("PauseNotifications",false){if self.selected!="update"{self.update_return=self.selected.clone();}self.refresh_components();self.select_component("update",1);self.update_until=Some(Instant::now()+Duration::from_secs(8));self.user_hidden=false;self.fade(1.);}}
+        if self.update_until.is_some_and(|until|Instant::now()>until)&&!self.updates.busy()&&!self.held{self.update_until=None;let previous=self.update_return.clone();self.select_component(&previous,-1);self.manual_until=None;}
+        let gates=devices::Gates{master:self.flag("DeviceRemindersEnabled",true)&&!self.flag("PauseNotifications",false),disconnect:self.flag("DeviceDisconnectRemindersEnabled",true),headphones:self.flag("HeadphoneConnectionRemindersEnabled",true),speaker:self.flag("SpeakerConnectionRemindersEnabled",true),gamepad:self.flag("GamepadConnectionRemindersEnabled",true),mouse:self.flag("MouseConnectionRemindersEnabled",true),keyboard:self.flag("KeyboardConnectionRemindersEnabled",true)};
+        for event in self.devices.poll(&gates){let notice=event.notice();self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("device:{}",event.key)),chime:true});self.record_history("device",&notice,None);}
+        if self.flag("SystemStateHintsEnabled",true)&&!self.flag("PauseNotifications",false){for hint in self.osd.poll(self.flag("MicrophoneMuteHintEnabled",true),self.flag("TouchpadHintEnabled",true)){self.show_osd(hint,false);}}else{self.osd.poll(false,false);}
         let now=Instant::now();let dt=now.duration_since(self.last_timer);self.last_timer=now;
         let nanos=dt.as_nanos()+self.timer_fraction;self.timer_fraction=nanos%1_000_000;
         let events=self.timers.advance((nanos/1_000_000).min(u64::MAX as u128)as u64);
-        if !events.is_empty(){for t in events{self.enqueue(Queued{notice:notifications::Notice{app_id:"LyricIsland.Timer".into(),app_name:"计时器".into(),title:t.name.clone(),body:if t.finished{"计时已完成".into()}else{t.subtitle()},icon:None},todo:Some(format!("timer:{}",t.id))});}if let Err(e)=self.timers.persist(){self.error=Some(e);}}
+        if !events.is_empty(){for t in events{let notice=notifications::Notice{app_id:"LyricIsland.Timer".into(),app_name:"计时器".into(),title:t.name.clone(),body:if t.finished{"计时已完成".into()}else{t.subtitle()},icon:None};self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("timer:{}",t.id)),chime:true});self.record_history("timer",&notice,None);}if let Err(e)=self.timers.persist(){self.error=Some(e);}}
         if self.last_checkpoint.elapsed()>=Duration::from_secs(15){if self.timers.items.iter().any(|t|t.running){let _=self.timers.persist();}self.last_checkpoint=Instant::now();}
+        if self.last_history_prune.elapsed()>=Duration::from_secs(3600){self.last_history_prune=Instant::now();self.history.prune(self.settings["NotificationHistoryDays"].as_u64().unwrap_or(7).clamp(1,30)as u32,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()as i64);}
         let old_panel=self.panel.clone();self.refresh_components();if self.panel!=old_panel{self.dirty=true;}
         if self.switching&&self.slide.tick(dt.as_secs_f64()){self.dirty=true;}if self.slide.value==0.{self.switching=false;}
 
@@ -274,20 +463,27 @@ impl App {
             notifications::Event::State(state)=>{self.notification_state=state;},
             // Banners are queued rather than shown directly: showing each one on
             // arrival would make a burst of messages overwrite the previous one.
-            notifications::Event::Notice(notice)=>{let policy=notifications::Policy::from_settings(&self.settings);if !self.user_hidden&&policy.should_show()&&policy.permits(&notice.app_id,&notice.app_name){self.enqueue(Queued{notice,todo:None});}}
+            notifications::Event::Notice(notice)=>{let policy=notifications::Policy::from_settings(&self.settings);if policy.should_show()&&policy.permits(&notice.app_id,&notice.app_name){if !self.user_hidden{self.enqueue(Queued{notice:notice.clone(),todo:None,chime:true});}self.record_history("notice",&notice,None);}}
         }}
         if self.flag("PauseNotifications",false){
             if self.banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+            if self.selected=="update"&&self.opacity>0.001&&self.panel.as_ref().is_some_and(|p|p.running&&p.progress<0.)&&self.flag("Animation",true){self.dirty=true;}
+        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
             // Nothing may be presented or chimed while paused. Reminders stay
             // unmarked, so they are re-checked once notifications resume.
             self.queue.retain(|e|e.todo.is_some());
         }
         if self.last_poll.elapsed()>=Duration::from_millis(90){self.poll()}
         if let Some(t)=self.transition{self.sampled_ms=self.transition_start.elapsed().as_secs_f64()*1000.;self.frame=t.sample(self.sampled_ms);self.dirty=true;if self.sampled_ms>=t.duration_ms{self.transition=None;self.frame=t.end;}}
+        let target=self.music_target();
+        if (self.music_mix-target).abs()>0.0001{let t=if self.flag("Animation",true){(self.music_start.elapsed().as_secs_f64()/0.23).min(1.)}else{1.};let e=t*t*(3.-2.*t);self.music_mix=self.music_from+(target-self.music_from)*e;if t>=1.{self.music_mix=target;}self.dirty=true;}
+        let target_height=if self.selected=="update"{264.}else if self.panel.is_some(){200.}else{264.+20.*self.music_mix};
+        if (self.layout.card.h-target_height).abs()>0.01{let weight=if self.flag("Animation",true){1.-(-dt.as_secs_f64()*26.).exp()}else{1.};self.layout.card.h+=(target_height-self.layout.card.h)*weight;if (self.layout.card.h-target_height).abs()<0.1{self.layout.card.h=target_height;}self.dirty=true;}
         if !self.banner.visible()&&self.hide_at.is_some_and(|t|Instant::now()>=t){self.hide_at=None;self.fade(0.);}
         if (self.opacity-self.fade_to).abs()>0.00001{let t=if self.flag("Animation",true){(self.fade_start.elapsed().as_secs_f64()/0.2).min(1.)}else{1.};self.opacity=self.fade_from+(self.fade_to-self.fade_from)*(1.-(std::f64::consts::PI*t).cos())/2.;self.dirty=true;}
         let mut pt=POINT::default();let _=GetCursorPos(&mut pt);let mut local=pt;let _=ScreenToClient(self.hwnd,&mut local);let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;let x=local.x as f64/scale;let y=local.y as f64/scale;
         let hit=self.hit(x,y);let inside=hit>=0;
+        if inside{if let Some(t)=self.manual_until.as_mut(){*t=Instant::now()+Duration::from_secs(6);}}
         if !self.banner.visible()&&inside&&!self.cursor_inside{self.leave_at=None;if self.flag("HoverExpand",false){self.retarget(true)}}
         if !inside&&self.cursor_inside&&!self.held{self.leave_at=Some(Instant::now());}
         if self.swipe.is_none()&&!self.banner.visible()&&self.leave_at.is_some_and(|t|t.elapsed()>=Duration::from_millis(1200)){self.leave_at=None;if !self.held{self.retarget(false)}}
@@ -297,8 +493,9 @@ impl App {
         if self.banner.visible(){
             let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);
             self.banner.tick(r,rad,self.start.elapsed().as_secs_f64(),inside,self.flag("Animation",true));self.dirty=true;
-            if !self.banner.visible(){self.banner_todo=None;self.last_poll=Instant::now()-Duration::from_secs(1);if !self.display_wanted&&!self.demo&&self.selected=="music"&&self.components.len()==1{self.fade(0.);}}
+            if !self.banner.visible(){self.banner_todo=None;self.last_poll=Instant::now()-Duration::from_secs(1);}
         }
+        if self.osd_banner.visible(){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.osd_banner.tick(r,rad,self.start.elapsed().as_secs_f64(),false,self.flag("Animation",true));self.dirty=true;}
         // Collapsed capsule: retarget only when an input actually changed, then
         // advance the spring. Measurement is cached inside the renderer.
         let compact_key=format!("{}|{}|{}|{}|{}",self.lyric,self.compact_secondary,self.settings["FontSize"],self.settings["CompactWidth"],self.flag("AutoCompactWidth",false));
@@ -310,19 +507,53 @@ impl App {
             self.last_schedule=Instant::now();self.todo_now=todos::Now::local();
             match self.todos.poll(&self.todo_now){Ok(due)=>{for t in due{self.enqueue_todo(&t);}},Err(e)=>{self.error=Some(e);}}
         }
+        if !self.demo{self.poll_app_rules();}
         // One banner at a time; the next one starts once the previous is gone.
-        if !self.banner.visible()&&!self.user_hidden&&!self.flag("PauseNotifications",false){if let Some(q)=self.queue.pop_front(){self.show_notice(q.notice,false,q.todo);}}
+        if !self.banner.visible()&&!self.user_hidden&&!self.flag("PauseNotifications",false){if let Some(q)=self.queue.pop_front(){self.show_notice(q.notice,false,q.todo,q.chime);}}
         if let Some((start,bounds))=self.dragging{if left{let dx=pt.x-start.x;let dy=pt.y-start.y;for hwnd in [self.visual_hwnd,self.hwnd]{SetWindowPos(hwnd,None,bounds.left+dx,bounds.top+dy,0,0,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOSIZE)?;}}else{self.dragging=None;let _=ReleaseCapture();self.remember_position();}}
         self.sync_input_region()?;if self.dirty{if self.opacity>0.001 || self.fade_from>0.001 {self.draw()?;if self.opacity<=0.001{self.fade_from=0.;}}else{self.dirty=false;}}Ok(())
     }
     unsafe fn request(&mut self,r:Value)->Value {
         if r["version"]!=1{return json!({"success":false,"message":"请求版本无效"})}let command=r["command"].as_str().unwrap_or("");
         match command {
-            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"settings":self.settings,"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"compactWidth":self.compact_width.value,"compactHeight":self.compact_height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components})},
+            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"settings":self.settings,"softwareUpdate":self.updates.state,"dataDirectory":self.data.to_string_lossy(),"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"osdVisible":self.osd_banner.visible(),"systemState":self.osd.status(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"compactWidth":self.compact_width.value,"compactHeight":self.compact_height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components,"notificationHistory":self.history.list(),"historyError":self.history.error,"quickHotkey":self.settings["QuickReminderHotkey"],"pendingAction":self.pending_action,"sessionLocked":self.session_locked,"focusResume":self.focus_resume.as_ref().map(|r|json!({"generation":r.generation,"ids":r.ids,"prompted":r.prompted})),"templates":self.templates.list(),"workflowTemplateError":self.templates.error,"appRules":self.rules.list(&self.todo_now.date),"appRuleError":self.rules.error,"foreground":{"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable},"lockWatch":true})},
+            "updateTestPrepare" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{self.updates.nonce="integration-test-nonce".into();self.updates.job="integration-test-job".into();self.updates.action.clear();self.updates.release=json!({"newer":true,"version":"2.0.1"});self.updates.state=json!({"phase":"downloading","seq":0});self.refresh_components();json!({"success":true,"nonce":self.updates.nonce,"jobId":self.updates.job})},
+            "showUpdate"=>{self.refresh_components();if self.updates.selectable(){self.select_component("update",1);self.held=true;self.retarget(true);self.user_hidden=false;self.fade(1.);json!({"success":true})}else{json!({"success":false,"message":"当前没有更新任务，请先检查更新。"})}},
+            "openInstaller"=>{match std::process::Command::new(self.base.join("DotIsle.Setup.exe")).arg("--migrate-data").arg(&self.data).spawn(){Ok(_)=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e.to_string()})}},
+            "checkUpdate"=>{self.updates.check(true);json!({"success":true,"message":"正在检查双源更新…"})},
+            "updateDownload"|"installUpdate"=>{let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());match self.updates.begin(&self.base,&self.data,&pipe){Ok(())=>{if self.selected!="update"{self.update_return=self.selected.clone();}self.refresh_components();self.select_component("update",1);self.held=true;self.retarget(true);self.user_hidden=false;self.fade(1.);json!({"success":true,"message":"开始下载；校验后等待你确认安装。"})},Err(e)=>json!({"success":false,"message":e})}},
+            "updateApply"=>{if self.updates.phase()!="ready"{json!({"success":false,"message":"更新尚未就绪"})}else{self.updates.action="apply".into();json!({"success":true})}},
+            "updateCancel"=>{if matches!(self.updates.phase(),"applying"|"restarting"){json!({"success":false,"message":"安装期间不可取消"})}else{self.updates.action="cancel".into();json!({"success":true})}},
+            "updateProgress"=>{match self.updates.progress(&r["value"]){Ok(reply)=>{if matches!(self.updates.phase(),"cancelled"|"failed"|"completed"){self.held=false;self.update_until=Some(Instant::now()+Duration::from_secs(5));}self.dirty=true;reply},Err(e)=>json!({"success":false,"message":e})}},
             "deviceSoundPreview"=>{match sound::play_device(&self.settings,true){Ok(())=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e})}},
-            "devicePreview"=>{let phone=r["value"]["kind"]=="phone";let connected=r["value"]["connected"].as_bool().unwrap_or(true);let e=devices::Event::new("preview".into(),if phone{2}else{1},connected,if phone{"手机 · 示例设备".into()}else{"U 盘 · 示例设备".into()});self.show_notice(e.notice(),true,Some("device:preview".into()));json!({"success":true})},
-            "timerCreate"=>{match self.timers.create(&r["value"]){Ok(id)=>{self.refresh_components();self.select_component(&format!("timer:{id}"),1);self.user_hidden=false;self.hide_at=None;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true,"id":id})},Err(e)=>json!({"success":false,"message":e})}},
-            "timerAction"=>{let id=r["value"]["id"].as_str().unwrap_or("");let action=r["value"]["action"].as_str().unwrap_or("");match self.timers.action(id,action){Ok(())=>{self.refresh_components();self.compact_key.clear();json!({"success":true})},Err(e)=>json!({"success":false,"message":e})}},
+            "devicePreview"=>{let kind=match r["value"]["kind"].as_str().unwrap_or("usb"){"phone"=>devices::Kind::Phone,"volume"=>devices::Kind::Volume,"headphones"=>devices::Kind::Headphones,"speaker"=>devices::Kind::Speaker,"gamepad"=>devices::Kind::Gamepad,"mouse"=>devices::Kind::Mouse,"keyboard"=>devices::Kind::Keyboard,"audio"=>devices::Kind::Audio,_=>devices::Kind::Usb};let connected=r["value"]["connected"].as_bool().unwrap_or(true);let label=match kind{devices::Kind::Phone=>"手机 · 示例设备",devices::Kind::Volume=>"移动磁盘 · 示例设备",devices::Kind::Headphones=>"耳机 · 示例设备",devices::Kind::Speaker=>"音响 · 示例设备",devices::Kind::Gamepad=>"手柄 · 示例设备",devices::Kind::Mouse=>"鼠标 · 示例设备",devices::Kind::Keyboard=>"键盘 · 示例设备",devices::Kind::Audio=>"音频设备 · 示例设备",devices::Kind::Usb=>"U 盘 · 示例设备"};let e=devices::Event::new("preview".into(),kind,connected,label.into());self.show_notice(e.notice(),true,Some("device:preview".into()),true);json!({"success":true})},
+            "osdPreview"=>{let kind=match r["value"]["kind"].as_str().unwrap_or("caps"){"num"=>osd::Kind::Num,"mic"=>osd::Kind::Mic,"touchpad"=>osd::Kind::Touchpad,_=>osd::Kind::Caps};let on=r["value"]["on"].as_bool().unwrap_or(true);self.show_osd(osd::Hint{kind,on},true);json!({"success":true})},
+            "timerCreate"=>{let mut value=r["value"].clone();if value["name"].as_str().is_none_or(|s|s.trim().is_empty()){if let Some(title)=value["todoId"].as_str().and_then(|id|self.todos.items.iter().find(|t|t.id==id)).map(|t|t.title.clone()){value["name"]=json!(title);}}match self.timers.create(&value){Ok(id)=>{self.refresh_components();self.select_component(&format!("timer:{id}"),1);self.user_hidden=false;self.hide_at=None;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true,"id":id})},Err(e)=>json!({"success":false,"message":e})}},
+            "timerAction"=>{let id=r["value"]["id"].as_str().unwrap_or("");let action=r["value"]["action"].as_str().unwrap_or("");match self.timers.act(id,action,r["value"]["revision"].as_u64()){Ok(())=>{self.refresh_components();self.compact_key.clear();json!({"success":true,"timers":self.timers.list()})},Err(e)=>json!({"success":false,"message":e})}},
+            "quickReminderPreview"=>{let text=r["value"]["text"].as_str().unwrap_or("").to_owned();self.quick_preview(&text)},
+            "quickReminderCommit"=>{let token=r["value"]["previewToken"].as_str().unwrap_or("");let request=r["value"]["clientRequestId"].as_str().unwrap_or("");self.quick_commit(token,request)},
+            "pendingActionSeen"=>{self.pending_action=None;json!({"success":true})},
+            "focusResume"=>{
+                let ids=r["value"]["ids"].as_array().map(|a|a.iter().filter_map(|v|v.as_str().map(str::to_owned)).collect::<Vec<_>>()).unwrap_or_default();let generation=r["value"]["generation"].as_u64().unwrap_or(0);
+                if !self.flag("FocusPauseOnLock",false){return json!({"success":false,"message":"锁屏暂停专注已关闭"})}
+                match self.timers.resume_focus(&ids,generation){
+                    Ok(resumed)=>{if let Some(f)=&mut self.focus_resume{f.ids.retain(|id|!resumed.contains(id));}if self.focus_resume.as_ref().is_some_and(|f|f.ids.is_empty()){self.focus_resume=None;}self.refresh_components();json!({"success":true,"timers":self.timers.list(),"resumed":resumed})},
+                    Err(e)=>json!({"success":false,"message":e})
+                }
+            },
+            "focusResumeDismiss"=>{self.focus_resume=None;json!({"success":true})},
+            "workflowTemplateSave"=>{match self.templates.save(&r["value"]){Ok(id)=>json!({"success":true,"id":id,"templates":self.templates.list()}),Err(e)=>json!({"success":false,"message":e})}},
+            "workflowTemplateDelete"=>{match self.templates.delete(r["value"].as_str().unwrap_or("")){Ok(())=>json!({"success":true,"templates":self.templates.list()}),Err(e)=>json!({"success":false,"message":e})}},
+            "appRuleSave"=>{
+                self.todo_now=todos::Now::local();let today=self.todo_now.date.clone();
+                match self.rules.save(&r["value"],&today,self.foreground.path.as_deref(),self.foreground.segment){Ok(id)=>json!({"success":true,"id":id,"rules":self.rules.list(&today)}),Err(e)=>json!({"success":false,"message":e})}
+            },
+            "appRuleAction"=>{
+                self.todo_now=todos::Now::local();let today=self.todo_now.date.clone();let id=r["value"]["id"].as_str().unwrap_or("").to_owned();let action=r["value"]["action"].as_str().unwrap_or("").to_owned();
+                match self.rules.action(&id,&action,r["value"]["revision"].as_u64(),&today){Ok(())=>{if action=="delete"{let key=format!("rule:{id}");self.queue.retain(|e|e.todo.as_deref()!=Some(key.as_str()));}json!({"success":true,"rules":self.rules.list(&today)})},Err(e)=>json!({"success":false,"message":e})}
+            },
+            "appRuleClearUsage"=>{match self.rules.clear_usage(){Ok(())=>json!({"success":true,"rules":self.rules.list(&self.todo_now.date)}),Err(e)=>json!({"success":false,"message":e})}},
+            "foregroundInfo"=>json!({"success":true,"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable,"segment":self.foreground.segment}),
             "islandSelect"=>{self.refresh_components();let id=r["value"].as_str().unwrap_or("");if !self.components.iter().any(|c|c==id){json!({"success":false,"message":"组件不存在"})}else{self.select_component(id,1);self.user_hidden=false;self.fade(1.);json!({"success":true})}},
             "islandCycle"=>{self.cycle_component(if r["value"]==json!(-1){-1}else{1});json!({"success":true})},
             "todos"=>json!({"success":true,"todos":self.todos.list(&self.todo_now),"today":self.todo_now.date,"message":self.todos.error}),
@@ -332,21 +563,44 @@ impl App {
                 let id=r["value"]["id"].as_str().unwrap_or("").to_owned();let done=r["value"]["completed"].as_bool().unwrap_or(true);
                 self.todo_now=todos::Now::local();match self.todos.complete(&id,done,&self.todo_now){Ok(())=>{if done{self.cancel_todo(&id);}json!({"success":true,"todos":self.todos.list(&self.todo_now),"message":if done{"已完成"}else{"已恢复待办"}})},Err(e)=>json!({"success":false,"message":e})}
             },
+            "todoSnooze"=>{
+                if self.demo{return json!({"success":true})}
+                let id=r["value"]["id"].as_str().unwrap_or("").to_owned();let minutes=r["value"]["minutes"].as_u64().unwrap_or(0)as u32;
+                self.todo_now=todos::Now::local();
+                match self.todos.snooze(&id,minutes,&self.todo_now){Ok(())=>{self.cancel_todo(&id);json!({"success":true,"todos":self.todos.list(&self.todo_now),"message":if minutes>=60{"已推迟 1 小时后提醒"}else{"已推迟 10 分钟后提醒"}})},Err(e)=>json!({"success":false,"message":e})}
+            },
             "todoDelete"=>{
                 if self.demo{return json!({"success":true})}
                 let id=r["value"]["id"].as_str().unwrap_or("").to_owned();
                 match self.todos.delete(&id){Ok(())=>{self.cancel_todo(&id);json!({"success":true,"todos":self.todos.list(&self.todo_now),"message":"已删除"})},Err(e)=>json!({"success":false,"message":e})}
             },
+            "historyClear"=>{
+                let kind=r["value"]["kind"].as_str().filter(|k|!k.is_empty());
+                if let Some(kind)=kind{if !history::kinds().contains(&kind){return json!({"success":false,"message":"未知的通知分类"})}}
+                self.history.clear(kind);json!({"success":true,"history":self.history.list(),"message":"已清除通知历史"})
+            },
+            "historyOpen"=>{
+                let id=r["value"].as_str().unwrap_or("");
+                match self.history.items.iter().find(|e|e.id==id){
+                    Some(event)if event.kind=="notice"&&!event.app_id.is_empty()=>match activation::open(&event.app_id){Ok(())=>json!({"success":true,"message":"已打开来源应用"}),Err(e)=>json!({"success":false,"message":e})},
+                    Some(_)=>json!({"success":false,"message":"该记录没有可打开的来源应用"}),
+                    None=>json!({"success":false,"message":"通知记录不存在"})
+                }
+            },
             "pageSeen"=>{self.pending_page=None;json!({"success":true})},
+            "collectLogs"=>{match diagnostics::collect(&self.data,self.error.as_deref(),env!("CARGO_PKG_VERSION")){
+                Ok(path)=>{if std::env::var_os("LYRICISLAND_TEST_PIPE").is_none(){diagnostics::reveal(&path);}json!({"success":true,"message":format!("诊断日志已生成：{}（已在资源管理器中选中）",path.file_name().map(|n|n.to_string_lossy().to_string()).unwrap_or_default()),"path":path.to_string_lossy()})},
+                Err(e)=>json!({"success":false,"message":format!("生成诊断日志失败：{e}")})
+            }},
             "soundPreview"=>{
                 let todo=r["value"]["todo"].as_bool().unwrap_or(false);
                 match sound::play(&self.settings,todo,true){Ok(())=>json!({"success":true,"message":"已播放试听"}),Err(e)=>json!({"success":false,"message":e})}
             },
             "expand"=>{self.user_hidden=false;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true})},
-            "toggleVisibility"=>{self.user_hidden=!self.user_hidden;self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
-            "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true,None);json!({"success":true,"message":"通知横幅预览"})},
+            "toggleVisibility"=>{self.user_hidden=!self.user_hidden;if !self.user_hidden{self.manual_until=Some(Instant::now()+Duration::from_secs(6));}self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
+            "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true,None,true);json!({"success":true,"message":"通知横幅预览"})},
             "toggleNotifications"=>{
-                if !self.flag("NotificationsEnabled",false){return self.request(json!({"version":1,"command":"update","value":{"key":"NotificationsEnabled","value":true}}))}
+                if !self.flag("NotificationsEnabled",true){return self.request(json!({"version":1,"command":"update","value":{"key":"NotificationsEnabled","value":true}}))}
                 let paused=!self.flag("PauseNotifications",false);
                 self.request(json!({"version":1,"command":"update","value":{"key":"PauseNotifications","value":paused}}))
             },
@@ -365,11 +619,16 @@ impl App {
             "update"|"resetAppearance"=>{
                 let old=self.settings.clone();let next=if command=="resetAppearance"{let mut s=old.clone();s["CompactWidth"]=json!(260.);s["FontSize"]=json!(12.5);s["Floating"]=json!(false);Ok(s)}else{config::validate_setting(json!({"key":r["value"]["key"],"value":r["value"]["value"],"settings":old}))};
                 let next=match next{Ok(v)=>v,Err(e)=>return json!({"success":false,"message":e})};self.settings=next;
-                let saved=if !self.demo&&r["value"]["key"]=="AutoStart"{shell::set_startup(self.flag("AutoStart",false),&self.base.join("LyricIsland.exe").to_string_lossy(),&self.data.join("settings.json"),&self.settings,None)}else{self.save()};
+                let saved=if !self.demo&&r["value"]["key"]=="AutoStart"{self.apply_startup()}else{self.save()};
                 if let Err(e)=saved{self.settings=old;return json!({"success":false,"message":e})}
+                if r["value"]["key"]=="NotificationHistoryDays"{self.history.prune(self.settings["NotificationHistoryDays"].as_u64().unwrap_or(7).clamp(1,30)as u32,std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()as i64);}
                 if let Some(listener)=&self.notification_listener{listener.configure(notifications::Policy::from_settings(&self.settings));}
-                if !self.notification_preview&&self.banner.visible()&&(self.flag("PauseNotifications",false)||(self.banner_todo.is_none()&&(!self.flag("NotificationsEnabled",false)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))))){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
+                if r["value"]["key"]=="QuickReminderHotkey"&&!self.demo{if let Err(e)=unsafe{self.register_hotkey()}{self.settings=old.clone();let _=self.save();let _=unsafe{self.register_hotkey()};return json!({"success":false,"message":e})}}
+                if r["value"]["key"]=="FocusPauseOnLock"&&!self.flag("FocusPauseOnLock",false){self.focus_resume=None;if let Err(e)=self.timers.clear_lock_pauses(){self.error=Some(e);}}
+                if !self.notification_preview&&self.banner.visible()&&(self.flag("PauseNotifications",false)||(self.banner_todo.is_none()&&(!self.flag("NotificationsEnabled",true)||self.banner.notice.as_ref().is_some_and(|n|!notifications::Policy::from_settings(&self.settings).permits(&n.app_id,&n.app_name))))){let (r,rad)=self.layout.shape(self.frame.card_reveal,self.options().radius);self.banner.dismiss(r,rad,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));}
                 if let Some(b)=&self.backend{b.apply(self.settings.clone());}if let Err(e)=self.position(){self.error=Some(e.to_string());return json!({"success":false,"message":e.to_string()})}
+                if r["value"]["key"]=="MusicExpandedLayout"{self.start_music_shift();}
+                if ["SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&r["value"]["key"].as_str().unwrap_or("")){self.apply_osd();}
                 self.transition=None;self.frame=if self.expanded{Frame::expanded()}else{Frame::hidden(self.options())};json!({"success":true,"message":"已保存"})
             },_=>json!({"success":false,"message":"不支持的操作"})
         }
@@ -381,7 +640,10 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
     if msg==WM_DESTROY{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);PostQuitMessage(0);return LRESULT(0)} if msg==WM_NCDESTROY{SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);return DefWindowProcW(hwnd,msg,wparam,lparam)} let ptr=GetWindowLongPtrW(hwnd,GWLP_USERDATA)as *const RefCell<App>;
     if !ptr.is_null(){if let Ok(mut app)=(*ptr).try_borrow_mut(){let a=&mut *app;match msg{
         WM_NCHITTEST=>{let mut pt=POINT{x:(lparam.0 as u16 as i16)as i32,y:((lparam.0>>16)as u16 as i16)as i32};let _=ScreenToClient(hwnd,&mut pt);let s=GetDpiForWindow(hwnd).max(96)as f64/96.;return LRESULT(if a.hit(pt.x as f64/s,pt.y as f64/s)<0{HTTRANSPARENT as isize}else{HTCLIENT as isize})},
-        WM_DEVICECHANGE=>{if a.flag("DeviceRemindersEnabled",false){a.devices.message(wparam.0,lparam.0);}return LRESULT(0)},
+        WM_DEVICECHANGE=>{if a.flag("DeviceRemindersEnabled",true){a.devices.message(wparam.0,lparam.0);}return LRESULT(0)},
+        WM_INPUT_DEVICE_CHANGE=>{if a.flag("DeviceRemindersEnabled",true){a.devices.input_change(wparam.0 as u32,lparam.0);}return LRESULT(0)},
+        osd::WM_OSD=>{a.pending_osd|=wparam.0 as u32;let _=SetTimer(Some(hwnd),osd::OSD_TIMER,45,None);return LRESULT(0)},
+        WM_TIMER=>{if wparam.0==osd::OSD_TIMER{let _=KillTimer(Some(hwnd),osd::OSD_TIMER);a.flush_osd();return LRESULT(0)}} ,
         WM_MOUSEACTIVATE=>return LRESULT(MA_NOACTIVATE as isize),WM_ERASEBKGND=>return LRESULT(1),
         WM_PAINT=>{let mut p=PAINTSTRUCT::default();let _=BeginPaint(hwnd,&mut p);let _=EndPaint(hwnd,&p);a.dirty=true;return LRESULT(0)},
         WM_LBUTTONDOWN=>{let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;a.pressed=a.hit(x,y);if a.can_swipe(a.pressed){a.swipe=Some(activities::Swipe::new(x,y));}a.dirty=true;if a.pressed==2{a.activate(2);a.pressed=0;}else{SetCapture(hwnd);if a.pressed==10&&a.snapshot["canSeek"]==true{a.seeking=true;a.update_seek(x);}}return LRESULT(0)},
@@ -390,12 +652,14 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,wparam:WPARAM,lparam:LPARAM)
         WM_LBUTTONUP=>{let _=ReleaseCapture();let s=GetDpiForWindow(hwnd).max(96)as f64/96.;let x=(lparam.0 as u16 as i16)as f64/s;let y=((lparam.0>>16)as u16 as i16)as f64/s;let hit=a.hit(x,y);if let Some(swipe)=a.swipe.take(){if a.finish_swipe(swipe){return LRESULT(0)}}if a.seeking{a.seeking=false;a.command("seek",a.seek_fraction*a.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.));}else if hit==a.pressed&&hit>=0{a.activate(hit)}a.pressed=0;a.dirty=true;return LRESULT(0)},
         WM_CAPTURECHANGED|WM_CANCELMODE=>{if let Some(swipe)=a.swipe.take(){if swipe.active{a.slide.set(swipe.dx);a.slide_outgoing=false;a.switching=a.flag("Animation",true);}}a.drag_target.clear();a.drag_panel=None;a.seeking=false;a.pressed=0;a.dirty=true;return LRESULT(0)},
         WM_DPICHANGED|WM_DISPLAYCHANGE=>{if let Err(e)=a.position(){a.error=Some(e.to_string());}return LRESULT(0)},
+        WM_WTSSESSION_CHANGE=>{let mut session=0u32;let _=ProcessIdToSessionId(GetCurrentProcessId(),&mut session);if lparam.0 as u32==session{if wparam.0 as u32==WTS_SESSION_LOCK{a.pending_osd=0;if a.osd_banner.visible(){let now=a.start.elapsed().as_secs_f64();let(r,rad)=a.layout.shape(a.frame.card_reveal,a.options().radius);a.osd_banner.dismiss(r,rad,now,false);}a.on_lock();}else if wparam.0 as u32==WTS_SESSION_UNLOCK{a.osd.resync();a.on_unlock();}}return LRESULT(0)},
+        WM_HOTKEY=>{if wparam.0==1{a.pending_action=Some("quickReminder".into());a.show_settings_page("overview");}return LRESULT(0)},
         WM_SETTINGS=>{let requests=REQUESTS.get_or_init(Default::default).lock().map(|mut q|std::mem::take(&mut *q)).unwrap_or_default();for (r,tx) in requests{let response=a.request(r);let _=tx.send(response);}return LRESULT(0)},
-        WM_TRAY=>{if lparam.0 as u32==WM_RBUTTONUP{let mut p=POINT::default();let _=GetCursorPos(&mut p);let menu=CreatePopupMenu();if let Ok(menu)=menu{for (id,text) in [(1,w!("展开灵动岛")),(2,w!("显示 / 隐藏灵动岛")),(3,w!("设置")),(5,w!("重启点屿")),(4,w!("退出"))]{let _=AppendMenuW(menu,MF_STRING,id,text);}let active=a.flag("NotificationsEnabled",false)&&!a.flag("PauseNotifications",false);
-            let label=if !a.flag("NotificationsEnabled",false){w!("开启通知")}else if a.flag("PauseNotifications",false){w!("恢复通知（已暂停）")}else{w!("暂停通知（已开启）")};
+        WM_TRAY=>{if lparam.0 as u32==WM_RBUTTONUP{let mut p=POINT::default();let _=GetCursorPos(&mut p);let menu=CreatePopupMenu();if let Ok(menu)=menu{for (id,text) in [(1,w!("展开灵动岛")),(2,w!("显示 / 隐藏灵动岛")),(3,w!("设置")),(5,w!("重启点屿")),(4,w!("退出"))]{let _=AppendMenuW(menu,MF_STRING,id,text);}let active=a.flag("NotificationsEnabled",true)&&!a.flag("PauseNotifications",false);
+            let label=if !a.flag("NotificationsEnabled",true){w!("开启通知")}else if a.flag("PauseNotifications",false){w!("恢复通知（已暂停）")}else{w!("暂停通知（已开启）")};
             let flags=if active{MF_STRING|MF_CHECKED}else{MF_STRING|MF_UNCHECKED};let _=InsertMenuW(menu,3,flags|MF_BYPOSITION,6,label);
             let _=SetForegroundWindow(hwnd);let selected=TrackPopupMenuEx(menu,(TPM_RETURNCMD|TPM_RIGHTBUTTON).0,p.x,p.y,hwnd,None).0;let _=DestroyMenu(menu);let command=match selected{1=>"expand",2=>"toggleVisibility",3=>"settings",5=>"restart",6=>"toggleNotifications",4=>"exit",_=>""};if !command.is_empty(){a.request(json!({"version":1,"command":command}));}}}else if lparam.0 as u32==WM_LBUTTONDBLCLK{a.request(json!({"version":1,"command":"expand"}));}return LRESULT(0)},
-        WM_CLOSE=>{let _=a.timers.persist();let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
+        WM_CLOSE=>{a.osd.uninstall();let _=a.timers.persist();let _=a.rules.persist_usage();let _=WTSUnRegisterSessionNotification(hwnd);let _=UnregisterHotKey(Some(hwnd),1);let _=DestroyWindow(hwnd);return LRESULT(0)},WM_DESTROY=>{let mut icon=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:hwnd,uID:1,..Default::default()};let _=Shell_NotifyIconW(NIM_DELETE,&mut icon);if let Some(b)=&a.backend{b.close();}PostQuitMessage(0);return LRESULT(0)},_=>{}
     }}}DefWindowProcW(hwnd,msg,wparam,lparam)
 }
 fn font_base()->PathBuf{let exe=std::env::current_exe().unwrap();let base=exe.parent().unwrap();if base.join("Assets/Fonts/NotoSansSC.ttf").exists(){return base.into()}Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")}
@@ -403,8 +667,11 @@ unsafe fn create(a:&mut App,owner:*const RefCell<App>,hidden:bool)->Result<()> {
     shell::ensure_per_monitor_dpi_awareness();CoInitializeEx(None,COINIT_APARTMENTTHREADED).ok()?;
     a.transparent=windows::UI::ViewManagement::UISettings::new().and_then(|s|s.AdvancedEffectsEnabled()).unwrap_or(false);let instance=GetModuleHandleW(None)?;let class=w!("LyricIsland.Native.DirectComposition.v1");let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance.into(),lpszClassName:class,hCursor:LoadCursorW(None,IDC_ARROW)?,..Default::default()};RegisterClassW(&wc);
     let visual_class=w!("LyricIsland.Native.Visual.v1");let visual_wc=WNDCLASSW{lpfnWndProc:Some(visual_wndproc),hInstance:instance.into(),lpszClassName:visual_class,..Default::default()};RegisterClassW(&visual_wc);
-    let visual=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOREDIRECTIONBITMAP,visual_class,w!("DotIsle · Visual"),WS_POPUP,0,0,388,248,None,None,Some(instance.into()),None)?;a.visual_hwnd=visual;SetLayeredWindowAttributes(visual,COLORREF(0),255,LWA_ALPHA)?;
-    let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_NOREDIRECTIONBITMAP,class,w!("DotIsle · Native"),WS_POPUP,0,0,388,248,Some(visual),None,Some(instance.into()),Some(owner as _))?;a.hwnd=hwnd;a.devices.register(hwnd);let _=WINDOW.set(hwnd.0 as isize);a.position()?;
+    let visual=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOREDIRECTIONBITMAP,visual_class,w!("DotIsle · Visual"),WS_POPUP,0,0,388,264,None,None,Some(instance.into()),None)?;a.visual_hwnd=visual;SetLayeredWindowAttributes(visual,COLORREF(0),255,LWA_ALPHA)?;
+    let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_NOREDIRECTIONBITMAP,class,w!("DotIsle · Native"),WS_POPUP,0,0,388,264,Some(visual),None,Some(instance.into()),Some(owner as _))?;a.hwnd=hwnd;a.devices.register(hwnd);a.apply_osd();let _=WINDOW.set(hwnd.0 as isize);let _=WTSRegisterSessionNotification(hwnd,NOTIFY_FOR_THIS_SESSION);if !a.demo{if let Err(e)=a.register_hotkey(){a.error=Some(e);}}a.rules.baseline_now(a.foreground.path.clone().as_deref(),a.foreground.segment);a.position()?;
+    // Repair a stale Run entry: the launcher may have moved or a previous version registered
+    // its extracted runtime path, which dies on the next update.
+    if !a.demo&&a.flag("AutoStart",false){let _=a.apply_startup();}
     if !hidden{let _=ShowWindow(visual,SW_SHOWNOACTIVATE);let _=ShowWindow(hwnd,SW_SHOWNOACTIVATE);}
     Ok(())
 }
@@ -469,8 +736,11 @@ unsafe fn icon_preview(a:&mut App,directory:&Path)->std::result::Result<(),Box<d
         let mut scene=a.scene();scene.layout_scale=scale;scene.lyric_age_ms=1000.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("icons-{dpi:.0}.png")))?;std::fs::write(directory.join(format!("icons-{dpi:.0}.json")),serde_json::to_vec(&renderer.icon_bounds()?)?)?;
     }Ok(())
 }
+// An explicit portable marker survives OTA overlays and suppresses installer migration.
+fn legacy_install_transition(base:&Path)->bool{!base.join("Portable.json").is_file()&&!base.join("Installed.json").exists()}
 fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let args=std::env::args().collect::<Vec<_>>();
+    if args.len()==1&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none(){let base=font_base();if legacy_install_transition(&base){let pointer=PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("DotIsle/install.json");let marker=io::read_settings(&pointer);if let Some(target)=marker["target"].as_str(){let target=PathBuf::from(target);if target!=base&&target.join("Installed.json").is_file()&&target.join("LyricIsland.exe").is_file(){std::process::Command::new(target.join("LyricIsland.exe")).spawn()?;return Ok(())}}}}
     if let Some(i)=args.iter().position(|s|s=="--restart-after"){
         let pid=args.get(i+1).and_then(|s|s.parse::<u32>().ok()).ok_or("invalid restart PID")?;
         if let Ok(parent)=OpenProcess(PROCESS_ACCESS_RIGHTS(0x00100000),false,pid){let result=WaitForSingleObject(parent,15000);let _=CloseHandle(parent);if result!=WAIT_OBJECT_0{return Err("等待旧实例退出超时".into())}}
@@ -495,7 +765,7 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
-    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else{base.join("Data")};
+    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=args.get(1).is_some_and(|s|s=="--integration-preview")||tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else if base.join("Installed.json").exists(){let marker=io::read_settings(&base.join("Installed.json"));marker["dataDirectory"].as_str().map(PathBuf::from).unwrap_or_else(||io::data_directory())}else{base.join("Data")};
     let owner=Box::new(RefCell::new(App::new(base,data,demo)));let owner_ptr=&*owner as *const RefCell<App>;let mut app=owner.borrow_mut();create(&mut app,owner_ptr,preview_mode)?;
     if cover_mode{
         let dir=Path::new(args.get(2).ok_or("missing directory")?);std::fs::create_dir_all(dir)?;
@@ -506,6 +776,16 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
         }
         let _=DestroyWindow(app.hwnd);return Ok(())
     }
+    if args.get(1).is_some_and(|s|s=="--integration-preview"){
+        let directory=Path::new(args.get(2).ok_or("missing directory")?);std::fs::create_dir_all(directory)?;
+        app.opacity=1.;app.frame=Frame::expanded();app.lyric="最後の最後に答え合わせをしよう".into();
+        let base=app.base.clone();app.renderer=None;
+        for dpi in [96.,144.,192.]{let scale=dpi/96.;let mut renderer=Renderer::new(app.visual_hwnd,(app.layout.host.w*scale)as u32,(app.layout.host.h*scale)as u32,dpi as f32,&base.join("Assets/Fonts/NotoSansSC.ttf"))?;renderer.set_cover(Some(&std::fs::read(base.join("Assets/LyricIsland-v2.png"))?))?;
+            for (name,mix) in [("side",0.),("separated",1.)]{app.music_mix=mix;app.layout.card.h=264.+20.*mix;let mut scene=app.scene();scene.music_layout=if mix>0.5{layout::MusicLayout::Separated}else{layout::MusicLayout::SideBySide};scene.layout_scale=scale;scene.lyric_age_ms=1000.;scene.title="ハウル";scene.artist="LiSA";scene.secondary="在最后的最后来核对答案吧";scene.highlight=0.55;scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("music-{name}-{dpi:.0}.png")))?;}
+            app.layout.card.h=264.;app.updates.state=json!({"phase":"downloading","version":"演示","percent":43,"receivedBytes":4300000,"totalBytes":10000000});let panel=app.updates.panel();let mut scene=app.scene();scene.layout_scale=scale;scene.panel=Some(&panel);scene.component_count=1;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("update-{dpi:.0}.png")))?;
+            for kind in [devices::Kind::Usb,devices::Kind::Volume,devices::Kind::Phone,devices::Kind::Headphones,devices::Kind::Speaker,devices::Kind::Gamepad,devices::Kind::Mouse,devices::Kind::Keyboard]{let notice=devices::Event::new("preview".into(),kind,true,format!("{} · 示例设备",kind.label())).notice();let mut scene=app.scene();scene.layout_scale=scale;scene.notification=Some(&notice);scene.notification_rect=Rect::new(24.,24.,440.,110.);scene.notification_radius=26.;scene.notification_mix=1.;renderer.render(&scene,false)?;renderer.snapshot(&directory.join(format!("device-{}-{dpi:.0}.png",kind.key())))?;}
+        }let _=DestroyWindow(app.hwnd);return Ok(())
+    }
     if icon_mode{icon_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if font_mode{let report=app.renderer.as_mut().unwrap().verify_font()?;std::fs::write(args.get(2).ok_or("missing font report path")?,serde_json::to_vec_pretty(&report)?)?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if tool_mode{tools_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
@@ -514,6 +794,10 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     let test_pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_default();
     let mutex_name=if test_pipe.starts_with("LyricIsland.Settings.test."){format!("Local.LyricIsland.Native.Test.{test_pipe}")}else{"Local.LyricIsland.Native.Direct2D.v1".into()};let mutex_name=mutex_name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let mutex=CreateMutexW(None,true,PCWSTR(mutex_name.as_ptr()))?;if GetLastError()==ERROR_ALREADY_EXISTS{let _=CloseHandle(mutex);return Ok(())}
+    if !app.demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&legacy_install_transition(&app.base)&&app.base.join("OtaInstall.json").exists()&&app.base.join("DotIsle.Setup.exe").exists(){
+        let offered=app.data.join(format!("install-offer-{}.txt",env!("CARGO_PKG_VERSION")));
+        if !offered.exists(){let _=std::fs::create_dir_all(&app.data);if std::process::Command::new(app.base.join("DotIsle.Setup.exe")).arg("--migrate-data").arg(&app.data).spawn().is_ok(){let _=std::fs::write(offered,b"offered");}}
+    }
     tray(&app)?;let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());app._server=Some(Server::new(&pipe,settings_callback));
     if args.iter().any(|s|s=="--expanded"){app.held=true;app.retarget(true)}
     let until=args.iter().position(|s|s=="--run-ms").and_then(|i|args.get(i+1)).and_then(|s|s.parse::<u64>().ok()).map(|ms|Instant::now()+Duration::from_millis(ms));
@@ -532,7 +816,7 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
 #[cfg(test)]mod interaction_tests{
     use super::*;
     fn app()->App{App::new(PathBuf::new(),PathBuf::new(),true)}
-    #[test]fn swipes_work_on_both_views_but_leave_controls_alone(){let mut a=app();a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();assert!(!a.can_swipe(0));a.settings["SwipeActivities"]=json!(true);for expanded in [false,true]{a.expanded=expanded;for hit in [0,1,13,40,41,42]{assert!(a.can_swipe(hit));}for hit in [-1,2,3,4,5,6,7,8,10,30,31]{assert!(!a.can_swipe(hit));}}}
+    #[test]fn swipes_work_on_both_views_but_leave_controls_alone(){let mut a=app();a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();a.settings["SwipeActivities"]=json!(false);assert!(!a.can_swipe(0));a.settings["SwipeActivities"]=json!(true);for expanded in [false,true]{a.expanded=expanded;for hit in [0,1,13,40,41,42]{assert!(a.can_swipe(hit));}for hit in [-1,2,3,4,5,6,7,10,30,31]{assert!(!a.can_swipe(hit));}}}
     #[test]fn releasing_a_swipe_keeps_the_rendered_position_continuous(){for expanded in [false,true]{let mut a=app();let id=a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();a.expanded=expanded;let width=if expanded{a.layout.card.w}else{a.layout.capsule.w};let mut swipe=activities::Swipe::new(100.,80.);swipe.update(30.,80.);let offset=swipe.dx;assert!(a.finish_swipe(swipe));assert_eq!(a.selected,format!("timer:{id}"));assert!((a.slide.value-width-offset).abs()<0.001);assert!(a.slide_outgoing);}}
     #[test]fn short_swipe_returns_without_changing_the_component(){let mut a=app();a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();let mut swipe=activities::Swipe::new(100.,80.);swipe.update(120.,80.);assert!(a.finish_swipe(swipe));assert_eq!(a.selected,"music");assert_eq!(a.slide.value,20.);assert!(!a.slide_outgoing);}
     #[test]fn disabled_body_click_does_not_expand_but_cover_does(){unsafe{
@@ -545,7 +829,7 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         let mut a=app();a.settings["ClickAnywhereExpand"]=json!(true);let before=a.snapshot["isPlaying"].clone();
         a.activate(0);assert!(a.expanded&&a.held);assert_eq!(a.snapshot["isPlaying"],before);
         a.frame=Frame::expanded();a.transition=None;
-        let c=a.layout.card;assert_eq!(a.hit(c.x+c.w/2.,c.y+164.),4);
+        let c=a.layout.card;assert_eq!(a.hit(c.x+c.w/2.,c.y+228.),4);
         a.activate(4);assert!(a.expanded);assert_eq!(a.snapshot["isPlaying"],false);
     }}
     #[test]fn body_click_option_is_boolean_and_preserves_other_settings(){
@@ -553,6 +837,34 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
         let updated=config::validate_setting(json!({"key":"ClickAnywhereExpand","value":true,"settings":original})).unwrap();
         assert_eq!(updated["ClickAnywhereExpand"],true);assert_eq!(updated["Motion"],original["Motion"]);
         assert!(config::validate_setting(json!({"key":"ClickAnywhereExpand","value":"true","settings":original})).is_err());
+    }
+    #[test]fn swipe_notifications_and_devices_default_on(){
+        let s=config::defaults();
+        for key in ["SwipeActivities","NotificationsEnabled","NotificationClickOpenApp","DeviceRemindersEnabled"]{
+            assert_eq!(s[key],json!(true),"{key}");
+            assert!(config::validate_setting(json!({"key":key,"value":"yes","settings":s.clone()})).is_err(),"{key}");
+            assert_eq!(config::validate_setting(json!({"key":key,"value":false,"settings":s.clone()})).unwrap()[key],json!(false),"{key}");
+        }
+        // A settings.json written by an older build has none of these keys, so the shipped
+        // defaults — not the JSON — decide what a first run does.
+        let loaded=config::load(std::path::Path::new("no-such-settings-from-an-older-build.json"));
+        assert_eq!(loaded["SwipeActivities"],json!(true));assert_eq!(loaded["NotificationsEnabled"],json!(true));assert_eq!(loaded["DeviceRemindersEnabled"],json!(true));
+        // A 1.4 install persisted `false` for all three and knows nothing about the marker, so the
+        // one-time migration switches them on and records that it ran.
+        let legacy=std::env::temp_dir().join(format!("dotisle-defaults-migration-{}.json",std::process::id()));
+        std::fs::write(&legacy,r#"{"SwipeActivities":false,"NotificationsEnabled":false,"DeviceRemindersEnabled":false}"#).unwrap();
+        let migrated=config::load(&legacy);
+        assert_eq!(migrated["DefaultsOnboardingVersion"],json!(1));
+        for key in ["SwipeActivities","NotificationsEnabled","DeviceRemindersEnabled"]{assert_eq!(migrated[key],json!(true),"{key}");}
+        // Once the marker is stamped those same false values are a real opt-out and must survive.
+        std::fs::write(&legacy,r#"{"DefaultsOnboardingVersion":1,"SwipeActivities":false,"NotificationsEnabled":false,"DeviceRemindersEnabled":false}"#).unwrap();
+        let opted_out=config::load(&legacy);
+        for key in ["SwipeActivities","NotificationsEnabled","DeviceRemindersEnabled"]{assert_eq!(opted_out[key],json!(false),"{key}");}
+        let _=std::fs::remove_file(&legacy);
+        assert!(notifications::Policy::from_settings(&json!({})).enabled);
+        // Nothing opted in, so a first-run island already swipes between components.
+        let mut a=app();a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();
+        assert_eq!(a.components.len(),2);assert!(a.can_swipe(0));assert!(a.can_swipe(41));assert!(!a.can_swipe(2));
     }
 }
 
@@ -573,13 +885,13 @@ fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|
 }
 
 #[cfg(test)]mod music_jump_tests{use super::*;
-#[test]fn music_title_and_cover_follow_independent_switch(){unsafe{let mut a=App::new(PathBuf::new(),PathBuf::new(),true);a.opacity=1.;a.expanded=true;a.frame=Frame::expanded();a.transition=None;let c=a.layout.card;assert_eq!(a.hit(c.x+120.,c.y+30.),0);a.settings["MusicClickOpenApp"]=json!(true);assert_eq!(a.hit(c.x+120.,c.y+30.),13);assert_eq!(a.hit(c.x+30.,c.y+30.),1);let expanded=a.expanded;a.activate(13);assert_eq!(a.expanded,expanded);assert!(a.error.is_some());let before=a.snapshot["isPlaying"].clone();a.activate(4);assert_ne!(a.snapshot["isPlaying"],before);}}
+#[test]fn music_title_and_cover_follow_independent_switch(){unsafe{let mut a=App::new(PathBuf::new(),PathBuf::new(),true);a.opacity=1.;a.expanded=true;a.frame=Frame::expanded();a.transition=None;let c=a.layout.card;assert_eq!(a.hit(c.x+150.,c.y+40.),0);a.settings["MusicClickOpenApp"]=json!(true);assert_eq!(a.hit(c.x+150.,c.y+40.),13);assert_eq!(a.hit(c.x+30.,c.y+30.),1);let expanded=a.expanded;a.activate(13);assert_eq!(a.expanded,expanded);assert!(a.error.is_some());let before=a.snapshot["isPlaying"].clone();a.activate(4);assert_ne!(a.snapshot["isPlaying"],before);}}
 }
 
 #[cfg(test)]mod v13_tests{use super::*;
 fn app()->App{App::new(PathBuf::new(),PathBuf::new(),true)}
-fn reminder(id:&str)->todos::Todo{todos::Todo{color:"#F3D79B".into(),id:id.into(),title:format!("待办 {id}"),content:String::new(),date:"2026-10-16".into(),time:"09:00".into(),daily:false,completed:false,completed_date:None,last_reminded_date:None}}
-fn notice(title:&str)->Queued{Queued{notice:notifications::Notice{title:title.into(),..Default::default()},todo:None}}
+fn reminder(id:&str)->todos::Todo{todos::Todo{color:"#F3D79B".into(),id:id.into(),title:format!("待办 {id}"),content:String::new(),date:"2026-10-16".into(),time:"09:00".into(),daily:false,completed:false,completed_date:None,last_reminded_date:None,snooze_until:None}}
+fn notice(title:&str)->Queued{Queued{notice:notifications::Notice{title:title.into(),..Default::default()},todo:None,chime:true}}
 /// The capsule may shrink for a short lyric, but the window and the expanded
 /// card must stay exactly where they were.
 #[test]fn collapsed_capsule_resizes_without_moving_host_or_card(){let mut a=app();let base=a.compact_base();a.layout.reserve_compact(base);let(host,card,card_x)=(a.layout.host.w,a.layout.card.w,a.layout.card.x);a.layout.set_compact(140.,40.);assert_eq!(a.layout.capsule.w,140.);assert_eq!(a.layout.host.w,host);assert_eq!(a.layout.card.w,card);a.layout.set_compact(base,48.);assert_eq!(a.layout.capsule.w,base);assert_eq!(a.layout.host.w,host);assert_eq!(a.layout.card.w,card);assert_eq!(a.layout.card.x,card_x);}
@@ -606,4 +918,28 @@ fn demo_mode_leaves_the_todo_store_untouched(){let mut a=app();unsafe{let saved=
 /// date survives, so a finished item never chimes twice.
 #[test]
 fn uncompleting_a_reminder_does_not_replay_it(){let p=std::env::temp_dir().join(format!("LyricIsland.UncompleteTest.{}.{}.json",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));let mut store=todos::Store::new(p.clone());let now=todos::Now{date:"2026-10-16".into(),time:"09:00".into()};let id=store.save(&json!({"title":"喝水","date":"2026-10-16","time":"09:00"})).unwrap();assert_eq!(store.poll(&now).unwrap().len(),1);store.complete(&id,false,&now).unwrap();assert!(store.poll(&now).unwrap().is_empty());let _=std::fs::remove_file(p);}
+#[test]
+fn delivered_reminders_land_in_history_and_the_switch_silences_it(){let mut a=app();a.enqueue_todo(&reminder("t1"));assert_eq!(a.history.items.len(),1);assert_eq!(a.history.items[0].kind,"todo");assert_eq!(a.history.items[0].todo_id.as_deref(),Some("t1"));assert_eq!(a.history.list()[0]["title"],"待办 t1");a.settings["NotificationHistoryEnabled"]=json!(false);a.enqueue_todo(&reminder("t2"));assert_eq!(a.history.items.len(),1);}
+#[test]
+fn history_clear_rejects_unknown_kinds_and_can_target_one(){let mut a=app();a.enqueue_todo(&reminder("t1"));unsafe{assert_eq!(a.request(json!({"version":1,"command":"historyClear","value":{"kind":"bogus"}}))["success"],false);assert_eq!(a.request(json!({"version":1,"command":"historyClear"}))["success"],true);}assert!(a.history.items.is_empty());}
+#[test]
+fn island_presence_follows_need_not_switches(){assert!(island_needed(true,true,true,false,false,false,false,false));assert!(island_needed(true,false,false,false,false,false,false,false));assert!(!island_needed(true,false,true,false,false,false,false,false));assert!(island_needed(false,false,true,true,false,false,false,false));assert!(island_needed(false,false,true,false,false,true,false,false));assert!(island_needed(false,false,true,false,true,false,false,false));assert!(island_needed(false,false,true,false,false,false,true,false));assert!(island_needed(false,false,true,false,false,false,false,true));assert!(!island_needed(false,false,true,false,false,false,false,false));}
+}
+
+#[cfg(test)]mod portable_tests{
+    use super::*;
+    #[test]fn portable_stays_portable_after_legacy_ota_overlay(){
+        let base=std::env::temp_dir().join(format!("dotisle-portable-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(legacy_install_transition(&base));
+        std::fs::write(base.join("Portable.json"),b"{}").unwrap();
+        assert!(!legacy_install_transition(&base));
+        for name in ["OtaInstall.json","DotIsle.Setup.exe"]{std::fs::write(base.join(name),b"test").unwrap();}
+        assert!(!legacy_install_transition(&base));
+        std::fs::remove_file(base.join("Portable.json")).unwrap();
+        assert!(legacy_install_transition(&base));
+        std::fs::write(base.join("Installed.json"),b"{}").unwrap();
+        assert!(!legacy_install_transition(&base));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

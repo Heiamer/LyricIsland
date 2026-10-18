@@ -1,7 +1,8 @@
-//! DotIsle settings — GPUI frontend.
+//! DotIsle control center — GPUI frontend.
 //!
-//! Replaces the Slint settings window. The native capsule still owns the pipe server, so this
-//! binary is a pure client and keeps the existing contract (see `protocol.rs`).
+//! The native capsule still owns the pipe server, so this binary is a pure client and keeps the
+//! existing contract (see `protocol.rs`). Navigation uses semantic routes rather than sidebar
+//! indices, and the shared gear drawers reuse the exact setting keys the settings page edits.
 //!
 //! Design follows the bundled `apple-design` skill: depth comes from layered surfaces and
 //! hairlines instead of heavy borders, a restrained palette around the product's mint accent,
@@ -15,21 +16,25 @@
 mod changelog;
 mod color;
 mod history;
+mod icons;
+mod motion;
 mod protocol;
 mod text_field;
 mod theme;
 mod value;
+mod quick_ui;
+mod rules_ui;
 
 use text_field::TextField;
 use value::{format_value, position_to_value};
 
 use std::{
     borrow::Cow,
-    cell::Cell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use color::Hsv;
@@ -38,13 +43,129 @@ use protocol as pipe;
 use serde_json::{json, Value};
 use theme as t;
 
-/// Pages in sidebar order. `--smoke-ui` walks all of them.
-const PAGES: [(&str, &str); 11] = [
- ("常规","启动与窗口行为。"),("灵动岛","尺寸、展开与活动切换。"),("歌词与同步","显示每一句歌词和翻译。"),("外观与动画","配色、主题与连续运动。"),("播放器与来源","选择播放器和在线信息来源。"),("通知与设备","消息与设备接入提醒。"),("音效","分别调整通知、提醒与设备音量。"),("待办清单","把重要的小事放在眼前。"),("计时器","专注、倒计时，或记录经过的时间。"),("关于与更新","版本、在线更新与许可。"),("更新日志","查看历次版本变化。"),
-];
+/// Sidebar width, straight from the 1.5 handoff's `--di-sidebar`.
+const SIDEBAR: f32 = 184.0;
 
-/// Index of the todo page, so the native side can ask for it by name.
-const PAGE_TODOS: usize = 7;
+/// The control centre is a fixed canvas.
+///
+/// Every page scrolls inside this box and the layout was designed at exactly this size, so letting
+/// it be dragged around only ever bought a way to break the design. These are **logical** pixels,
+/// not physical: on a 200% display the window is twice as many pixels and the interface is the same
+/// size, which is what "supports several DPIs" has to mean.
+const WINDOW_WIDTH: f32 = 1180.0;
+const WINDOW_HEIGHT: f32 = 760.0;
+
+/// The canvas for the display the window is currently on.
+///
+/// A fixed window still has to fit: a 200% laptop offers only 960×540 of usable logical space, so
+/// the canvas shrinks to the work area instead of hanging off the screen. It never grows past the
+/// design size — the window is fixed, not elastic.
+fn canvas_size(window: &Window, cx: &App) -> Size<Pixels> {
+    let design = size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT));
+    match window.display(cx) {
+        Some(display) => design.min(&display.visible_bounds().size),
+        None => design,
+    }
+}
+
+/// One page of the control center. The order here is the walking order for `--smoke-ui`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Route {
+    Island,
+    Overview,
+    Notifications,
+    Todos,
+    Timers,
+    Settings,
+    About,
+}
+
+impl Route {
+    const ALL: [Route; 7] = [
+        Route::Island,
+        Route::Overview,
+        Route::Notifications,
+        Route::Todos,
+        Route::Timers,
+        Route::Settings,
+        Route::About,
+    ];
+
+    fn index(self) -> usize {
+        Route::ALL.iter().position(|route| *route == self).unwrap_or(0)
+    }
+
+    fn heading(self) -> (&'static str, &'static str) {
+        match self {
+            Route::Island => ("灵动岛", "需要时出现，处理后收起。"),
+            Route::Overview => ("概览", "重要的事，一眼可见。"),
+            Route::Notifications => ("通知", "回看已收到的消息，及时处理自己的提醒。"),
+            Route::Todos => ("待办清单", "把重要的小事，安排妥当。"),
+            Route::Timers => ("流程与专注", "一次只关注眼前这一件事。"),
+            Route::Settings => ("设置", "调整点屿的共同偏好。"),
+            Route::About => ("关于与更新", "点屿 · DotIsle"),
+        }
+    }
+
+    /// The sidebar label can differ from the page title: the docked island wears its product name
+    /// (灵动岛, the same one the tray menu and the capsule use) and the todo page drops the trailing
+    /// 清单 where the group already frames it.
+    fn nav_label(self) -> &'static str {
+        match self {
+            Route::Island => "灵动岛",
+            Route::Todos => "待办",
+            other => other.heading().0,
+        }
+    }
+
+    /// The icon name from the handoff's nav table, served by `icons::icon`.
+    fn nav_icon(self) -> &'static str {
+        match self {
+            Route::Island => "pill",
+            Route::Overview => "layout-dashboard",
+            Route::Notifications => "bell",
+            Route::Todos => "circle-check",
+            Route::Timers => "timer",
+            Route::Settings => "settings-2",
+            Route::About => "circle-help",
+        }
+    }
+
+    /// The stable name the native side stores as the start page.
+    fn key(self) -> &'static str {
+        match self {
+            Route::Island => "island",
+            Route::Overview => "overview",
+            Route::Notifications => "notifications",
+            Route::Todos => "todos",
+            Route::Timers => "timers",
+            Route::Settings => "settings",
+            Route::About => "about",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Route> {
+        Route::ALL.into_iter().find(|route| route.key() == key)
+    }
+}
+
+/// A panel that slides over the right side of the content area. Gear settings open the same drawer
+/// from both the tool page and anywhere else, so a field only ever has one definition.
+#[derive(Clone, PartialEq)]
+enum Drawer {
+    TodoEditor,
+    TodoSettings,
+    Snooze(String),
+    Focus(String),
+    NoticeDetail(String),
+    NotificationSettings,
+    TimerSettings,
+    Changelog,
+    Licenses,
+    QuickReminder,
+    WorkflowEditor,
+    RuleEditor(Option<String>),
+}
 
 struct Shared {
     state: Value,
@@ -87,17 +208,24 @@ struct SliderDrag {
 /// Window state shared by every page.
 struct SettingsApp {
     shared: Rc<Mutex<Shared>>,
-    page: usize,
+    route: Route,
+    /// The single open overlay panel, if any. One slot on purpose: an editor and a gear drawer
+    /// must never stack.
+    drawer: Option<Drawer>,
+    /// Where a "前往音效" jump came from, so the settings page can offer the way back.
+    return_context: Option<(Route, Option<Drawer>)>,
     picker: Option<Picker>,
     slider: Option<SliderDrag>,
     /// Where the pad and the hue strip were actually painted, in window coordinates. Recorded during
     /// prepaint because pointer events only carry a window position.
     pad_bounds: Rc<Cell<Bounds<Pixels>>>,
     hue_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// Scroll state of the content column, so a self-check can bring the picker into view.
-    /// One scroll handle per page. A single shared handle made every page inherit the previous
-    /// page's offset, so scrolling to the end of one page left the next one already at the bottom.
+    /// Keyboard focus for the two music-layout options, so Left/Right/Space work after a click.
+    music_focus: FocusHandle,
+    /// Scroll state of the content column. One scroll handle per route, so switching routes always
+    /// starts where that route was left. The drawer keeps its own offset as well.
     scrolls: Vec<ScrollHandle>,
+    drawer_scroll: ScrollHandle,
     /// Whether the last frame asked DWM for a dark (or light) non-client frame.
     applied_dark: Option<bool>,
     /// Track rectangle of the slider named by `LYRICISLAND_SMOKE_SLIDER`, published so an automated
@@ -109,6 +237,7 @@ struct SettingsApp {
     calibrate: Entity<TextField>,
     custom_sources: Entity<TextField>,
     notification_apps: Entity<TextField>,
+    notification_blocked:Entity<TextField>,
     /// Todo form fields. Created once and reused, exactly like the fields above: rebuilding them
     /// inside `render` would drop focus and the half-typed text on every frame.
     todo_title: Entity<TextField>,
@@ -117,13 +246,95 @@ struct SettingsApp {
     todo_time: Entity<TextField>,
     /// `Some(id)` while an existing todo is being edited, `None` when composing a new one.
     todo_editing: Option<String>,
-    todo_form_open: bool,
     todo_daily: bool,
-    todo_settings:bool,todo_filter:usize,todo_completed_open:bool,todo_color:String,
+    todo_filter:usize,todo_completed_open:bool,todo_color:String,
+    /// Notification-history page state: the active kind filter and the two-step clear confirmation.
+    notice_filter:usize,clear_armed:bool,
+    /// Which section of the settings page is open: 常规 / 外观与动画 / 音效.
+    settings_tab:usize,
+    /// Minutes preset for the "开始专注" drawer.
+    focus_minutes:u32,
     timer_mode:String,timer_new:bool,timer_adjust_open:bool,timer_name:Entity<TextField>,timer_duration:Entity<TextField>,timer_focus:Entity<TextField>,timer_rest:Entity<TextField>,timer_rounds:Entity<TextField>,
+    notice_view: usize,
+    quick_text: Entity<TextField>,
+    quick_preview: Value,
+    quick_request: String,
+    workflow_name: Entity<TextField>,
+    workflow_stages: Vec<(Entity<TextField>, Entity<TextField>)>,
+    workflow_count: usize,
+    workflow_template: String,
+    workflow_selected:usize,workflow_generation:u64,workflow_busy:bool,
+    workflow_library:Vec<Entity<TextField>>,workflow_scroll:ScrollHandle,workflow_focus:FocusHandle,workflow_pending:Option<Value>,
+    rule_editing: Option<String>,
+    rule_trigger: String,
+    rule_name: Entity<TextField>,
+    rule_path: Entity<TextField>,
+    rule_message: Entity<TextField>,
+    rule_cooldown: u32,
+    rule_threshold: u32,
+    rule_enabled: bool,
+    /// Which select-style control is open, plus the window rectangles its menu can hang from —
+    /// one entry per painted control, because a page may carry several.
+    select: Option<&'static str>,
+    select_bounds: Rc<RefCell<Vec<(&'static str, Bounds<Pixels>)>>>,
+    /// Bumped on a route change. Part of the entrance animation's element id, so the page's rows
+    /// cascade in again every time a different page replaces them.
+    route_epoch: u32,
+    /// Bumped whenever the *content* under a page's tab bar is replaced, including tab and filter
+    /// switches. The tab bar itself keeps using `route_epoch`, so it never blinks when a filter is
+    /// clicked — only the rows below it cross over.
+    content_epoch: u32,
+    /// Bumped when a select menu opens, so its menu animates in from scratch every time.
+    menu_epoch: u32,
+    /// The drawer that is still travelling out. `drawer` clears the instant the user dismisses it,
+    /// but the panel has to stay mounted for the length of its exit spring or it would vanish
+    /// mid-gesture; this keeps it alive until that spring settles.
+    closing: Option<Drawer>,
+    /// The colour picker's exit twin. Same idea, smaller surface.
+    closing_picker: Option<Picker>,
+    /// The palette this window is drawing with right now, and the one it is travelling from while
+    /// an appearance change eases. Keeping the *displayed* palette (rather than the stored theme) is
+    /// what lets an interrupted theme switch start from where the screen actually is.
+    shown: t::Palette,
+    theme_from: t::Palette,
+    theme_key: Option<(String, bool)>,
+    theme_started: Option<Instant>,
+    /// The live controls the pointer is over, outermost first. Controls nest — a button sits inside
+    /// a row — so the stack keeps the outer one too: leaving the button resumes the row's own wash
+    /// without waiting for a hover event that already happened.
+    hover: Vec<SharedString>,
+    /// The control that had a button pressed on it while the pointer was over it. One at a time, and
+    /// cleared by the root, so a press released outside the window never stays sunk.
+    press: Option<SharedString>,
 }
 
 impl SettingsApp {
+    /// Whether this control is the innermost live one under the pointer.
+    fn hovered(&self, key: &str) -> bool {
+        matches!(self.hover.last(), Some(live) if live.as_str() == key)
+    }
+
+    /// Whether the pointer is down on this control.
+    fn pressed(&self, key: &str) -> bool {
+        matches!(self.press.as_ref(), Some(live) if live.as_str() == key)
+    }
+
+    /// Where the pointer has left this control standing: rest, hover, or press.
+    fn liveness(&self, key: &str) -> f32 {
+        motion::liveness(self.hovered(key), self.pressed(key))
+    }
+
+    /// The innermost live control takes the press. Read at the root, after the hover stack has
+    /// already been settled by the move that preceded this one, so a control that was never tracked
+    /// simply never appears here.
+    fn press_began(&mut self) {
+        self.press = self.hover.last().cloned();
+    }
+
+    fn press_ended(&mut self) {
+        self.press = None;
+    }
+
     fn new(shared: Rc<Mutex<Shared>>, picker: Option<Picker>, cx: &mut Context<Self>) -> Self {
         let calibrate = {
             let shared = Rc::clone(&shared);
@@ -193,28 +404,67 @@ impl SettingsApp {
         let timer_focus=cx.new(|cx|TextField::new("timer-focus","秒数","1500",Rc::new(|_,_|{}),cx));
         let timer_rest=cx.new(|cx|TextField::new("timer-rest","秒数","300",Rc::new(|_,_|{}),cx));
         let timer_rounds=cx.new(|cx|TextField::new("timer-rounds","轮数","4",Rc::new(|_,_|{}),cx));
+        let quick_text={let weak=weak.clone();cx.new(|cx|TextField::new("field-quick","例如：20分钟后取快递","",Rc::new(move|text,app|{let text=text.to_owned();let _=weak.update(app,move|view,cx|view.preview_quick_text(text,cx));}),cx))};
+        let workflow_name=cx.new(|cx|TextField::new("flow-name","流程名称","",Rc::new(|_,_|{}),cx));
+        let mut workflow_stages=Vec::new();
+        for index in 0..12{let name=cx.new(move|cx|TextField::new(format!("flow-stage-name-{index}"),"阶段名称","",Rc::new(|_,_|{}),cx));let minutes=cx.new(move|cx|TextField::new(format!("flow-stage-minutes-{index}"),"分钟","",Rc::new(|_,_|{}),cx));workflow_stages.push((name,minutes));}
+        let rule_name=cx.new(|cx|TextField::new("rule-name","规则名称","",Rc::new(|_,_|{}),cx));
+        let rule_path=cx.new(|cx|TextField::new("rule-path","C:/Program Files/App/App.exe","",Rc::new(|_,_|{}),cx));
+        let rule_message=cx.new(|cx|TextField::new("rule-message","提醒内容","",Rc::new(|_,_|{}),cx));
+        // Self-check pages win, then the user's own 打开时显示的页面 choice.
+        let music_focus = cx.focus_handle();
+        let start_route = smoke_page().unwrap_or_else(|| {
+            let state = shared.lock().map(|shared| shared.state.clone()).unwrap_or_else(|_| json!({}));
+            Route::from_key(setting_str(&state, "ControlCenterStartPage", "overview")).unwrap_or(Route::Overview)
+        });
         Self {
-            timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"pomodoro".into(),timer_new:false,timer_adjust_open:false,todo_settings:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
-            shared,
-            page: smoke_page(),
+            timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"workflow".into(),timer_new:false,timer_adjust_open:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
+            shared:Rc::clone(&shared),
+            route: start_route,
+            drawer: smoke_drawer(),
+            return_context: None,
+            // The smoke picker lives in 设置 → 外观与动画, so opening one brings that tab up too.
+            settings_tab: std::env::var("LYRICISLAND_SMOKE_TAB").ok().and_then(|value| value.parse::<usize>().ok()).map(|tab| tab.min(2)).unwrap_or(if picker.is_some() || smoke_slider().is_some_and(|key| key.starts_with("Motion") || key.starts_with("Spring")) { 1 } else { 0 }),
+            notice_filter: 0,
+            clear_armed: false,
+            focus_minutes: 25,
             picker,
             slider: None,
             pad_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             hue_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
-            scrolls: (0..PAGES.len()).map(|_| ScrollHandle::new()).collect(),
+            music_focus,
+            scrolls: (0..Route::ALL.len()).map(|_| ScrollHandle::new()).collect(),
+            drawer_scroll: ScrollHandle::new(),
             applied_dark: None,
             smoke_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             hex_field:picker.map(|p|make_hex_field(&t::to_hex(p.hsv.to_rgb()),cx)),
             calibrate,
             custom_sources,
             notification_apps,
+            notification_blocked:{let shared=Rc::clone(&shared);cx.new(|cx|TextField::new("field-notification-blocked","输入完整应用标识，分号分隔；按Enter添加","",Rc::new(move|value:&str,app:&mut App|{let _=send(&shared,"notificationBlockedApps",value,app);}),cx))},
             todo_title,
             todo_content,
             todo_date,
             todo_time,
             todo_editing: None,
-            todo_form_open: false,
             todo_daily: false,
+            select: None,
+            select_bounds: Rc::new(RefCell::new(Vec::new())),
+            route_epoch: 0,
+            content_epoch: 0,
+            menu_epoch: 0,
+            closing: None,
+            closing_picker: None,
+            shown: t::DARK,
+            theme_from: t::DARK,
+            theme_key: None,
+            theme_started: None,
+            hover: Vec::new(),
+            press: None,
+            notice_view:0,quick_text,quick_preview:Value::Null,quick_request:String::new(),
+            workflow_name,workflow_stages,workflow_count:2,workflow_template:String::new(),workflow_selected:0,workflow_generation:0,workflow_busy:false,
+            workflow_library: [5,25,5,10,3,10].iter().enumerate().map(|(i,m)|cx.new(|cx|TextField::new(format!("library-minutes-{i}"),"分钟",&m.to_string(),Rc::new(|_,_|{}),cx))).collect(),workflow_scroll:ScrollHandle::new(),workflow_focus:cx.focus_handle(),workflow_pending:None,
+            rule_editing:None,rule_trigger:"enter".into(),rule_name,rule_path,rule_message,rule_cooldown:30,rule_threshold:60,rule_enabled:true,
         }
     }
 }
@@ -236,10 +486,10 @@ impl SettingsApp {
             "daily": self.todo_daily,"color":self.todo_color,
         });
         let weak=cx.entity().downgrade();let job=cx.background_executor().spawn(async move{pipe::command("todoSave",payload)});
-        cx.spawn(async move|_,cx|{let outcome=job.await;let _=weak.update(cx,|view,cx|{match outcome{Ok((reply,state))=>{let success=reply["success"]==true;if let Ok(mut shared)=view.shared.lock(){shared.state=state;shared.message=if success{String::new()}else{reply["message"].as_str().unwrap_or("保存失败").into()};}if success{view.todo_form_open=false;view.todo_editing=None;}},Err(e)=>{if let Ok(mut shared)=view.shared.lock(){shared.message=e;}}}cx.notify();});}).detach();
+        cx.spawn(async move|_,cx|{let outcome=job.await;let _=weak.update(cx,|view,cx|{match outcome{Ok((reply,state))=>{let success=reply["success"]==true;if let Ok(mut shared)=view.shared.lock(){shared.state=state;shared.message=if success{String::new()}else{reply["message"].as_str().unwrap_or("保存失败").into()};}if success{view.drawer=None;view.todo_editing=None;}},Err(e)=>{if let Ok(mut shared)=view.shared.lock(){shared.message=e;}}}cx.notify();});}).detach();
     }
 
-    /// Open the form, either empty (defaulting to today) or loaded from an existing todo.
+    /// Open the editor drawer, either empty (defaulting to today) or loaded from an existing todo.
     fn open_todo_form(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         let state = self.state();
         let existing = id.as_ref().and_then(|id| {
@@ -267,7 +517,7 @@ impl SettingsApp {
         };
         self.todo_color=id.as_ref().and_then(|id|state["todos"].as_array().and_then(|a|a.iter().find(|t|t["id"].as_str()==Some(id)))).and_then(|t|t["color"].as_str()).unwrap_or(setting_str(&state,"TodoDefaultColor","#F3D79B")).to_owned();
         self.todo_editing = id;
-        self.todo_form_open = true;
+        self.drawer = Some(Drawer::TodoEditor);
         self.todo_daily = daily;
         self.todo_title.update(cx, |field, cx| field.set_text(&title, cx));
         self.todo_content.update(cx, |field, cx| field.set_text(&content, cx));
@@ -277,7 +527,7 @@ impl SettingsApp {
     }
 
     fn close_todo_form(&mut self, cx: &mut Context<Self>) {
-        self.todo_form_open = false;
+        self.drawer = None;
         self.todo_editing = None;
         cx.notify();
     }
@@ -300,16 +550,314 @@ fn setting_str<'a>(state: &'a Value, key: &str, default: &'a str) -> &'a str {
     setting(state, key).as_str().unwrap_or(default)
 }
 
+/// The label the 打开时显示的页面 select shows for the stored start page.
+fn start_page_label(state: &Value) -> &'static str {
+    match setting_str(state, "ControlCenterStartPage", "overview") {
+        "island" => "灵动岛",
+        "notifications" => "通知",
+        "todos" => "待办清单",
+        "timers" => "流程与专注",
+        "settings" => "设置",
+        "about" => "关于与更新",
+        _ => "概览",
+    }
+}
+
+/// The label the 界面主题 select shows for the stored theme.
+fn theme_label(state: &Value) -> &'static str {
+    match setting_str(state, "SettingsTheme", "System") {
+        "Light" => "浅色",
+        "Dark" => "深色",
+        _ => "跟随系统",
+    }
+}
+
 /// A 1px wash used as a separator. Cheaper to reason about than a side-specific border.
 fn hairline() -> impl IntoElement {
     div().w_full().h(px(1.0)).bg(t::hairline())
 }
 
+thread_local! {
+    /// Counts rows materialised during a self-check. Sections are wrapped in panels now, so the
+    /// number of top-level elements no longer says how many rows a page really builds.
+    static ROW_TALLY: Cell<usize> = const { Cell::new(0) };
+}
+
+fn tally_reset() {
+    ROW_TALLY.with(|count| count.set(0));
+}
+
+fn tally_count() -> usize {
+    ROW_TALLY.with(Cell::get)
+}
+
+fn tally() {
+    ROW_TALLY.with(|count| count.set(count.get() + 1));
+}
+
+/// Rows stacked with a hairline between neighbours — the rhythm every surface shares.
+fn stacked(rows: Vec<AnyElement>) -> Div {
+    let mut body = div().flex().flex_col().min_w_0();
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            body = body.child(hairline());
+        }
+        body = body.child(row);
+    }
+    body
+}
+
+/// A raised group, as the handoff draws it: one bordered panel holding every row of a section,
+/// with hairlines inserted *between* rows — never at the edges.
+///
+/// Child washes are inset and individually rounded: overflow in GPUI is rectangular,
+/// so it cannot clip a rectangular child background to this panel's rounded corners.
+fn panel(rows: Vec<AnyElement>) -> AnyElement {
+    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden()
+        .px(px(18.0)).py(px(2.0)).child(stacked(rows)).into_any_element()
+}
+
+/// A borderless panel whose rows carry their own horizontal padding (notification and timer lists).
+fn list(rows: Vec<AnyElement>) -> AnyElement {
+    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden().p(px(8.0)).child(stacked(rows)).into_any_element()
+}
+
+/// A 34px icon tile (`di-symbol`): notification rows and task lines wear one.
+fn symbol(icon_name: &'static str, bg: gpui::Rgba, fg: gpui::Rgba) -> AnyElement {
+    div().w(px(34.0)).h(px(34.0)).flex_shrink_0().rounded(px(11.0)).bg(bg).flex().items_center().justify_center().text_color(fg)
+        .child(icons::tinted(icon_name, fg)).into_any_element()
+}
+
+/// A small status word on a soft surface (`di-pill`).
+fn pill(label: &str) -> AnyElement {
+    div().flex_shrink_0().px(px(9.0)).py(px(3.0)).rounded(px(9.0)).bg(t::surface_hi()).text_size(px(12.0)).text_color(t::text_dim()).child(label.to_owned()).into_any_element()
+}
+
+/// A big read-out at the end of a task line (`di-minitime`).
+fn minitime(label: &str) -> AnyElement {
+    div().flex_shrink_0().text_size(px(24.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(label.to_owned()).into_any_element()
+}
+
+/// The empty state inside a list (`di-empty`).
+fn empty_row(label: &str) -> AnyElement {
+    div().w_full().px(px(18.0)).py(px(45.0)).flex().justify_center().text_size(px(12.0)).text_color(t::text_dim()).child(label.to_owned()).into_any_element()
+}
+
+/// One `di-taskcheck` line: a symbol, a growing title/detail block and an optional trailing slot.
+fn taskcheck(sym: AnyElement, title: &str, detail: &str, trailing: Option<AnyElement>) -> AnyElement {
+    let mut body = div().flex().items_center().gap(px(10.0)).w_full().min_w_0()
+        .child(sym)
+        .child(div().flex().flex_col().gap_1().flex_1().min_w_0()
+            .child(div().text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).min_w_0().child(title.to_owned()))
+            .child(div().text_size(px(12.0)).text_color(t::text_dim()).min_w_0().child(detail.to_owned())));
+    if let Some(trailing) = trailing {
+        body = body.child(trailing);
+    }
+    body.into_any_element()
+}
+
+/// A card holding one content block and, below a hairline, an inset action strip (`di-inset`).
+fn inset_card(highlight: bool, body: AnyElement, actions: Option<AnyElement>) -> AnyElement {
+    let card = if highlight {
+        div().w_full().min_w_0().rounded(px(16.0)).bg(t::yellow())
+    } else {
+        div().w_full().min_w_0().rounded(px(16.0)).bg(t::surface()).border_1().border_color(t::hairline())
+    };
+    let card = card.child(div().px(px(18.0)).pt(px(18.0)).pb(px(if actions.is_some() { 14.0 } else { 18.0 })).child(body));
+    match actions {
+        Some(actions) => card.child(div().mx(px(18.0)).pt(px(15.0)).pb(px(18.0)).border_t_1().border_color(t::hairline()).child(actions)).into_any_element(),
+        None => card.into_any_element(),
+    }
+}
+
+/// One section: a 16px heading, an optional green jump link, and one body below. The 22px section
+/// rhythm lives here, so the page column itself carries no gap.
+fn section_block(title: &str, link: Option<(&'static str, &str, Route)>, body: AnyElement, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let head = div().flex().items_center().justify_between().gap_3().mb(px(10.0))
+        .child(div().text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()));
+    let head = match link {
+        Some((id, label, route)) => head.child(link_button(id, label, route, cx)),
+        None => head,
+    };
+    div().flex().flex_col().mb(px(22.0)).child(head).child(body).into_any_element()
+}
+
+/// A column of standalone cards (the todo stack): 10px apart like `di-todos`.
+fn card_stack(rows: Vec<AnyElement>) -> AnyElement {
+    div().w_full().min_w_0().flex().flex_col().gap(px(10.0)).children(rows).into_any_element()
+}
+
+/// A green jump link with the ↗ icon, used on section heads.
+fn link_button(id: &'static str, label: &str, route: Route, cx: &mut Context<SettingsApp>) -> AnyElement {
+    div().id(id).flex().items_center().gap(px(5.0)).text_size(px(12.0)).text_color(t::accent()).cursor_pointer()
+        .hover(|style| style.opacity(0.72))
+        .child(label.to_owned())
+        .child(icons::tinted("arrow-up-right", t::accent()))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.go(route);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+/// One section: a 16px heading, an optional green jump link, and a single panel below.
+fn section_group(title: &str, link: Option<(&'static str, &str, Route)>, rows: Vec<AnyElement>, cx: &mut Context<SettingsApp>) -> AnyElement {
+    section_block(title, link, panel(rows), cx)
+}
+
+/// A row of `di-tab` pills: the page-level filters (待办筛选、通知分类、计时模式、设置分页).
+fn tab_row(id_prefix: &'static str, labels: &[&'static str], selected: usize, cx: &mut Context<SettingsApp>, pick: impl Fn(&mut SettingsApp, usize) + Clone + 'static) -> AnyElement {
+    let mut row = div().flex().items_center().flex_wrap().gap(px(6.0)).mb(px(16.0));
+    for (index, label) in labels.iter().enumerate() {
+        let text: &'static str = *label;
+        let active = index == selected;
+        let pick = pick.clone();
+        let click = cx.listener(move |view, _, _, cx| {
+            pick(view, index);
+            // The rows below the bar are about to be replaced: restart their cascade so the new
+            // content arrives instead of silently swapping.
+            view.pulse();
+            cx.notify();
+        });
+        let id = SharedString::from(format!("tab-{id_prefix}-{index}"));
+        row = row.child(
+            div().id((id.clone(), 1usize)).with_spring(
+                (id.clone(), 0usize),
+                motion::phase(motion::snappy(), active),
+                move |_, phase| {
+                    div().id(id.clone()).px(px(12.0)).py(px(7.0)).rounded(px(10.0))
+                        .bg(motion::blend_color(phase, t::surface(), t::surface_hi()))
+                        .text_size(px(13.0))
+                        .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
+                        .font_weight(if motion::alpha(phase) > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .cursor_pointer().active(|style| style.opacity(0.72)).child(text.to_owned())
+                        .on_click(click)
+                },
+            ),
+        );
+    }
+    row.into_any_element()
+}
+
+/// A select-style control: the handoff's `di-select` at rest. The dropdown itself is painted by
+/// `select_overlay` at the window level, so a scroll container can never clip it.
+fn select_control(id: &'static str, value_label: &str, open: bool, width: Option<f32>, bounds: Rc<RefCell<Vec<(&'static str, Bounds<Pixels>)>>>, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let cell = bounds;
+    let probe = canvas(move |painted, _, _| {
+        if let Ok(mut map) = cell.try_borrow_mut() {
+            match map.iter_mut().find(|(name, _)| *name == id) {
+                Some(entry) => entry.1 = painted,
+                None => map.push((id, painted)),
+            }
+        }
+    }, |_, _, _, _| {}).absolute().inset_0();
+    let control = div().id(id).relative().flex().items_center().justify_between().gap_2()
+        .min_h(px(34.0))
+        .px(px(10.0)).py(px(8.0)).rounded(px(9.0))
+        .bg(t::base()).border_1().border_color(if open { t::accent() } else { t::hairline() })
+        .text_size(px(13.0)).text_color(t::text()).cursor_pointer()
+        .hover(|style| style.bg(t::surface_hi()))
+        .child(probe)
+        .child(div().min_w_0().overflow_hidden().child(value_label.to_owned()))
+        .child(icons::tinted("chevron-down", t::text_dim()))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.select = if view.select == Some(id) { None } else { Some(id) };
+            // A fresh epoch per opening: the menu drops in every time, even when it is reopened
+            // from the same control.
+            view.menu_epoch = view.menu_epoch.wrapping_add(1);
+            cx.notify();
+        }));
+    match width {
+        Some(width) => control.w(px(width)).max_w(px(width)).into_any_element(),
+        None => control.w_full().into_any_element(),
+    }
+}
+
+/// One setting row with a select on the right (`di-settinglabel` + `di-select`).
+fn select_row(id: &'static str, title: &str, detail: &str, value_label: &str, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let row = card(SharedString::from(format!("row-{id}")), title, detail)
+        .child(select_control(id, value_label, view.select == Some(id), Some(175.0), Rc::clone(&view.select_bounds), cx));
+    live_shell(row, SharedString::from(id), view, cx, |row, liveness| row_wash(row, liveness, false))
+}
+
+/// A headedless group: one panel on the 22px section rhythm (the settings tabs use these).
+fn plain_group(rows: Vec<AnyElement>) -> AnyElement {
+    div().flex().flex_col().mb(px(22.0)).child(panel(rows)).into_any_element()
+}
+
+/// The open select, painted under the root so it floats above the content and its scrim swallows
+/// the next click anywhere else.
+fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let Some(key) = view.select else {
+        return div().into_any_element();
+    };
+    let anchor = view.select_bounds.borrow().iter().find(|(name, _)| *name == key).map(|(_, bounds)| *bounds)
+        .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))));
+    let options: &[(&str, &str)] = match key {
+        "startPage" => &[("overview", "概览"), ("notifications", "通知"), ("todos", "待办清单"), ("timers", "流程与专注"), ("island", "灵动岛"), ("settings", "设置"), ("about", "关于与更新")],
+        "todo-color" | "todo-default-color" => &[("#F3D79B", "柔黄"), ("#B7DBCB", "薄荷"), ("#C9BCE5", "浅紫")],
+        _ => &[("System", "跟随系统"), ("Light", "浅色"), ("Dark", "深色")],
+    };
+    let current = match key {
+        "startPage" => setting_str(state, "ControlCenterStartPage", "overview").to_owned(),
+        "todo-color" => view.todo_color.clone(),
+        "todo-default-color" => setting_str(state, "TodoDefaultColor", "#F3D79B").to_owned(),
+        _ => setting_str(state, "SettingsTheme", "System").to_owned(),
+    };
+    let mut menu = div().flex().flex_col().p(px(6.0));
+    for (value, label) in options {
+        let active = current == *value;
+        let value = value.to_string();
+        menu = menu.child(
+            div().id(SharedString::from(format!("select-option-{key}-{value}"))).flex().items_center().justify_between().gap_3()
+                .px(px(12.0)).py(px(8.0)).rounded(px(8.0)).text_size(px(13.0)).text_color(t::text()).cursor_pointer()
+                .hover(|style| style.bg(t::surface_hi()))
+                .child((*label).to_owned())
+                .child(if active { icons::icon("check").into_any_element() } else { div().into_any_element() })
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.select = None;
+                    match key {
+                        "todo-color" => view.todo_color = value.clone(),
+                        "todo-default-color" => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "TodoDefaultColor", &value, cx);}
+                        "startPage" => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "ControlCenterStartPage", &value, cx);}
+                        _ => {let shared = Rc::clone(&view.shared);let _ = send(&shared, "SettingsTheme", &value, cx);}
+                    }
+                    cx.notify();
+                })),
+        );
+    }
+    div().id("select-layer").absolute().inset_0()
+        .child(div().id("select-scrim").absolute().inset_0().on_click(cx.listener(|view, _, _, cx| {view.select = None;cx.notify();})))
+        .child(
+            div().absolute().left(anchor.origin.x).w(px(210.0))
+                .rounded(px(12.0)).border_1().border_color(t::hairline()).bg(t::surface())
+                .shadow(vec![BoxShadow::new(px(0.0), px(4.0), t::shadow().into()).blur_radius(px(14.0))])
+                .child(menu)
+                // The menu grows out of the control that owns it and travels the short distance to
+                // its resting place, so the eye never has to search for where it came from.
+                .with_animation(("select-menu", view.menu_epoch), motion::enter(170, 0), move |element, progress| {
+                    element.opacity(progress).top(anchor.origin.y + anchor.size.height + px(6.0 + 7.0 * (1.0 - progress)))
+                }),
+        )
+        .into_any_element()
+}
+
 impl Render for SettingsApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Windows delivers a DPI change as a new window rect that keeps the *physical* size, which
+        // silently changes the logical canvas the layout was built for: drag the window from a 100%
+        // to a 200% monitor and the whole interface would come out half size. Re-assert the canvas
+        // every frame — it is a no-op unless something else moved it.
+        let canvas = canvas_size(window, cx);
+        let current = window.bounds().size;
+        if (f32::from(current.width) - f32::from(canvas.width)).abs() > 0.5
+            || (f32::from(current.height) - f32::from(canvas.height)).abs() > 0.5
+        {
+            window.resize(canvas);
+        }
         let state = self.state();
-        let (title, subtitle) = PAGES[self.page.min(PAGES.len() - 1)];
-        // Appearance is resolved before anything is built: `theme` holds the palette for this frame.
+        let route = self.route;
+        let (title, subtitle) = route.heading();
         let theme = setting_str(&state, "SettingsTheme", "System").to_owned();
         let system_dark = matches!(
             window.appearance(),
@@ -320,7 +868,51 @@ impl Render for SettingsApp {
             "Dark" => true,
             _ => system_dark,
         };
-        t::set_current(t::select(&theme, system_dark));
+        // 界面动画 is the application's own switch, not Windows': folding it into gpui's
+        // reduce-motion flag makes every spring and every one-shot below obey it without each call
+        // site checking. Reduced motion still gets the end state — it is a gentler equivalent, not
+        // a dead interface.
+        let animate = flag(&state, "Animation", true);
+        motion::set_enabled(animate);
+        if cx.reduce_motion() != !animate {
+            cx.set_reduce_motion(!animate);
+        }
+        // Appearance is resolved before anything is built: `theme` holds the palette for this frame.
+        // A change of appearance eases between the two palettes instead of snapping — a sudden
+        // jump between light and dark is exactly the brightness flash the skill warns about.
+        let target = t::select(&theme, system_dark);
+        let theme_key = (theme.clone(), system_dark);
+        match self.theme_key.as_ref() {
+            // First frame: adopt the palette outright; there is nothing to travel from.
+            None => {
+                self.theme_key = Some(theme_key);
+                self.shown = target;
+            }
+            Some(current) if *current != theme_key => {
+                self.theme_key = Some(theme_key);
+                self.theme_from = self.shown;
+                self.theme_started = animate.then(Instant::now);
+            }
+            Some(_) => {}
+        }
+        let shown = match self.theme_started {
+            Some(started) => {
+                let progress = (started.elapsed().as_secs_f32() / THEME_BLEND).min(1.0);
+                if progress >= 1.0 {
+                    self.theme_started = None;
+                    target
+                } else {
+                    // One more frame, please: the blend is driven by wall time, not by a spring.
+                    window.request_animation_frame();
+                    t::blend(self.theme_from, target, motion::ease_in_out(progress))
+                }
+            }
+            None => target,
+        };
+        // `shown` is what the next appearance change travels *from*, so an interrupted switch
+        // resumes at the colour that is actually on screen.
+        self.shown = shown;
+        t::set_current(shown);
         // The caption bar follows the app, not the system, so both stay in step.
         if self.applied_dark != Some(want_dark) {
             apply_titlebar(window, want_dark);
@@ -331,304 +923,708 @@ impl Render for SettingsApp {
             .lock()
             .map(|s| (s.notice.clone(), s.message.clone()))
             .unwrap_or_default();
-        let page = self.page;
 
-        let mut sidebar = div().flex().flex_col().w(px(196.0)).flex_shrink_0().h_full().p_3().gap_1().bg(t::sidebar());
-        for (index, (label, _)) in PAGES.iter().enumerate() {
-            if index==0||index==5||index==9{sidebar=sidebar.child(div().px_3().pt_3().pb_1().text_size(px(10.)).text_color(t::text_faint()).child(if index==0{"个性化"}else if index==5{"提醒与工具"}else{"帮助"}));}
-            sidebar = sidebar.child(nav_item(index, label, index == page, cx));
+        // 桌面入口 sits alone at the top; the tools group below; help stays pinned at the bottom.
+        let mut sidebar = div().flex().flex_col().w(px(SIDEBAR)).flex_shrink_0().h_full().pt(px(24.)).px_3().pb(px(14.)).gap(px(5.)).bg(t::sidebar());
+        sidebar = sidebar.child(group_label("桌面入口")).child(nav_item(Route::Island, route, cx));
+        sidebar = sidebar.child(div().mx(px(10.)).my(px(14.)).h(px(1.0)).bg(t::hairline()));
+        sidebar = sidebar.child(group_label("提醒与工具"));
+        for item in [Route::Overview, Route::Notifications, Route::Todos, Route::Timers] {
+            sidebar = sidebar.child(nav_item(item, route, cx));
         }
-        sidebar = sidebar.child(div().flex_1()).child(
-            div().px_3().py_2().text_size(px(10.5)).text_color(t::text_faint()).child("音乐在前，界面在后。"),
-        );
+        sidebar = sidebar
+            .child(div().flex_1().min_h(px(28.)))
+            .child(nav_item(Route::Settings, route, cx))
+            .child(nav_item(Route::About, route, cx))
+            .child(div().pt(px(17.)).px_3().text_size(px(12.)).text_color(t::text_dim()).child("重要的事，一眼可见。"));
 
         // The scroll container's child must be content-sized: giving it `h_full` pinned it to the
         // viewport, so anything past the fold was clipped instead of becoming scrollable.
-        let mut column = div().flex().flex_col().w_full().min_w_0().px_7().py_6()
-            .child(div().text_size(px(26.0)).text_color(t::text()).child(title.to_owned()))
-            .child(div().mt_1().text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned()));
-        column = column.child(div().mt_6().flex().flex_col().gap_3().children(page_rows(page, &state, self, cx)));
+        let head = div().flex().items_start().justify_between().gap_4().mb(px(24.))
+            .child(
+                div().flex().flex_col()
+                    .child(div().text_size(px(27.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
+                    .child(div().mt(px(7.)).text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned())),
+            )
+            .child(head_actions(route, &state, self, cx));
+        // The heading and the rows enter together, the rows one after another. Both are keyed off
+        // the route epoch, so a new page always starts its cascade from zero rather than
+        // inheriting whatever the previous page's animations had already finished.
+        let head = head.with_animation(("page-head", self.route_epoch), motion::enter(240, 0), |element, progress| {
+            motion::rise(element, progress, 8.0)
+        });
+        let rows = motion::cascade(page_rows(route, &state, self, cx), self.route_epoch, self.content_epoch, 22);
+        let mut column = div().flex().flex_col().w_full().min_w_0().pt(px(28.)).px(px(22.)).pb(px(24.)).child(head);
+        column = column.child(div().flex().flex_col().children(rows));
 
-        // Each page owns its offset, so switching pages always starts where that page was left.
-        let scroll = self.scrolls[page.min(self.scrolls.len() - 1)].clone();
-        let footer = div().mt_6().pt_3().text_size(px(11.0)).text_color(t::text_faint())
+        // Each route owns its offset, so switching routes always starts where that route was left.
+        let scroll = self.scrolls[route.index().min(self.scrolls.len() - 1)].clone();
+        let online = notice.starts_with("已连接");
+        // While the island is not answering, the status dot breathes. It is the one looping
+        // animation in the window: it says "still trying" without asking for attention, and it
+        // stops the moment the pipe connects.
+        let dot = div().w(px(6.0)).h(px(6.0)).flex_shrink_0().rounded(px(3.0));
+        let dot: AnyElement = if online || !motion::enabled() {
+            dot.bg(t::accent()).into_any_element()
+        } else {
+            dot.bg(t::text_faint())
+                .with_animation(
+                    "status-breath",
+                    Animation::new(Duration::from_millis(1400)).repeat_synced().with_max_fps(30.0),
+                    |element, progress| {
+                        let breath = 0.5 - 0.5 * (progress * std::f32::consts::TAU).cos();
+                        element.opacity(0.35 + 0.65 * breath)
+                    },
+                )
+                .into_any_element()
+        };
+        let footer = div().flex().items_center().gap_2().text_size(px(12.0)).text_color(t::text_dim())
+            .child(dot)
             .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
+        let drawer = drawer_panel(&state, self, cx);
 
-        div().flex().flex_col().size_full().bg(t::base()).text_color(t::text()).font_family(t::FONT)
-            .child(settings_titlebar(window))
-            .child(div().flex().flex_1().min_h_0().min_w_0()
+        div().flex().flex_col().size_full().bg(t::base()).text_color(t::text()).text_size(px(13.0)).font(t::ui_font())
+            // The press is taken at the root, not per control: whatever the hover stack says is
+            // innermost when the button goes down *is* what got pressed, and releasing it anywhere —
+            // including outside the window — has to let it back up.
+            .on_mouse_down(MouseButton::Left, cx.listener(|view, _: &MouseDownEvent, _, cx| {
+                view.press_began();
+                cx.notify();
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|view, _: &MouseUpEvent, _, cx| {
+                view.press_ended();
+                cx.notify();
+            }))
+            .on_mouse_exit(cx.listener(|view, _: &MouseExitEvent, _, cx| {
+                view.press_ended();
+                view.hover.clear();
+                cx.notify();
+            }))
+            .child(settings_titlebar())
+            .child(div().relative().flex().flex_1().min_h_0().min_w_0()
             .child(sidebar)
             .child(div().w(px(1.0)).flex_shrink_0().h_full().bg(t::hairline()))
             .child(
                 div().flex().flex_col().flex_1().min_w_0().h_full()
                     .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&scroll).child(column))
                     .child(hairline())
-                    .child(div().px_7().py_3().min_w_0().children(if message.is_empty(){None}else{Some(div().text_size(px(12.)).text_color(if message.contains("失败")||message.contains("错误"){t::danger()}else{t::text()}).child(message))}).child(footer)),
-            ))
+                    .child(div().px(px(22.)).pt(px(9.)).pb(px(12.)).min_w_0()
+                        .children(if message.is_empty(){None}else{Some(
+                            // A fresh id per message: each new line slides in on its own, and an
+                            // identical repeat of the last one does not restart it.
+                            div().mb_1().text_size(px(12.)).text_color(if message.contains("失败")||message.contains("错误"){t::danger()}else{t::text()})
+                                .with_animation(SharedString::from(format!("message-{message}")), motion::enter(200, 0), |element, progress| motion::rise(element, progress, 5.0))
+                                .child(message)
+                        )})
+                        .child(footer)),
+            )
+            .child(select_overlay(&state, self, cx))
+            .child(drawer))
     }
 }
 
-/// Sidebar row: a filled pill when selected, a wash under the pointer.
-fn brand_mark()->AnyElement{canvas(|_,_,_|{},|bounds,_,window,_|{let x=bounds.origin.x;let y=bounds.origin.y;let mut shape=|left:f32,top:f32,w:f32,h:f32,r:f32,color:gpui::Rgba|window.paint_quad(quad(Bounds::new(point(x+px(left),y+px(top)),size(px(w),px(h))),px(r),color,px(0.),transparent_black(),BorderStyle::Solid));shape(1.,1.,24.,24.,6.,rgb(0xDDF3E9));shape(4.,9.,18.,8.5,4.25,rgb(0x128F74));shape(6.2,11.4,3.7,3.7,1.85,rgb(0xF5FFFB));shape(12.,12.,6.4,0.9,0.45,rgb(0xE9FFF6));shape(12.,14.,4.1,0.8,0.4,rgb(0x92D8BE));shape(18.5,4.8,3.5,3.5,1.75,rgb(0x14967A));shape(19.7,6.,1.1,1.1,0.55,rgb(0xF5FFFB));}).w(px(26.)).h(px(26.)).into_any_element()}
-fn settings_titlebar(window:&Window)->AnyElement {
+/// The 2.0 brand mark: one graphite capsule with an amber state dot inside its right half.
+fn brand_pill()->AnyElement{canvas(|_,_,_|{},|bounds,_,window,_|{let x=bounds.origin.x;let y=bounds.origin.y;window.paint_quad(quad(Bounds::new(point(x+px(4.0),y),size(px(27.0),px(17.0))),px(8.5),rgb(0x222829),px(0.),transparent_black(),BorderStyle::Solid));window.paint_quad(quad(Bounds::new(point(x+px(22.4),y+px(6.1)),size(px(4.8),px(4.8))),px(2.4),rgb(0xF4C34D),px(0.),transparent_black(),BorderStyle::Solid));}).w(px(35.)).h(px(17.)).into_any_element()}
+fn settings_titlebar()->AnyElement {
     let mut controls=div().flex().items_center().h_full().pr_2().gap_1();
-    for (id,area,glyph) in [("window-minimize",WindowControlArea::Min,"\u{e921}"),("window-maximize",WindowControlArea::Max,if window.is_maximized(){"\u{e923}"}else{"\u{e922}"}),("window-close",WindowControlArea::Close,"\u{e8bb}")] {
+    // No maximize button: the window is a fixed canvas (see `WINDOW_WIDTH`), so the control would
+    // be dead. Windows also stops offering the resize border and the titlebar double-click once the
+    // window is created non-resizable, so nothing here has to defend the size.
+    for (id,area,glyph) in [("window-minimize",WindowControlArea::Min,"\u{e921}"),("window-close",WindowControlArea::Close,"\u{e8bb}")] {
         let close=area==WindowControlArea::Close;
         controls=controls.child(div().id(id).window_control_area(area).w(px(38.)).h(px(30.)).rounded(px(9.)).flex().items_center().justify_center().font_family("Segoe Fluent Icons").text_size(px(10.)).text_color(t::text_dim()).hover(move|s|if close{s.bg(t::danger()).text_color(rgb(0xffffff))}else{s.bg(t::hover()).text_color(t::text())}).child(glyph));
     }
-    div().flex().w_full().h(px(44.)).flex_shrink_0()
-        .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).w(px(196.)).flex_shrink_0().h_full().px_5().flex().items_center().gap_2().bg(t::sidebar())
-            .child(brand_mark())
-            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child("点屿")))
-        .child(div().w(px(1.)).h_full().bg(t::hairline()))
-        .child(div().id("window-title-drag").window_control_area(WindowControlArea::Drag).flex_1().h_full().px_7().flex().items_center().text_size(px(11.)).text_color(t::text_faint()).child("设置"))
+    div().flex().w_full().h(px(50.)).flex_shrink_0().border_b_1().border_color(t::hairline())
+        .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).flex_1().min_w_0().h_full().pl(px(20.)).flex().items_center().gap(px(9.))
+            .child(brand_pill())
+            .child(div().flex().items_center().gap(px(5.)).text_size(px(13.5))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(t::text()).child("点屿"))
+                .child(div().text_color(t::text_dim()).child("控制中心"))))
+        .child(div().px_3().flex_shrink_0().text_size(px(12.)).text_color(t::text_dim()).child(format!("v{}", env!("CARGO_PKG_VERSION"))))
         .child(controls).into_any_element()
 }
 
-fn nav_item(index: usize, label: &str, selected: bool, cx: &mut Context<SettingsApp>) -> AnyElement {
+fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let selected = route == current;
+    let label = route.nav_label();
+    let icon = route.nav_icon();
+    let id = SharedString::from(format!("nav-{}", route.index()));
+    let click = cx.listener(move |view, _, _, cx| {
+        view.go(route);
+        cx.notify();
+    });
+    // The rail's selection is a spring rather than a class: the raised surface, the text, the icon
+    // and the accent bar all travel together, and picking another row mid-flight retargets them
+    // from wherever they are instead of cutting.
     div()
-        .id(("nav", index))
-        .px_3()
-        .py_2()
-        .rounded(px(8.0))
+        .id(SharedString::from(format!("nav-shell-{}", route.index())))
+        .w_full()
+        .with_spring(
+            (SharedString::from("nav-phase"), route.index()),
+            motion::phase(motion::standard(), selected),
+            move |_, phase| {
+                let progress = motion::alpha(phase);
+                let text = motion::blend_color(phase, t::text_dim(), t::text());
+                let mut row = div()
+                    .id(id.clone())
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .min_h(px(41.0))
+                    .w_full()
+                    .px_3()
+                    .py(px(9.0))
+                    .rounded(px(10.0))
+                    .cursor_pointer()
+                    .text_size(px(13.5))
+                    .text_color(text)
+                    .bg(motion::blend_color(phase, t::sidebar(), t::surface()))
+                    .font_weight(if progress > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                    .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(progress).into()).blur_radius(px(3.0))])
+                    // The accent bar grows out of the rail as the row is picked: motion that
+                    // telegraphs the outcome instead of just interpolating to it.
+                    .child(
+                        div().absolute().left(px(-7.0)).top(px(12.0)).w(px(3.0))
+                            .h(px(6.0 + 11.0 * progress)).rounded(px(1.5))
+                            .bg(t::accent()).opacity(progress),
+                    )
+                    .child(icons::tinted(icon, text))
+                    .child(label.to_owned())
+                    .on_click(click);
+                if !selected {
+                    row = row.hover(|style| style.bg(t::surface_hi()).text_color(t::text()));
+                }
+                row
+            },
+        )
+        .into_any_element()
+}
+
+fn group_label(label: &str) -> AnyElement {
+    div().px_3().pt_1().pb(px(7.0)).text_size(px(12.0)).text_color(t::text_dim()).child(label.to_owned()).into_any_element()
+}
+
+/// 音乐卡片: one radio group, because the two layouts are alternatives rather than features that
+/// can be combined. Thumbnails are canvas schematics: the SVG mask pipeline would tint the whole
+/// drawing, and the handoff's two-tone card cannot survive that.
+fn music_layout_row(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let selected=setting_str(state,"MusicExpandedLayout","SideBySide");
+    let focus=view.music_focus.clone();
+    let options=div().flex().flex_row().gap(px(12.))
+        .child(music_layout_option("Separated","A · 歌词分区","歌词独立成行，长句更从容。",selected=="Separated",false,view,cx))
+        .child(music_layout_option("SideBySide","B · 封面与歌词并排","封面与歌词并排，整体更紧凑。",selected=="SideBySide",true,view,cx))
+        .track_focus(&focus)
+        .on_key_down(cx.listener(move |view,event:&KeyDownEvent,window,cx|{
+            let current=setting_str(&view.state(),"MusicExpandedLayout","SideBySide").to_owned();
+            let next=match event.keystroke.key.as_str(){"left"=>"Separated","right"=>"SideBySide","space"=>if current=="Separated"{"SideBySide"}else{"Separated"},_=>return};
+            if next!=current{let _=send(&view.shared,"MusicExpandedLayout",next,cx);}
+            window.focus(&view.music_focus,cx);cx.notify();
+        }));
+    let label=if selected=="Separated"{"A · 歌词分区"}else{"B · 封面与歌词并排"};
+    let footer=div().flex().items_center().gap_2().pt(px(2.))
+        .child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(t::accent()))
+        .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("当前选择：{label}")));
+    card("row-music-layout","展开卡片布局","两种布局保留相同的内容与播放操作。")
+        .flex_col().items_stretch().gap_3().child(options).child(footer).into_any_element()
+}
+
+fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, side_by_side: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let shared=Rc::clone(&view.shared);
+    let radio=div().w(px(18.)).h(px(18.)).rounded(px(9.)).border_1()
+        .border_color(if selected{t::accent()}else{t::hairline_bright()})
+        .flex().items_center().justify_center()
+        .child(if selected{div().w(px(10.)).h(px(10.)).rounded(px(5.)).bg(t::accent()).into_any_element()}else{div().into_any_element()});
+    let mut tile=div().id(SharedString::from(format!("music-layout-{value}"))).flex_1().min_w_0().flex().flex_col().gap_2().p(px(10.)).rounded(px(14.))
+        .border_1().border_color(if selected{t::accent()}else{t::hairline()})
+        .bg(if selected{t::row_hover()}else{t::base()})
+        .cursor_pointer().child(canvas(|_,_,_|{},move |bounds,_,window,_|paint_music_thumb(bounds,window,side_by_side)).w_full().h(px(150.)))
+        .child(div().flex().items_center().justify_between().gap_2()
+            .child(div().min_w_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
+            .child(radio))
+        .child(div().text_size(px(12.)).text_color(t::text_dim()).child(detail.to_owned()))
+        .on_click(cx.listener(move |view,_,window,cx|{
+            let _=send(&shared,"MusicExpandedLayout",value,cx);
+            window.focus(&view.music_focus,cx);cx.notify();
+        }));
+    if !selected{tile=tile.hover(|style| style.bg(t::row_hover()).border_color(t::hairline_bright()));}
+    tile.into_any_element()
+}
+
+/// A grayscale schematic of the expanded card: only the arrangement changes between A and B.
+fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, side_by_side: bool) {
+    let w=f32::from(bounds.size.width);let h=f32::from(bounds.size.height);let s=(w/300.).min(h/150.);
+    let ox=bounds.origin.x+px((w-300.*s)/2.);let oy=bounds.origin.y+px((h-150.*s)/2.);
+    let mut r=|x:f32,y:f32,ww:f32,hh:f32,rad:f32,c:gpui::Rgba|{window.paint_quad(quad(Bounds::new(point(ox+px(x*s),oy+px(y*s)),size(px(ww*s),px(hh*s))),px(rad*s),c,px(0.),transparent_black(),BorderStyle::Solid))};
+    let (card,cover,bright,dim,faint,control)=(rgb(0x222829),rgb(0x3B4344),rgb(0xD7DAD8),rgb(0x7C8584),rgb(0x4E5757),rgb(0xC9CDCB));
+    r(0.,0.,300.,150.,12.,card);
+    if side_by_side{
+        r(16.,14.,54.,54.,8.,cover);
+        r(82.,16.,104.,7.,3.5,bright);r(82.,29.,74.,5.,2.5,dim);r(82.,41.,92.,5.,2.5,dim);
+        r(266.,18.,6.,6.,3.,dim);
+        r(16.,78.,184.,6.,3.,dim);r(16.,90.,220.,7.,3.5,bright);
+        r(16.,114.,268.,2.5,1.25,faint);r(16.,122.,30.,3.,1.5,dim);r(254.,122.,30.,3.,1.5,dim);
+        r(116.,133.,4.,10.,1.5,bright);r(123.,133.,4.,10.,1.5,bright);
+        r(144.,131.,14.,14.,7.,control);
+        r(174.,133.,4.,10.,1.5,bright);r(181.,133.,4.,10.,1.5,bright);
+    }else{
+        r(16.,14.,46.,46.,7.,cover);
+        r(74.,16.,84.,7.,3.5,bright);r(74.,29.,58.,5.,2.5,dim);
+        r(266.,18.,6.,6.,3.,dim);
+        r(16.,74.,200.,7.,3.5,bright);r(16.,87.,152.,6.,3.,dim);
+        r(16.,112.,268.,2.5,1.25,faint);r(16.,120.,30.,3.,1.5,dim);r(254.,120.,30.,3.,1.5,dim);
+        r(116.,131.,4.,10.,1.5,bright);r(123.,131.,4.,10.,1.5,bright);
+        r(144.,129.,14.,14.,7.,control);
+        r(174.,131.,4.,10.,1.5,bright);r(181.,131.,4.,10.,1.5,bright);
+    }
+}
+
+/// 灵动岛 owns the capsule itself: when it appears, how it looks, what feeds it, and the way into
+/// the tool pages. Music and lyric preferences live here because only the capsule renders them.
+fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+    let mut sections: Vec<AnyElement> = Vec::new();
+    sections.push(section_group("音乐卡片", None, vec![music_layout_row(state, view, cx)], cx));
+    sections.push(section_group("何时出现", None, vec![
+        toggle_row("HideWhenPaused", "音乐暂停后隐藏", "暂停时收起淡出；有计时器等活动时继续显示当前组件。", flag(state, "HideWhenPaused", true), view, cx),
+        toggle_row("AlwaysOnTop", "始终置顶", "显示在其他软件上方，不抢占键盘焦点。", flag(state, "AlwaysOnTop", true), view, cx),
+    ], cx));
+    sections.push(section_group("预览", None, vec![
+        button_row("island-visibility", "显示 / 隐藏灵动岛", "与托盘菜单一致；隐藏后需要时仍会重新出现。", "切换显示", cx, |v, cx| {send_todo(&v.shared, "toggleVisibility", json!({}), cx);cx.notify();}),
+        button_row("island-notice-preview", "预览通知横幅", "显示一条本地示例通知，检查横幅外观。", "预览", cx, |v, cx| {send_todo(&v.shared, "notificationPreview", json!({}), cx);cx.notify();}),
+        device_test_row(cx),
+    ], cx));
+    let mut display = vec![
+        slider_row("CompactWidth", "固定胶囊宽度", "自适应关闭时使用此宽度。", 140., 480., "px", slider_value(state, "CompactWidth", view, 260.), view, cx),
+        toggle_row("AutoCompactWidth", "歌词长度自适应宽度", "按歌词实际宽度平滑伸缩。", flag(state, "AutoCompactWidth", true), view, cx),
+    ];
+    if flag(state, "AutoCompactWidth", true) {
+        display.push(slider_row("AutoCompactMaxWidth", "自适应宽度上限", "只约束歌词自适应，不改变展开卡片尺寸。", 140., 480., "px", slider_value(state, "AutoCompactMaxWidth", view, 420.), view, cx));
+    }
+    display.push(slider_row("FontSize", "歌词字号", "同时应用于收起胶囊与音乐卡片。", 11., 17., "px", slider_value(state, "FontSize", view, 12.5), view, cx));
+    display.push(toggle_row("WordHighlight", "歌词进度涂色", "随演唱进度突出当前歌词。", flag(state, "WordHighlight", true), view, cx));
+    display.push(toggle_row("LyricColorFromCover","歌词涂色跟随封面","开启时随封面取色；关闭后使用固定的歌词进度填色。仅影响原文，不给翻译或下一句涂色。",flag(state,"LyricColorFromCover",true),view,cx));
+    display.push(toggle_row("CompactTranslation", "胶囊显示翻译", "原文在上、翻译在下；没有翻译时不会留出空行。", flag(state, "CompactTranslation", true), view, cx));
+    display.push(toggle_row("ChineseTwoLine", "中文双行模式", "默认开启；没有翻译时，下面显示较小的下一句。", flag(state, "ChineseTwoLine", true), view, cx));
+    display.push(toggle_row("Translation", "展开卡片显示翻译", "有翻译时优先显示翻译。", flag(state, "Translation", true), view, cx));
+    sections.push(section_group("尺寸与显示", None, display, cx));
+    sections.push(section_group("交互", None, vec![
+        toggle_row("HoverExpand", "悬停展开", "鼠标经过时展开当前组件。", flag(state, "HoverExpand", false), view, cx),
+        toggle_row("ClickAnywhereExpand", "点击任意区域展开", "展开当前选中的组件。", flag(state, "ClickAnywhereExpand", true), view, cx),
+        toggle_row("SwipeActivities", "左右滑动胶囊切换", "按住收起胶囊或展开卡片左右拖动切换组件。", flag(state, "SwipeActivities", true), view, cx),
+        toggle_row("Floating", "自由悬浮", "允许移动灵动岛位置。", flag(state, "Floating", false), view, cx),
+        toggle_row("MusicClickOpenApp", "点击封面或歌名打开播放器", "仅影响音乐卡片。", flag(state, "MusicClickOpenApp", false), view, cx),
+    ], cx));
+    let position = state["position"].as_f64().unwrap_or(0.);
+    sections.push(section_group("歌词与同步", None, vec![
+        info_row("当前来源", text(state, "lyricSource", "等待获取"), text(state, "timeline", "等待播放器"), view, cx),
+        slider_row("OffsetMilliseconds", "歌词偏移", "正数提前，负数延后。", -5000., 5000., "ms", slider_value(state, "OffsetMilliseconds", view, 0.), view, cx),
+        calibrate_row(position, view, cx),
+        toggle_row("OnlineSongInfo", "在线补全网易云歌曲信息", "本地信息缺失时直连 music.163.com 补全封面和歌名，不发送账号或令牌。", flag(state, "OnlineSongInfo", true), view, cx),
+    ], cx));
+    let mut sources: Vec<AnyElement> = Vec::new();
+    for (id, name) in pipe::PLAYERS {
+        let allowed = source_allowed(state, id);
+        sources.push(check_row(SharedString::from(format!("source:{id}")), name, if id == "Browser" { "默认关闭，避免网页视频唤出胶囊。" } else { "仅响应允许的播放器。" }, allowed, cx));
+    }
+    sources.push(card("row-custom-add", "添加自定义程序", "输入程序名或媒体会话标识，不支持通配符和启动参数。按 Enter 添加。").child(div().w(px(300.0)).child(view.custom_sources.clone())).into_any_element());
+    let custom = custom_sources(state);
+    if !custom.is_empty() {
+        let mut chips = div().flex().flex_row().flex_wrap().gap_2();
+        for id in &custom {
+            let owned = id.clone();
+            chips = chips.child(
+                div().id(SharedString::from(format!("custom-{id}"))).flex().flex_row().items_center().gap_2().px_2().py_1().rounded(px(7.0)).bg(t::field()).border_1().border_color(t::hairline()).text_size(px(11.5)).text_color(t::text_dim())
+                    .child(id.clone())
+                    .child(div().id(SharedString::from(format!("custom-remove-{id}"))).cursor_pointer().text_color(t::danger()).hover(|style| style.text_color(t::text())).child("×").on_click(cx.listener(move |view, _, _, cx| {
+                        let shared = Rc::clone(&view.shared);
+                        let remaining: Vec<String> = custom_sources(&view.state()).into_iter().filter(|kept| *kept != owned).collect();
+                        let _ = send(&shared, "customSources", &remaining.join("; "), cx);
+                        cx.notify();
+                    }))),
+            );
+        }
+        sources.push(card("row-custom-list", "已添加的自定义程序", "这些程序不在内置列表里，但同样可以唤出灵动岛。").child(chips).into_any_element());
+    }
+    sources.push(info_row("当前播放信息", text(state, "player", "等待播放器"), &format!("{}\n{}", text(state, "title", "暂无播放"), text(state, "artist", "")), view, cx));
+    sections.push(section_group("播放器与来源", None, sources, cx));
+    sections.push(section_group("组件", None, vec![
+        page_link("link-todos", "待办清单", "提醒与清单在控制中心管理。", "打开", Route::Todos, cx),
+        page_link("link-timers", "流程与专注", "番茄钟、倒计时与秒表。", "打开", Route::Timers, cx),
+        page_link("link-notifications", "通知", "消息回看与通知偏好。", "打开", Route::Notifications, cx),
+    ], cx));
+    sections
+}
+
+fn page_link(id: &'static str, title: &str, detail: &str, label: &str, route: Route, cx: &mut Context<SettingsApp>) -> AnyElement {
+    button_row(id, title, detail, label, cx, move |view, cx| {
+        view.go(route);
+        cx.notify();
+    })
+}
+
+/// 设置 keeps the preferences that are not about one tool: startup, appearance and sound.
+fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if view.return_context.is_some() {
+        rows.push(button_row("sound-back", "返回", "回到刚才跳转过来的页面。", "返回", cx, |v, cx| v.return_to_context(cx)));
+    }
+    rows.push(tab_row("settings-tab", &["常规", "外观与动画", "音效"], view.settings_tab, cx, |view, index| {
+        view.settings_tab = index;
+        // The picker belongs to a row on the tab being left, so it leaves with it rather than
+        // animating out under a page it no longer matches.
+        view.picker = None;
+        view.closing_picker = None;
+        view.hex_field = None;
+        view.select = None;
+    }));
+    match view.settings_tab {
+        1 => {
+            rows.push(plain_group(vec![
+                select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
+                toggle_row("CoverBackground", "封面取色背景", "根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view, cx),
+                toggle_row("Animation", "界面动画", "连续形变可以随时反向操作，由软件开关控制，不跟随 Windows 动画设置。", flag(state, "Animation", true), view, cx),
+            ]));
+            let mut palette: Vec<AnyElement> = Vec::new();
+            for (key, title) in [("ExpandedTextColor", "展开卡片字体颜色"), ("ExpandedComponentColor", "展开卡片组件颜色"), ("LyricProgressColor", "歌词进度填色")] {
+                palette.push(color_row(key, title, state, view, cx));
+                if view.picker.as_ref().is_some_and(|picker| picker.key == key) {
+                    palette.push(picker_panel(view, cx));
+                }
+            }
+            rows.push(section_group("配色", None, palette, cx));
+            let mut motion: Vec<AnyElement> = Vec::new();
+            for (key, title, detail, min, max, default, unit) in [
+                ("MotionGap", "内容间距", "调整展开后的内容留白。", 0., 24., 8., "px"),
+                ("MotionDuration", "展开响应", "调整展开速度。", 250., 1200., 360., "ms"),
+                ("MotionCollapseDuration", "收起响应", "调整收起速度。", 150., 700., 300., "ms"),
+                ("MotionRadius", "卡片圆角", "胶囊形变后平滑落到这个圆角。", 8., 48., 30., "px"),
+                ("SpringStiffness", "弹簧刚度", "越高响应越快。", 100., 1000., 420., ""),
+                ("SpringDamping", "弹簧阻尼", "越高回弹越少。", 10., 80., 30., ""),
+                ("SpringMass", "弹簧质量", "调整运动的重量感。", 0.3, 2., 0.8, ""),
+            ] {
+                motion.push(slider_row(key, title, detail, min, max, unit, slider_value(state, key, view, default), view, cx));
+            }
+            motion.push(action_row("resetAppearance", "恢复紧凑尺寸", "恢复宽度、字号与固定位置。", "恢复紧凑尺寸", view, cx));
+            rows.push(section_group("动效", None, motion, cx));
+        }
+        2 => {
+            rows.push(section_group("通知音效", None, sound_rows("Notification", state, view, cx), cx));
+            rows.push(section_group("待办与计时器", None, sound_rows("Todo", state, view, cx), cx));
+            rows.push(section_group("设备连接", None, sound_rows("Device", state, view, cx), cx));
+            rows.push(plain_group(vec![info_row("音量说明", "内置短音已提高基础响度", "以下滑块只调整点屿，不修改 Windows 系统音量。0% 为静音，可单独试听。", view, cx)]));
+        }
+        _ => {
+            // One panel, not two: nothing titles either half, so a gap between them reads as a
+            // crack in the page rather than as a section break.
+            rows.push(plain_group(vec![
+                select_row("startPage", "打开时显示的页面", "下次打开控制中心时直接进入这一页。", start_page_label(state), view, cx),
+                select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
+                toggle_row("AutoStart", "开机启动", "登录 Windows 后驻留系统托盘。", flag(state, "AutoStart", false), view, cx),
+                toggle_row("AlwaysOnTop", "灵动岛保持置顶", "显示在其他软件上方，不抢占键盘焦点。", flag(state, "AlwaysOnTop", true), view, cx),
+                info_row("偏好保存在本机", "调整会自动保存", "设置写入点屿的数据目录；重装或版本更新不会重置。", view, cx),
+                info_row("数据与隐私", "默认不离开本机", "待办、计时与通知记录只保存在本机；唯一的外部请求是在线补全歌曲信息。", view, cx),
+            ]));
+            rows.push(section_group("快速提醒", None, quick_ui::quick_hotkey_rows(state, view, cx), cx));
+        }
+    }
+    rows
+}
+
+fn about_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+    let _ = state;
+    vec![
+        section_group("版本", None, vec![
+            info_row(&format!("DotIsle · 点屿 {}", env!("CARGO_PKG_VERSION")), "原生胶囊 · GPUI 控制中心 · Rust 后台", "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。", view, cx),
+            toggle_row("AutoCheckUpdatesEnabled","自动检查更新","默认开启，只检查并在灵动岛提醒；下载和安装由你确认。",flag(state,"AutoCheckUpdatesEnabled",true),view,cx),
+            info_row("更新状态",state["softwareUpdate"]["phase"].as_str().unwrap_or("idle"),state["softwareUpdate"]["message"].as_str().unwrap_or("发现新版时将在灵动岛提醒。"),view,cx),
+            action_row("checkUpdate", "在线更新", "同时请求国内源和 GitHub，检查最新正式版本。", "检查更新", view, cx),
+            action_row("showUpdate","岛上更新进度","重新打开当前更新任务，查看下载、校验与待安装状态。","查看进度",view,cx),
+            action_row("installUpdate", "下载更新", "下载并校验后，在灵动岛选择重启并安装；旧单文件版将打开安装目录选择向导。", "下载更新", view, cx),
+        ], cx),
+        section_group("诊断", None, vec![
+            action_row("collectLogs", "抓取日志", "汇总版本、最近错误、日志中的错误行与日志尾部，生成一个文本文件并在资源管理器中选中，反馈问题时直接附上。", "抓取日志", view, cx),
+        ], cx),
+        section_group("文档", None, vec![
+            button_row("about-changelog", "更新日志", "每个版本的用户可见变化。", "查看", cx, |v, cx| {v.drawer = Some(Drawer::Changelog);cx.notify();}),
+            button_row("about-licenses", "开源许可", "第三方组件与字体的许可信息。", "查看", cx, |v, cx| {v.drawer = Some(Drawer::Licenses);cx.notify();}),
+        ], cx),
+        section_group("链接", None, vec![
+            action_row("openGitee", "国内发布页", "点屿的 Gitee 国内镜像与下载。", "Gitee", view, cx),
+            action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
+        ], cx),
+        plain_group(vec![info_row("更新来源", "Gitee 国内源 + GitHub", "同时检查两个源；一个不可用时使用另一个。下载校验完成后才替换原程序。", view, cx)]),
+    ]
+}
+
+fn page_rows(route: Route, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+    match route {
+        Route::Island => island_page_rows(state, view, cx),
+        Route::Overview => overview_rows(state, view, cx),
+        Route::Notifications => notify_page_rows(state, view, cx),
+        Route::Todos => new_todo_rows(state, view, cx),
+        Route::Timers => timer_rows(state, view, cx),
+        Route::Settings => settings_page_rows(state, view, cx),
+        Route::About => about_page_rows(state, view, cx),
+    }
+}
+
+/// The buttons that sit beside the heading. Only routes with real actions grow a head.
+fn head_actions(route: Route, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    let mut row = div().flex().items_center().gap_2().flex_shrink_0();
+    match route {
+        Route::Todos => {
+            row = row
+                .child(pill_button_icon("todo-quick".into(), Some("alarm-clock"), "一句话提醒", false, cx.listener(|view, _, _, cx| { view.drawer = Some(Drawer::QuickReminder); cx.notify(); })))
+                .child(pill_button_icon("todo-new".into(), Some("plus"), "新建", true, cx.listener(|view, _, _, cx| view.open_todo_form(None, cx))))
+                .child(gear_button("todo-gear", Drawer::TodoSettings, cx));
+        }
+        Route::Notifications => {
+            if view.notice_view == 1 {
+                row = row
+                    .child(pill_button_icon("rule-new".into(), Some("plus"), "新建规则", true, cx.listener(|view, _, _, cx| view.open_rule_form(None, cx))))
+                    .child(gear_button("notice-gear", Drawer::NotificationSettings, cx));
+            } else {
+                let paused = flag(state, "PauseNotifications", false);
+                row = row
+                    .child(pill_button_icon(SharedString::from("notice-pause"), Some(if paused { "play" } else { "pause" }), if paused { "恢复通知" } else { "暂停通知" }, paused, cx.listener(|view, _, _, cx| {send_todo(&view.shared, "toggleNotifications", json!({}), cx);cx.notify();})))
+                    .child(gear_button("notice-gear", Drawer::NotificationSettings, cx));
+            }
+        }
+        Route::Timers => {
+            row = row.child(gear_button("timer-gear", Drawer::TimerSettings, cx));
+        }
+        _ => {}
+    }
+    row.into_any_element()
+}
+
+/// The handoff's `di-icon-button`: a 36px circle on the panel surface.
+fn gear_button(id: &'static str, drawer: Drawer, cx: &mut Context<SettingsApp>) -> AnyElement {
+    div()
+        .id(id)
+        .w(px(36.0))
+        .h(px(36.0))
+        .flex_shrink_0()
+        .rounded(px(18.0))
+        .bg(t::surface())
+        .border_1()
+        .border_color(t::hairline())
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor_pointer()
-        .bg(if selected { t::surface_hi() } else { t::sidebar() })
-        .hover(|style| style.bg(if selected { t::surface_hi() } else { t::hover() }))
-        .text_size(px(13.0))
-        .text_color(if selected { t::text() } else { t::text_dim() })
-        .child(label.to_owned())
-        .on_click(cx.listener(move |view, _, _, cx| {
-            view.page = index;
-            cx.notify();
+        .text_color(t::text_dim())
+        .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
+        .child(icons::tinted("settings-2", t::text()))
+        .on_click(cx.listener(move |view, _, _, cx| {view.drawer = Some(drawer.clone());cx.notify();}))
+        .into_any_element()
+}
+
+fn drawer_heading(drawer: &Drawer) -> (&'static str, &'static str) {
+    match drawer {
+        Drawer::TodoEditor => ("待办编辑", "题目必填；按 Enter 保存。"),
+        Drawer::TodoSettings => ("待办设置", "列表偏好与提醒行为。"),
+        Drawer::Snooze(_) => ("稍后提醒", "到点后再提醒这条待办。"),
+        Drawer::Focus(_) => ("开始专注", "用一个番茄钟专注这件事。"),
+        Drawer::NoticeDetail(_) => ("消息详情", "来自通知历史。"),
+        Drawer::NotificationSettings => ("通知设置", "应用通知、历史记录与设备提醒。"),
+        Drawer::TimerSettings => ("计时设置", "保存方式与提醒音效入口。"),
+        Drawer::Changelog => ("更新日志", "每个版本的用户可见变化。"),
+        Drawer::Licenses => ("开源许可", "点屿使用的开源组件与字体。"),
+        Drawer::QuickReminder => ("一句话提醒", "用一句话安排下一件小事。"),
+        Drawer::WorkflowEditor => ("新建流程", "2–12 个阶段，每个阶段等待你点击下一阶段。"),
+        Drawer::RuleEditor(_) => ("应用提醒规则", "进入软件或前台累计达到时间时提醒。"),
+    }
+}
+
+fn drawer_rows(drawer: &Drawer, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
+    match drawer {
+        Drawer::TodoEditor => {
+            let mut rows = vec![todo_form(view, cx)];
+            if let Some(id) = view.todo_editing.clone() {
+                rows.push(button_row("todo-delete-edit", "移除待办", "删除此条待办。", "删除", cx, move |v, cx| {send_todo(&v.shared, "todoDelete", json!({"id": id.clone()}), cx);v.drawer = None;v.todo_editing = None;cx.notify();}));
+            }
+            rows
+        }
+        Drawer::TodoSettings => todo_settings_rows(state, view, cx),
+        Drawer::Snooze(id) => snooze_rows(id, state, view, cx),
+        Drawer::Focus(id) => focus_rows(id, state, view, cx),
+        Drawer::NoticeDetail(id) => notice_detail_rows(id, state, view, cx),
+        Drawer::NotificationSettings => notification_settings_rows(state, view, cx),
+        Drawer::TimerSettings => timer_settings_rows(state, view, cx),
+        Drawer::Changelog => history::rows(),
+        Drawer::Licenses => licenses_rows(view, cx),
+        Drawer::QuickReminder => quick_ui::quick_reminder_rows(state, view, cx),
+        Drawer::WorkflowEditor => workflow_editor_rows(state, view, cx),
+        Drawer::RuleEditor(_) => rules_ui::rule_editor_rows(state, view, cx),
+    }
+}
+
+fn licenses_rows(view: &SettingsApp, cx: &Context<SettingsApp>) -> Vec<AnyElement> {
+    vec![
+        info_row("开源来源与许可", "按实际使用保留版权和许可声明", "TaskbarLyrics、AF-Media-Bar、NetEase-Cloud-Music-DiscordRPC 的移植来源继续保留。\nLyricify-Lyrics-Helper 的协议移植按 Apache-2.0 保留归属。\n详情见发行目录中的 LICENSE、THIRD-PARTY-NOTICES.md 与 licenses/。", view, cx),
+        info_row("内置字体", "Noto Sans SC / Noto Sans JP", "均采用 SIL OFL 1.1 许可，随安装包完整内置。", view, cx),
+        info_row("界面组件", "GPUI 0.3.9", "控制中心使用 GPUI，支持主题切换、即时调色与自动保存。", view, cx),
+    ]
+}
+
+/// A stable small number per drawer kind, used as the spring's identity: switching between two
+/// drawers starts a fresh spring, reopening the same one picks up where it left off.
+fn drawer_tag(drawer: &Drawer) -> usize {
+    match drawer {
+        Drawer::TodoEditor => 0,
+        Drawer::TodoSettings => 1,
+        Drawer::Snooze(_) => 2,
+        Drawer::Focus(_) => 3,
+        Drawer::NoticeDetail(_) => 4,
+        Drawer::NotificationSettings => 5,
+        Drawer::TimerSettings => 6,
+        Drawer::Changelog => 7,
+        Drawer::Licenses => 8,
+        Drawer::QuickReminder => 9,
+        Drawer::WorkflowEditor => 10,
+        Drawer::RuleEditor(_) => 11,
+    }
+}
+
+/// The single overlay: a scrim over the body plus a 385px panel on the right. One drawer at a
+/// time, never stacked, and the same panel serves every entry point.
+fn drawer_panel(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+    // A dismissed drawer stays mounted until its exit spring settles, so it can travel back out
+    // the way it came in. Without this the panel would be gone on the very frame the click landed,
+    // which is the one transition the skill calls out as feeling like a cut (§7).
+    let (drawer, open) = match (&view.drawer, &view.closing) {
+        (Some(drawer), _) => (drawer.clone(), true),
+        (None, Some(drawer)) => (drawer.clone(), false),
+        (None, None) => return div().into_any_element(),
+    };
+    let tag = drawer_tag(&drawer);
+    let (title, subtitle) = match &drawer {
+        Drawer::TodoEditor if view.todo_editing.is_some() => ("编辑待办", "改动会覆盖原来的内容；按 Enter 保存。"),
+        Drawer::TodoEditor => ("新建待办", "题目必填；日期与时间使用本地时区。"),
+        other => drawer_heading(other),
+    };
+    let rows = motion::cascade(drawer_rows(&drawer, state, view, cx), tag as u32, tag as u32, 16);
+    let scroll = view.drawer_scroll.clone();
+    // A drawer is a sheet: a little bounce as it lands, because it was thrown in from the edge.
+    let spring = || motion::phase_from(motion::sheet(), open, false);
+    let panel = div().id("drawer-panel").w(px(if matches!(drawer,Drawer::WorkflowEditor){1000.}else{385.0})).max_w_full().h_full().flex_shrink_0().flex().flex_col().bg(t::surface())
+        .shadow(vec![BoxShadow::new(px(-8.0), px(0.0), t::shadow().into()).blur_radius(px(30.0))])
+        .child(
+            div().flex().items_start().justify_between().gap(px(12.0)).px(px(23.0)).pt(px(23.0)).pb(px(25.0))
+                .child(
+                    div().flex().flex_col().min_w_0()
+                        .child(div().text_size(px(19.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
+                        .child(div().mt(px(5.0)).text_size(px(12.0)).text_color(t::text_dim()).child(subtitle.to_owned())),
+                )
+                .child(
+                    div().id("drawer-close").w(px(36.0)).h(px(36.0)).flex_shrink_0().rounded(px(18.0)).flex().items_center().justify_center().cursor_pointer().text_color(t::text_dim())
+                        .bg(t::base()).border_1().border_color(t::hairline())
+                        .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
+                        .child(icons::icon("x"))
+                        .on_click(cx.listener(|view, _, _, cx| view.close_drawer(cx))),
+                ),
+        )
+        .child(div().id("drawer-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).px(px(23.0)).pb(px(23.0)).child(stacked(rows)));
+    // GPUI routes a wheel event to every scroll container under the cursor, so without an
+    // occluding hitbox the page behind keeps scrolling while the drawer scrolls.
+    div().id("drawer").absolute().inset_0().flex().flex_row().occlude()
+        .child(
+            div().id("drawer-scrim").flex_1().h_full().bg(t::scrim())
+                .on_click(cx.listener(|view, _, _, cx| view.close_drawer(cx)))
+                .with_spring(("drawer-scrim", tag), spring(), |element, phase| {
+                    element.opacity(motion::alpha(phase))
+                }),
+        )
+        .child(panel.with_spring(("drawer-panel", tag), spring(), |element, phase| {
+            motion::slide_in(element, phase.0, 44.0)
         }))
         .into_any_element()
 }
 
-fn legacy_page_rows(page: usize, state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
-    match page {
-        0 => {
-            let mut rows = vec![
-                theme_row(state, cx),
-                toggle_row("AutoStart", "开机自动启动", "登录 Windows 后驻留系统托盘。", flag(state, "AutoStart", false), view),
-                toggle_row("AlwaysOnTop", "始终置顶", "显示在其他软件上方，不抢占键盘焦点。", flag(state, "AlwaysOnTop", true), view),
-                toggle_row("WordHighlight", "歌词进度涂色", "按照演唱进度高亮歌词。", flag(state, "WordHighlight", true), view),
-                toggle_row("HideWhenPaused", "暂停后隐藏", "暂停时收起淡出，恢复播放时显示胶囊。", flag(state, "HideWhenPaused", true), view),
-                toggle_row("HoverExpand", "悬停展开", "点击封面可保持展开；移开鼠标自动收起。", flag(state, "HoverExpand", false), view),
-                toggle_row("ClickAnywhereExpand", "点击任意区域展开", "开启后点击收起状态的任意位置即可展开；关闭时仅封面响应。", flag(state, "ClickAnywhereExpand", true), view),
-                slider_row("CompactWidth", "胶囊宽度", "调整收起时的歌词空间。", 140.0, 480.0, "px", slider_value(state, "CompactWidth", view, 260.0), view, cx),
-                slider_row("FontSize", "歌词字号", "文字大小即时生效。", 11.0, 17.0, "px", slider_value(state, "FontSize", view, 12.5), view, cx),
-                toggle_row("Floating", "自由悬浮", "按住移动按钮拖动，方向键可微调。", flag(state, "Floating", false), view),
-            ];
-            // The picker opens inline, directly under the row it edits, so the swatch and the pad
-            // stay in the same glance.
-            for (key, title) in [
-                ("ExpandedTextColor", "展开卡片字体颜色"),
-                ("ExpandedComponentColor", "展开卡片组件颜色"),
-                ("LyricProgressColor", "歌词进度填色"),
-            ] {
-                rows.push(color_row(key, title, state, view, cx));
-                if view.picker.as_ref().is_some_and(|picker| picker.key == key) {
-                    rows.push(picker_panel(view, cx));
-                }
-            }
-            rows.push(toggle_row("CoverBackground", "封面取色背景", "默认开启。根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view));
-            rows.push(action_row("resetAppearance", "恢复紧凑尺寸", "恢复宽度、字号与固定位置。", "恢复紧凑尺寸", view, cx));
-            rows.push(toggle_row("MusicClickOpenApp", "点击封面或歌名跳转播放器", "默认关闭。开启后点击音乐封面或歌名打开当前播放器。", flag(state,"MusicClickOpenApp",false),view));
-            rows
-        }
-        1 => {
-            let motion = setting(state, "Motion");
-            let _ = motion;
-            let mut rows = vec![toggle_row(
-                "Animation",
-                "界面动画",
-                "连续形变可以随时反向操作，由软件开关控制，不跟随 Windows 动画设置。",
-                flag(state, "Animation", true),
-                view,
-            )];
-            for (key, title, detail, min, max, default, unit) in [
-                ("MotionGap", "内容间距", "调整展开后的内容留白。", 0.0, 24.0, 8.0, "px"),
-                ("MotionDuration", "展开响应", "调整展开速度。", 250.0, 1200.0, 360.0, "ms"),
-                ("MotionCollapseDuration", "收起响应", "调整收起速度。", 150.0, 700.0, 300.0, "ms"),
-                ("MotionRadius", "卡片圆角", "胶囊形变后平滑落到这个圆角。", 8.0, 48.0, 30.0, "px"),
-                ("SpringStiffness", "弹簧刚度", "越高响应越快。", 100.0, 1000.0, 420.0, ""),
-                ("SpringDamping", "弹簧阻尼", "越高回弹越少。", 10.0, 80.0, 30.0, ""),
-                ("SpringMass", "弹簧质量", "调整运动的重量感。", 0.3, 2.0, 0.8, ""),
-            ] {
-                rows.push(slider_row(key, title, detail, min, max, unit, slider_value(state, key, view, default), view, cx));
-            }
-            rows
-        }
-        2 => {
-            let position = state["position"].as_f64().unwrap_or(0.0);
-            let duration = state["duration"].as_f64().unwrap_or(0.0);
-            vec![
-                info_row(
-                    "同步状态",
-                    text(state, "timeline", "等待播放器"),
-                    &format!(
-                        "当前位置 {position:.1} 秒 / 总时长 {duration:.1} 秒\n歌词来源：{}",
-                        text(state, "lyricSource", "等待获取")
-                    ),
-                ),
-                slider_row(
-                    "OffsetMilliseconds",
-                    "歌词偏移",
-                    "正数让歌词提前，负数让歌词延后。",
-                    -5000.0,
-                    5000.0,
-                    "ms",
-                    slider_value(state, "OffsetMilliseconds", view, 0.0),
-                    view,
-                    cx,
-                ),
-                toggle_row("Translation", "显示翻译", "展开时优先显示翻译，没有翻译时显示下一句。", flag(state, "Translation", true), view),
-                toggle_row("CompactTranslation", "收起时显示翻译", "默认开启。收起状态下原文在上、翻译在下；没有翻译时不会留出空行。", flag(state, "CompactTranslation", true), view),
-                toggle_row("ChineseTwoLine", "中文双行模式", "默认关闭。没有翻译时，在当前句下方以更小的字显示下一句。", flag(state, "ChineseTwoLine", false), view),
-                toggle_row("AutoCompactWidth", "歌词长度自适应宽度", "默认关闭。收起状态按真实字形宽度收缩胶囊，仍保留封面与播放活动条。", flag(state, "AutoCompactWidth", false), view),
-                calibrate_row(position, view, cx),
-            ]
-        }
-        3 => {
-            let mut rows = Vec::new();
-            for (id, name) in pipe::PLAYERS {
-                let allowed = source_allowed(state, id);
-                rows.push(check_row(
-                    SharedString::from(format!("source:{id}")),
-                    name,
-                    if id == "Browser" { "默认关闭，避免网页视频唤出胶囊。" } else { "仅响应允许的播放器。" },
-                    allowed,
-                    cx,
-                ));
-            }
-            let custom = custom_sources(state);
-            rows.push(
-                card("row-custom-add", "添加自定义程序", "输入程序名或媒体会话标识，不支持通配符和启动参数。按 Enter 添加。")
-                    .child(div().w(px(300.0)).child(view.custom_sources.clone()))
-                    .into_any_element(),
-            );
-            if !custom.is_empty() {
-                let mut list = div().flex().flex_row().flex_wrap().gap_2();
-                for id in &custom {
-                    let owned = id.clone();
-                    list = list.child(
-                        div()
-                            .id(SharedString::from(format!("custom-{id}")))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(7.0))
-                            .bg(t::field())
-                            .border_1()
-                            .border_color(t::hairline())
-                            .text_size(px(11.5))
-                            .text_color(t::text_dim())
-                            .child(id.clone())
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("custom-remove-{id}")))
-                                    .cursor_pointer()
-                                    .text_color(t::danger())
-                                    .hover(|style| style.text_color(t::text()))
-                                    .child("×")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        let shared = Rc::clone(&view.shared);
-                                        let remaining: Vec<String> =
-                                            custom_sources(&view.state()).into_iter().filter(|kept| *kept != owned).collect();
-                                        let text = remaining.join("; ");
-                                        let _ = send(&shared, "customSources", &text, cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                }
-                rows.push(
-                    card("row-custom-list", "已添加的自定义程序", "这些程序不在内置列表里，但同样可以唤出灵动岛。")
-                        .child(list)
-                        .into_any_element(),
-                );
-            }
-            rows.push(toggle_row(
-                "OnlineSongInfo",
-                "在线补全网易云歌曲信息",
-                "本地信息缺失时直连 music.163.com 补全封面和歌名，不发送账号或令牌。",
-                flag(state, "OnlineSongInfo", true),
-                view,
-            ));
-            rows.push(info_row(
-                "当前播放信息",
-                text(state, "player", "等待播放器"),
-                &format!("{}\n{}", text(state, "title", "暂无播放"), text(state, "artist", "")),
-            ));
-            rows
-        }
-        4 => vec![
-            info_row("更新来源", "Gitee 国内源 + GitHub", "同时检查两个源；一个不可用时使用另一个。下载校验完成后才替换原程序。"),
-            action_row("openGitee", "国内发布页", "点屿的 Gitee 国内镜像与下载。", "Gitee", view, cx),
-            action_row("checkUpdate", "在线更新", "同时请求国内源和 GitHub，检查最新正式版本。", "检查更新", view, cx),
-            action_row("installUpdate", "下载并更新", "应用内下载、校验并更新，保留设置，完成后自动重启。", "下载并更新", view, cx),
-            action_row("openGitHub", "项目主页", "查看源码、发行版本与反馈问题。", "GitHub", view, cx),
-            info_row("DotIsle · 点屿 1.3.2", "原生胶囊 · GPUI 设置 · Rust 后台",
-                     "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。"),
-            info_row("界面组件", "GPUI 0.2.2",
-                     "设置界面使用 GPUI，支持主题切换、即时调色与自动保存。"),
-            info_row("开源来源与许可", "按实际使用保留版权和许可声明",
-                     "TaskbarLyrics、AF-Media-Bar、NetEase-Cloud-Music-DiscordRPC 的移植来源继续保留。\nLyricify-Lyrics-Helper 的协议移植按 Apache-2.0 保留归属。\n详情见发行目录中的 LICENSE、THIRD-PARTY-NOTICES.md 与 licenses/。"),
-        ],
-        5 => history::rows(),
-        6 => {
-            let notifications = &state["notificationState"];
-            let mut rows = vec![
-                toggle_row("NotificationsEnabled", "通知提醒", "接收当前用户的新通知，无需额外安装通知组件。", flag(state,"NotificationsEnabled",false),view),
-                toggle_row("NotificationClickOpenApp", "点击通知跳转应用", "默认开启。点击通知横幅打开消息来源应用；关闭按钮只收起通知。", flag(state,"NotificationClickOpenApp",true),view),
-                toggle_row("PauseNotifications", "暂停通知", "暂停期间不弹出通知，恢复后只提醒新消息。", flag(state,"PauseNotifications",false),view),
-                toggle_row("NotificationWhitelistEnabled", "启用通知白名单", "默认关闭。开启后展开应用列表，仅提醒选中的应用。", flag(state,"NotificationWhitelistEnabled",false),view),
-            ];
-            if flag(state,"NotificationWhitelistEnabled",false){
-            for (id, title) in [("QQNT", "QQNT"), ("QQ", "QQ（旧版及系统通知）")] {
-                let allowed = notification_allowed(state, id);
-                rows.push(check_row(
-                    SharedString::from(format!("notification-app:{id}")),
-                    title,
-                    "仅能接收该应用发送到 Windows 通知中心的消息。",
-                    allowed,
-                    cx,
-                ));
-            }
-            if let Some(apps) = notifications["apps"].as_array() {
-                for app in apps {
-                    let (Some(id), Some(name)) = (app["id"].as_str(), app["name"].as_str()) else {
-                        continue;
-                    };
-                    if ["QQNT", "QQ"].contains(&id) {
-                        continue;
-                    }
-                    let allowed = notification_allowed(state, id);
-                    rows.push(check_row(
-                        SharedString::from(format!("notification-app:{id}")),
-                        name,
-                        id,
-                        allowed,
-                        cx,
-                    ));
-                }
-            }
-            rows.push(
-                card("row-notification-add", "其他通知应用白名单", "填写完整应用标识（AUMID），多个以分号分隔。也可从已出现的通知应用中勾选。")
-                    .child(div().w(px(300.0)).child(view.notification_apps.clone()))
-                    .into_any_element(),
-            );
-            }
-            rows.push(info_row("通知接收状态",notifications["access"].as_str().unwrap_or("未开启"),notifications["message"].as_str().unwrap_or("请开启通知提醒。")));
-            rows.push(action_row("notificationPreview","预览通知横幅","显示本地示例，预览通知外观。","预览",view,cx));
+/// How long the window takes to travel between two palettes. Long enough to read as a change of
+/// material, short enough that it never feels like a loading state.
+const THEME_BLEND: f32 = 0.26;
+/// How long a dismissed surface stays mounted while its exit spring runs. The springs themselves
+/// settle sooner; this is only the upper bound that keeps a panel alive long enough to leave.
+const EXIT_MS: u64 = 380;
 
-            rows
+impl SettingsApp {
+    /// The rows under a page's tab bar were replaced: restart their entrance cascade.
+    fn pulse(&mut self) {
+        self.content_epoch = self.content_epoch.wrapping_add(1);
+    }
+
+    /// Navigate. Every entry point goes through here, so the page transition, the overlay teardown
+    /// and the entrance cascade can never drift apart.
+    fn go(&mut self, route: Route) {
+        if self.route != route {
+            self.route = route;
+            self.route_epoch = self.route_epoch.wrapping_add(1);
+            self.pulse();
         }
-        7 => new_todo_rows(state, view, cx),
-        _ => Vec::new(),
+        self.drawer = None;
+        self.closing = None;
+        self.picker = None;
+        self.closing_picker = None;
+        self.return_context = None;
+        self.select = None;
+    }
+
+    /// Close the drawer, but keep it mounted for one exit spring so it leaves along the path it
+    /// arrived on. A panel that disappears the instant the click lands reads as a cut, not a close.
+    fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        if let Some(drawer) = self.drawer.take() {
+            self.closing = Some(drawer);
+            let weak = cx.entity().downgrade();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(Duration::from_millis(EXIT_MS)).await;
+                let _ = weak.update(cx, |view, cx| {
+                    view.closing = None;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The picker grew out of its row, so it shrinks back into it rather than blinking away.
+    fn close_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(picker) = self.picker.take() {
+            self.closing_picker = Some(picker);
+            let weak = cx.entity().downgrade();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(Duration::from_millis(EXIT_MS)).await;
+                let _ = weak.update(cx, |view, cx| {
+                    view.closing_picker = None;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        self.hex_field = None;
+        cx.notify();
+    }
+
+    /// Jump to 设置 · 音效, remembering where the jump came from so the way back stays visible.
+    fn go_sound(&mut self, cx: &mut Context<Self>) {
+        let back = (self.route != Route::Settings).then(|| (self.route, self.drawer.take()));
+        self.go(Route::Settings);
+        if let Some(context) = back {
+            self.return_context = Some(context);
+        }
+        self.settings_tab = 2;
+        cx.notify();
+    }
+
+    fn return_to_context(&mut self, cx: &mut Context<Self>) {
+        if let Some((route, drawer)) = self.return_context.take() {
+            self.go(route);
+            self.drawer = drawer;
+            self.settings_tab = 0;
+            cx.notify();
+        }
     }
 }
 
@@ -664,22 +1660,27 @@ fn notification_allowed(state: &Value, id: &str) -> bool {
 /// A row whose whole surface toggles a membership (players, notification apps).
 fn check_row(id: SharedString, title: &str, detail: &str, checked: bool, cx: &mut Context<SettingsApp>) -> AnyElement {
     let key = id.to_string();
+    let mark = SharedString::from(format!("check-{key}"));
     card(id, title, detail)
         .cursor_pointer()
-        .hover(|style| style.bg(t::surface_hi()))
-        .active(|style| style.bg(t::surface_hi()).opacity(0.9))
+        .hover(|style| style.bg(t::row_hover()))
+        .active(|style| style.bg(t::row_hover()).opacity(0.92))
         .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(22.0))
-                .h(px(22.0))
-                .rounded(px(11.0))
-                .bg(if checked { t::accent() } else { t::track() })
-                .text_size(px(12.0))
-                .text_color(if checked { t::on_accent() } else { t::text_faint() })
-                .child(if checked { "✓" } else { "" }),
+            // The circle fills and the tick fades in together on one spring, so a source that is
+            // switched on reads as a single gesture rather than two separate repaints.
+            div().with_spring(mark, motion::phase(motion::snappy(), checked), |_, phase| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(11.0))
+                    .bg(motion::blend_color(phase, t::track(), t::accent()))
+                    .text_size(px(12.0))
+                    .text_color(motion::blend_color(phase, t::text_faint(), t::on_accent()))
+                    .child(div().opacity(motion::alpha(phase)).child("✓"))
+            }),
         )
         .on_click(cx.listener(move |view, _, _, cx| {
             let shared = Rc::clone(&view.shared);
@@ -722,7 +1723,7 @@ fn button_row(
         .into_any_element()
 }
 
-/// A small secondary button used inside todo rows and the todo form.
+/// A small secondary button, used inside rows and drawers.
 fn small_button(
     id: SharedString,
     label: &str,
@@ -730,49 +1731,68 @@ fn small_button(
 ) -> impl IntoElement {
     div()
         .id(id)
-        .px_3()
-        .py_1()
-        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .px(px(11.0))
+        .py(px(6.0))
+        .rounded(px(9.0))
         .cursor_pointer()
-        .bg(t::field())
+        .bg(t::surface())
         .border_1()
         .border_color(t::hairline())
-        .text_size(px(11.5))
-        .text_color(t::text_dim())
-        .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
+        .text_size(px(12.5))
+        .text_color(t::text())
+        .hover(|style| style.bg(t::surface_hi()))
         .active(|style| style.opacity(0.85))
         .child(label.to_owned())
         .on_click(on_click)
 }
 
-/// A pill action sized to sit beside the round icon buttons.
-///
-/// The height is explicit on purpose: a plain padded button in a row whose sibling is a 36px
-/// circle stretches to that circle's height, which left the label small inside a tall box. Fixing
-/// the height and using half of it as the radius keeps the shape deliberate at any label length.
+/// The handoff's `di-button`: 36px tall, 10px radius, panel surface with a hairline border, or the
+/// green primary fill. The height is explicit so a button never stretches to a sibling's height.
 fn pill_button(
     id: SharedString,
     label: &str,
     filled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (background, foreground) = if filled { (t::accent(), t::on_accent()) } else { (t::field(), t::text()) };
-    let hover_background = if filled { t::accent() } else { t::surface_hi() };
+    pill_button_icon(id, None, label, filled, on_click)
+}
+
+fn pill_button_icon(
+    id: SharedString,
+    icon: Option<&'static str>,
+    label: &str,
+    filled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (background, foreground, border) = if filled {
+        (t::accent(), t::on_accent(), t::accent())
+    } else {
+        (t::surface(), t::text(), t::hairline())
+    };
     div()
         .id(id)
-        .h(px(36.0))
-        .px_4()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(18.0))
+        .gap(px(7.0))
+        .min_h(px(36.0))
+        .px(px(13.0))
+        .py(px(8.0))
+        .rounded(px(10.0))
         .bg(background)
-        .text_size(px(13.0))
+        .border_1()
+        .border_color(border)
+        .text_size(px(13.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(foreground)
         .cursor_pointer()
-        .hover(move |style| style.bg(hover_background))
+        .hover(move |style| if filled { style.opacity(0.92) } else { style.bg(t::surface_hi()) })
         .active(|style| style.opacity(0.8))
+        .children(icon.map(|name| icons::tinted(name, foreground)))
         .child(label.to_owned())
         .on_click(on_click)
 }
@@ -788,7 +1808,7 @@ fn field_line(label: &str, width: f32, field: Entity<TextField>) -> impl IntoEle
         .child(field)
 }
 
-/// A labelled segmented control, used for the chime choice.
+/// A labelled segmented control in the handoff's `di-tab` dress, used for the chime choice.
 fn segmented_row(
     id_prefix: &'static str,
     key: &'static str,
@@ -798,27 +1818,36 @@ fn segmented_row(
     current: &str,
     cx: &mut Context<SettingsApp>,
 ) -> AnyElement {
-    let mut segments = div().flex().flex_row().gap_1().p_1().rounded(px(9.0)).bg(t::field());
+    let mut segments = div().flex().flex_row().gap(px(6.0));
     for (value, label) in choices {
-        let selected = current == *value;
+        let value: &'static str = *value;
+        let label: &'static str = *label;
+        let selected = current == value;
+        let click = cx.listener(move |view, _, _, cx| {
+            let shared = Rc::clone(&view.shared);
+            let _ = send(&shared, key, value, cx);
+            cx.notify();
+        });
         segments = segments.child(
-            div()
-                .id(SharedString::from(format!("{id_prefix}-{value}")))
-                .px_3()
-                .py_1()
-                .rounded(px(7.0))
-                .cursor_pointer()
-                .bg(if selected { t::accent() } else { t::field() })
-                .text_size(px(12.0))
-                .text_color(if selected { t::on_accent() } else { t::text_dim() })
-                .hover(|style| style.bg(if selected { t::accent() } else { t::surface_hi() }))
-                .active(|style| style.opacity(0.85))
-                .child((*label).to_owned())
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    let shared = Rc::clone(&view.shared);
-                    let _ = send(&shared, key, value, cx);
-                    cx.notify();
-                })),
+            div().id((SharedString::from(format!("{id_prefix}-{value}")), 1usize)).with_spring(
+                (SharedString::from(format!("{id_prefix}-{value}")), 0usize),
+                motion::phase(motion::snappy(), selected),
+                move |_, phase| {
+                    div()
+                        .id(SharedString::from(format!("{id_prefix}-{value}")))
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(10.0))
+                        .cursor_pointer()
+                        .bg(motion::blend_color(phase, t::surface(), t::surface_hi()))
+                        .text_size(px(13.0))
+                        .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
+                        .font_weight(if motion::alpha(phase) > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .active(|style| style.opacity(0.72))
+                        .child(label.to_owned())
+                        .on_click(click)
+                },
+            ),
         );
     }
     card(SharedString::from(format!("row-{key}")), title, detail)
@@ -888,19 +1917,21 @@ fn pick_sound_file(shared: Rc<Mutex<Shared>>, path_key: &'static str, cx: &mut A
 /// stays visible at the call site.
 fn sound_rows(
     prefix: &'static str,
-    title: &str,
-    detail: &str,
     state: &Value,
     view: &SettingsApp,
     cx: &mut Context<SettingsApp>,
 ) -> Vec<AnyElement> {
     let todo=prefix=="Todo";
-    let (enabled_key,kind_key,volume_key,path_key)=match prefix{"Todo"=>("TodoSoundEnabled","TodoSound","TodoVolume","TodoSoundPath"),"Device"=>("DeviceSoundEnabled","DeviceSound","DeviceVolume","DeviceSoundPath"),_=>("NotificationSoundEnabled","NotificationSound","NotificationVolume","NotificationSoundPath")};
+    let (enabled_key,kind_key,volume_key,path_key,detail)=match prefix{
+        "Todo"=>("TodoSoundEnabled","TodoSound","TodoVolume","TodoSoundPath","待办到期、计时完成或番茄钟切换阶段时播放。"),
+        "Device"=>("DeviceSoundEnabled","DeviceSound","DeviceVolume","DeviceSoundPath","设备连接或移除横幅出现时播放。"),
+        _=>("NotificationSoundEnabled","NotificationSound","NotificationVolume","NotificationSoundPath","收到应用通知时播放。"),
+    };
     let default_kind = if prefix=="Device"{"Connect"}else if todo { "Bell" } else { "Soft" };
     let default_volume = if todo { 45.0 } else { 35.0 };
     let current = setting_str(state, kind_key, default_kind).to_owned();
     let mut rows = vec![
-        toggle_row(enabled_key, title, detail, flag(state, enabled_key, true), view),
+        toggle_row(enabled_key, "启用提醒音效", detail, flag(state, enabled_key, true), view, cx),
         segmented_row(
             kind_key,
             kind_key,
@@ -976,88 +2007,75 @@ fn sound_path_row(
         .into_any_element()
 }
 
-/// The add / edit form. Fields are entities owned by the settings view, so
-/// switching pages or re-rendering never costs the user their typing.
+/// The add / edit form, drawn as the handoff's flat stack of labelled fields. The entities are
+/// owned by the settings view, so re-rendering never costs the user their typing.
 fn todo_form(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
     let editing = view.todo_editing.is_some();
     let daily = view.todo_daily;
+    let labelled = |label: &str, body: AnyElement| div()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .w_full()
+        .child(div().text_size(px(14.0)).text_color(t::text()).child(label.to_owned()))
+        .child(body);
     div()
         .id("row-todo-form")
         .flex()
         .flex_col()
-        .gap_3()
-        .px_4()
-        .py_3()
-        .rounded(px(12.0))
-        .bg(t::surface())
-        .border_1()
-        .border_color(t::hairline())
+        .gap(px(17.0))
+        .w_full()
+        .child(labelled("题目", view.todo_title.clone().into_any_element()))
+        .child(labelled("内容", view.todo_content.clone().into_any_element()))
+        .child(labelled("提醒日期与时间", div()
+            .flex()
+            .flex_row()
+            .gap_3()
+            .child(div().flex_1().min_w_0().child(view.todo_date.clone()))
+            .child(div().w(px(110.0)).flex_shrink_0().child(view.todo_time.clone()))
+            .into_any_element()))
+        .child(labelled("颜色", select_control("todo-color", &color_name(&view.todo_color), view.select == Some("todo-color"), None, Rc::clone(&view.select_bounds), cx)))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_size(px(13.5)).text_color(t::text()).child(if editing { "编辑待办" } else { "新建待办" }))
-                .child(div().text_size(px(11.5)).text_color(t::text_dim()).child("题目必填。日期使用本地日期，时间使用 24 小时制。按 Enter 或点保存提交。")),
-        )
-        .child(
-            div()
+                .id("todo-daily")
                 .flex()
                 .flex_row()
-                .items_end()
+                .items_center()
+                .justify_between()
                 .gap_3()
-                .child(field_line("题目", 220.0, view.todo_title.clone()))
-                .child(field_line("内容（可留空）", 300.0, view.todo_content.clone())),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_end()
-                .gap_3()
-                .child(field_line("日期", 140.0, view.todo_date.clone()))
-                .child(field_line("时间", 120.0, view.todo_time.clone()))
-                .child(
-                    div()
-                        .id("todo-daily")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .rounded(px(8.0))
-                        .cursor_pointer()
-                        .bg(t::field())
-                        .border_1()
-                        .border_color(t::hairline())
-                        .hover(|style| style.bg(t::surface_hi()))
-                        .child(switch(daily))
-                        .child(div().text_size(px(12.0)).text_color(t::text_dim()).child("每日重复"))
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.todo_daily = !view.todo_daily;
-                            cx.notify();
-                        })),
-                ),
+                .pt(px(16.0))
+                .pb(px(16.0))
+                .border_b_1()
+                .border_color(t::hairline())
+                .cursor_pointer()
+                .child(div().text_size(px(14.0)).text_color(t::text()).child("每日重复"))
+                .child(switch("todo-daily", daily))
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.todo_daily = !view.todo_daily;
+                    cx.notify();
+                })),
         )
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_2()
-                .child(small_button(
-                    "todo-save".into(),
-                    if editing { "保存修改" } else { "保存" },
-                    cx.listener(|view, _, _, cx| view.submit_todo(cx)),
-                ))
-                .child(small_button(
+                .justify_end()
+                .gap(px(8.0))
+                .pt(px(14.0))
+                .child(pill_button(
                     "todo-cancel".into(),
                     "取消",
+                    false,
                     cx.listener(|view, _, _, cx| view.close_todo_form(cx)),
+                ))
+                .child(pill_button(
+                    "todo-save".into(),
+                    if editing { "保存修改" } else { "保存" },
+                    true,
+                    cx.listener(|view, _, _, cx| view.submit_todo(cx)),
                 )),
         )
-        .child(palette_row(view,cx))
         .into_any_element()
 }
 
@@ -1168,15 +2186,207 @@ fn calibrate_row(position: f64, view: &SettingsApp, cx: &mut Context<SettingsApp
         .into_any_element()
 }
 
+/// One labelled row inside a panel: title, optional 12px detail, and the control on the right. The
+/// surrounding panel owns the surface and the dividers, so the row itself is only rhythm.
+///
+/// The negative margin cancels the panel's 18px padding and the padding puts it back, so the content
+/// stays exactly where it was while the row's own box — and therefore its hover fill — reaches the
+/// panel's border. That is the whole point: a highlight that stops 18px short of the frame reads as
+/// a shadow that missed.
 fn card(id: impl Into<ElementId>, title: &str, detail: &str) -> Stateful<Div> {
-    let mut body = div().flex().flex_col().gap_1()
-        .child(div().text_size(px(13.5)).text_color(t::text()).child(title.to_owned()));
+    tally();
+    let mut body = div().flex().flex_col().gap_1().flex_1().min_w_0()
+        .child(div().text_size(px(14.0)).text_color(t::text()).child(title.to_owned()));
     if !detail.is_empty() {
-        body = body.child(div().text_size(px(11.5)).text_color(t::text_dim()).child(detail.to_owned()));
+        body = body.child(div().text_size(px(12.0)).text_color(t::text_dim()).child(detail.to_owned()));
     }
-    div().id(id).flex().flex_row().items_center().justify_between().gap_4()
-        .px_4().py_3().rounded(px(12.0)).bg(t::surface()).border_1().border_color(t::hairline())
+    div().id(id).flex().flex_row().items_center().justify_between().gap(px(15.0)).py(px(16.0)).min_w_0()
+        .mx(px(-6.0)).px(px(6.0))
         .child(body)
+}
+
+/// Paint one control that springs toward the pointer.
+///
+/// The shell owns the listeners and the spring; `build` draws the control at the current liveness,
+/// so the wash, the bar and the sink are one gesture rather than three class swaps. Pressing while
+/// already hovering retargets the *same* spring from wherever the wash got to, which a style swap
+/// cannot do — that carry-through is the whole reason this exists instead of another `.hover()`.
+///
+/// The hover listener is reported from both edges: gpui fires it on the way in *and* the way out,
+/// and also when a layout change moves a control under a stationary mouse — precisely the case a
+/// hand-rolled hit test gets wrong, and why the pointer state is delegated rather than rebuilt from
+/// recorded bounds.
+fn live_on(
+    shell: Div,
+    key: &'static str,
+    view: &SettingsApp,
+    cx: &Context<SettingsApp>,
+    build: impl Fn(f32) -> AnyElement + 'static,
+) -> AnyElement {
+    let id = SharedString::from(format!("live-{key}"));
+    let tracked = SharedString::from(key);
+    shell
+        .id((id.clone(), 1usize))
+        .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+            if *on {
+                if !this.hover.contains(&tracked) {
+                    this.hover.push(tracked.clone());
+                }
+            } else {
+                let Some(at) = this.hover.iter().position(|live| *live == tracked) else {
+                    return;
+                };
+                this.hover.remove(at);
+            }
+            cx.notify();
+        }))
+        .with_spring((id, 0usize), motion::level(motion::snappy(), view.liveness(key)), move |shell, liveness| shell.child(build(liveness)))
+        .into_any_element()
+}
+
+/// [`live_on`] for a row: a block that spans the panel it lives in.
+fn live(key: &'static str, view: &SettingsApp, cx: &Context<SettingsApp>, build: impl Fn(f32) -> AnyElement + 'static) -> AnyElement {
+    live_on(div().w_full().min_w_0(), key, view, cx, build)
+}
+
+/// The pointer response every panel row shares: a wash that springs in, and an accent bar that grows
+/// out of the panel's own edge at the row's vertical centre.
+///
+/// `interactive` gates only the press step — a row that is clickable deepens while the button is
+/// down, a row that merely *carries* controls (a select, a slider) only washes, because sinking it
+/// would claim a click that has nowhere to go.
+fn row_wash(row: Stateful<Div>, liveness: f32, interactive: bool) -> Stateful<Div> {
+    let wash = motion::wash(liveness);
+    let press = if interactive { motion::sink(liveness) } else { 0.0 };
+    row.relative().rounded(px(12.0))
+        .bg(motion::mix(press, motion::mix(wash, t::surface(), t::row_hover()), t::surface_hi()))
+        .child(accent_bar(liveness))
+}
+
+/// A box stretched over the whole row, so the bar is centred by the flex rather than by a measured
+/// offset — rows come in two heights and one `top` cannot centre both. The box already reaches the
+/// panel's inner edge, because `card` bleeds its own margin out to it; a negative offset would land
+/// outside and be clipped.
+fn accent_bar(liveness: f32) -> AnyElement {
+    let wash = motion::wash(liveness);
+    div().absolute().left_0().right_0().top_0().bottom_0().flex().items_center()
+        .child(div().w(px(3.0)).h(px(26.0 * wash)).rounded(px(1.5)).bg(t::accent()).opacity(wash))
+        .into_any_element()
+}
+
+/// Wrap a row that was built with its own `Context`-dependent children.
+///
+/// [`live_on`] rebuilds its content from a liveness value, which needs every child to be
+/// constructible inside a `'static` closure. A row holding a select or a slider track is not, so
+/// here the row is built once per frame as usual and the spring only restyles it — same motion, one
+/// fewer rebuild.
+fn live_shell(
+    row: Stateful<Div>,
+    key: SharedString,
+    view: &SettingsApp,
+    cx: &Context<SettingsApp>,
+    animate: impl FnOnce(Stateful<Div>, f32) -> Stateful<Div> + 'static,
+) -> AnyElement {
+    let id = SharedString::from(format!("spr-{key}"));
+    let tracked = key.clone();
+    row.on_hover(cx.listener(move |this, on: &bool, _, cx| {
+            if *on {
+                if !this.hover.contains(&tracked) {
+                    this.hover.push(tracked.clone());
+                }
+            } else if let Some(at) = this.hover.iter().position(|live| *live == tracked) {
+                this.hover.remove(at);
+            }
+            cx.notify();
+        }))
+        .with_spring(id, motion::level(motion::snappy(), view.liveness(&key)), animate)
+        .into_any_element()
+}
+
+/// A panel row that answers to the pointer: the wash springs in, an accent bar grows out of the
+/// panel's edge, and the row deepens a further step under a press.
+///
+/// `trailing` is drawn at the same liveness as the wash, so a control can ride its row — a switch
+/// knob stretching while its row is held down, a slider knob growing as the pointer arrives.
+fn live_card(
+    key: &'static str,
+    title: &str,
+    detail: &str,
+    trailing: impl Fn(f32) -> AnyElement + 'static,
+    click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    view: &SettingsApp,
+    cx: &Context<SettingsApp>,
+) -> AnyElement {
+    tally();
+    let (title, detail) = (title.to_owned(), detail.to_owned());
+    // Shared, because the row is redrawn on every frame of its spring and each redraw needs the
+    // same handler; a plain closure would be consumed by the first one.
+    let click = Rc::new(click);
+    live(key, view, cx, move |liveness| {
+        let click = Rc::clone(&click);
+        row_wash(
+            card(SharedString::from(format!("row-{key}")), &title, &detail).cursor_pointer(),
+            liveness,
+            true,
+        )
+        .child(trailing(liveness))
+        .on_click(move |event, window, app| click(event, window, app))
+        .into_any_element()
+    })
+}
+
+/// Paint one slider track at `progress` (0..1), with the knob lifted by `grab` (0 at rest, 1 while
+/// the gesture is live).
+///
+/// A free function so the very same track can be painted from inside a spring: the animated value
+/// is just a different `progress`, which keeps the drag path and the animated path pixel-identical.
+fn slider_track(
+    cell: Rc<Cell<Bounds<Pixels>>>,
+    smoke: Rc<Cell<Bounds<Pixels>>>,
+    watched: bool,
+    progress: f32,
+    grab: f32,
+) -> impl IntoElement {
+    let filled = t::accent();
+    let empty = t::track();
+    let knob = t::knob();
+    canvas(
+        move |painted, _window, _cx| {
+            cell.set(painted);
+            if watched {
+                smoke.set(painted);
+            }
+        },
+        move |painted, _state, window, _cx| {
+            let thickness = px(4.0);
+            let line = Bounds::new(
+                point(painted.origin.x, painted.origin.y + (painted.size.height - thickness) / 2.0),
+                size(painted.size.width, thickness),
+            );
+            window.paint_quad(quad(line, px(2.0), empty, px(0.0), transparent_black(), BorderStyle::Solid));
+            window.paint_quad(quad(
+                Bounds::new(line.origin, size(painted.size.width * progress, thickness)),
+                px(2.0),
+                filled,
+                px(0.0),
+                transparent_black(),
+                BorderStyle::Solid,
+            ));
+            let radius = 7.0 + 2.0 * grab;
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(painted.origin.x + painted.size.width * progress - px(radius), painted.origin.y + painted.size.height / 2.0 - px(radius)),
+                    size(px(radius * 2.0), px(radius * 2.0)),
+                ),
+                px(radius),
+                knob,
+                px(1.0),
+                t::hairline_bright(),
+                BorderStyle::Solid,
+            ));
+        },
+    )
+    .size_full()
 }
 
 /// A draggable value row.
@@ -1199,53 +2409,28 @@ fn slider_row(
         Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0)))));
     let span = if max > min { max - min } else { 1.0 };
     let fraction = ((value - min) / span).clamp(0.0, 1.0) as f32;
-    let filled = t::accent();
-    let empty = t::track();
-    let knob = t::knob();
-
-    let cell = Rc::clone(&bounds);
     let watched = smoke_slider() == Some(key);
+    let dragging = view.slider.is_some_and(|drag| drag.key == key);
+    let cell = Rc::clone(&bounds);
     let smoke_cell = Rc::clone(&view.smoke_bounds);
-    let track = canvas(
-        move |painted, _window, _cx| {
-            cell.set(painted);
-            if watched {
-                smoke_cell.set(painted);
-            }
-        },
-        move |painted, _state, window, _cx| {
-            let thickness = px(4.0);
-            let line = Bounds::new(
-                point(painted.origin.x, painted.origin.y + (painted.size.height - thickness) / 2.0),
-                size(painted.size.width, thickness),
-            );
-            window.paint_quad(quad(line, px(2.0), empty, px(0.0), transparent_black(), BorderStyle::Solid));
-            window.paint_quad(quad(
-                Bounds::new(line.origin, size(painted.size.width * fraction, thickness)),
-                px(2.0),
-                filled,
-                px(0.0),
-                transparent_black(),
-                BorderStyle::Solid,
-            ));
-            window.paint_quad(quad(
-                Bounds::new(
-                    point(painted.origin.x + painted.size.width * fraction - px(7.0), painted.origin.y + painted.size.height / 2.0 - px(7.0)),
-                    size(px(14.0), px(14.0)),
-                ),
-                px(7.0),
-                knob,
-                px(1.0),
-                t::hairline_bright(),
-                BorderStyle::Solid,
-            ));
-        },
-    )
-    .size_full();
+    // Direct manipulation wins: while the pointer is on the track the fill must follow it one to
+    // one, and a spring there would read as lag. Every other change — a preset, a reset, a value
+    // arriving from the native side — glides instead of jumping.
+    let track: AnyElement = if dragging {
+        slider_track(Rc::clone(&cell), Rc::clone(&smoke_cell), watched, fraction, 1.0).into_any_element()
+    } else {
+        let paint = move |progress: f32| slider_track(Rc::clone(&cell), Rc::clone(&smoke_cell), watched, progress, 0.0);
+        paint(fraction)
+            .with_spring(
+                SharedString::from(format!("slider-{key}")),
+                SpringAnimation::new(motion::standard()).to(fraction).with_epsilon(0.0008),
+                move |_, progress| paint(progress),
+            )
+            .into_any_element()
+    };
 
     let readout = format_value(value, min, max, unit);
-    let dragging = view.slider.is_some_and(|drag| drag.key == key);
-    card(SharedString::from(format!("row-{key}")), title, detail)
+    let row = card(SharedString::from(format!("row-{key}")), title, detail)
         .child(
             div()
                 .flex()
@@ -1286,8 +2471,8 @@ fn slider_row(
         .on_mouse_up_out(MouseButton::Left, cx.listener(|view, _: &MouseUpEvent, _, cx| {
             view.slider_commit(cx);
             cx.notify();
-        }))
-        .into_any_element()
+        }));
+    live_shell(row, SharedString::from(key), view, cx, |row, liveness| row_wash(row, liveness, false))
 }
 
 /// Current value of a slider: the live drag value while this row is being dragged, otherwise what
@@ -1308,47 +2493,19 @@ fn slider_value(state: &Value, key: &str, view: &SettingsApp, default: f64) -> f
     stored.and_then(Value::as_f64).unwrap_or(default)
 }
 
-/// Apple-style segmented control for the appearance preference: follow Windows, or pin it.
-fn theme_row(state: &Value, cx: &mut Context<SettingsApp>) -> AnyElement {
-    let current = setting_str(state, "SettingsTheme", "System").to_owned();
-    let mut segments = div().flex().flex_row().gap_1().p_1().rounded(px(9.0)).bg(t::field());
-    for (value, label) in [("System", "跟随系统"), ("Light", "浅色"), ("Dark", "深色")] {
-        let selected = current == value;
-        segments = segments.child(
-            div()
-                .id(SharedString::from(format!("theme-{value}")))
-                .px_3()
-                .py_1()
-                .rounded(px(7.0))
-                .cursor_pointer()
-                .bg(if selected { t::accent() } else { t::field() })
-                .text_size(px(12.0))
-                .text_color(if selected { t::on_accent() } else { t::text_dim() })
-                .hover(|style| style.bg(if selected { t::accent() } else { t::surface_hi() }))
-                .active(|style| style.opacity(0.85))
-                .child(label.to_owned())
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    let shared = Rc::clone(&view.shared);
-                    let _ = send(&shared, "SettingsTheme", value, cx);
-                    cx.notify();
-                })),
-        );
-    }
-    card("row-theme", "外观", "跟随 Windows，或固定为浅色 / 深色。选择会随其他设置一起保存。")
-        .child(segments)
-        .into_any_element()
-}
-
-fn toggle_row(key: &'static str, title: &str, detail: &str, checked: bool, view: &SettingsApp) -> AnyElement {
+fn toggle_row(key: &'static str, title: &str, detail: &str, checked: bool, view: &SettingsApp, cx: &Context<SettingsApp>) -> AnyElement {
     let shared = Rc::clone(&view.shared);
-    card(SharedString::from(format!("row-{key}")), title, detail)
-        .cursor_pointer()
-        .hover(|style| style.bg(t::surface_hi()))
-        .child(switch(checked))
-        .on_click(move |_, _, cx| {
+    live_card(
+        key,
+        title,
+        detail,
+        move |liveness| switch_at(key, checked, liveness).into_any_element(),
+        move |_, _, cx| {
             let _ = send(&shared, key, if checked { "false" } else { "true" }, cx);
-        })
-        .into_any_element()
+        },
+        view,
+        cx,
+    )
 }
 
 fn default_color(key: &str) -> &'static str {
@@ -1364,11 +2521,8 @@ fn color_row(key: &'static str, title: &str, state: &Value, view: &SettingsApp, 
     let current = setting(state, key).as_str().map(str::to_owned).unwrap_or_else(|| default_color(key).to_owned());
     let open = view.picker.as_ref().is_some_and(|picker| picker.key == key);
     let opening = current.clone();
-    card(SharedString::from(format!("row-{key}")), title, "点击打开调色盘；拖动色相与明暗即可取色。")
+    let row = card(SharedString::from(format!("row-{key}")), title, "点击打开调色盘；拖动色相与明暗即可取色。")
         .cursor_pointer()
-        .hover(|style| style.bg(t::surface_hi()))
-        // Feedback lands on the press, not on release.
-        .active(|style| style.bg(t::surface_hi()).opacity(0.9))
         .child(
             div().flex().items_center().gap_2()
                 .child(div().text_size(px(11.5)).text_color(t::text_dim()).child(current.clone()))
@@ -1379,11 +2533,16 @@ fn color_row(key: &'static str, title: &str, state: &Value, view: &SettingsApp, 
         )
         .on_click(cx.listener(move |view, _, _, cx| {
             let already_open = view.picker.as_ref().is_some_and(|picker| picker.key == key);
-            view.picker = (!already_open).then(|| Picker { key, hsv: Hsv::from_rgb(t::parse(&opening)), drag: Drag::None });
-            view.hex_field=(!already_open).then(||make_hex_field(&opening,cx));
-            cx.notify();
-        }))
-        .into_any_element()
+            if already_open {
+                view.close_picker(cx);
+            } else {
+                view.closing_picker = None;
+                view.picker = Some(Picker { key, hsv: Hsv::from_rgb(t::parse(&opening)), drag: Drag::None });
+                view.hex_field = Some(make_hex_field(&opening, cx));
+                cx.notify();
+            }
+        }));
+    live_shell(row, SharedString::from(key), view, cx, |row, liveness| row_wash(row, liveness, true))
 }
 
 fn make_hex_field(initial:&str,cx:&mut Context<SettingsApp>)->Entity<TextField>{
@@ -1417,8 +2576,12 @@ const PRESETS: [&str; 10] = [
 /// Direct manipulation first — the pad and strip track the pointer one to one, the value is visible
 /// the whole time, and the edit only reaches the native side when the gesture ends.
 fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
-    let Some(picker) = view.picker.as_ref() else {
-        return div().into_any_element();
+    // Same trick as the drawer: a closing picker keeps painting until its exit spring settles, so
+    // the surface shrinks back into the row that opened it instead of blinking out.
+    let (picker, open) = match (view.picker.as_ref(), view.closing_picker.as_ref()) {
+        (Some(picker), _) => (*picker, true),
+        (None, Some(picker)) => (*picker, false),
+        (None, None) => return div().into_any_element(),
     };
     let hsv = picker.hsv;
     let hex = t::to_hex(hsv.to_rgb());
@@ -1455,16 +2618,25 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
         .border_color(t::hairline_bright())
         .child(pad_canvas)
         .child(
-            div()
-                .absolute()
-                .left(px(hsv.s * PAD_WIDTH - KNOB / 2.0))
-                .top(px((1.0 - hsv.v) * PAD_HEIGHT - KNOB / 2.0))
-                .w(px(KNOB))
-                .h(px(KNOB))
-                .rounded(px(KNOB / 2.0))
-                .bg(hsv.to_rgb())
-                .border_2()
-                .border_color(gpui::white()),
+            // The knob swells under the finger: feedback on the press, and it settles back the
+            // moment the gesture ends.
+            div().with_spring(
+                ("pad-knob", 0usize),
+                motion::phase(motion::snappy(), picker.drag == Drag::Pad),
+                move |_, phase| {
+                    let size = KNOB + 4.0 * motion::alpha(phase);
+                    div()
+                        .absolute()
+                        .left(px(hsv.s * PAD_WIDTH - size / 2.0))
+                        .top(px((1.0 - hsv.v) * PAD_HEIGHT - size / 2.0))
+                        .w(px(size))
+                        .h(px(size))
+                        .rounded(px(size / 2.0))
+                        .bg(hsv.to_rgb())
+                        .border_2()
+                        .border_color(gpui::white())
+                },
+            ),
         )
         .on_mouse_down(MouseButton::Left, cx.listener(|view, event: &MouseDownEvent, _, cx| {
             view.begin_drag(Drag::Pad, event.position);
@@ -1506,16 +2678,23 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
         .overflow_hidden()
         .child(hue_canvas)
         .child(
-            div()
-                .absolute()
-                .left(px(hsv.h * PAD_WIDTH - KNOB / 2.0))
-                .top(px(-(KNOB - HUE_HEIGHT) / 2.0))
-                .w(px(KNOB))
-                .h(px(KNOB))
-                .rounded(px(KNOB / 2.0))
-                .bg(Hsv::new(hsv.h, 1.0, 1.0).to_rgb())
-                .border_2()
-                .border_color(gpui::white()),
+            div().with_spring(
+                ("hue-knob", 0usize),
+                motion::phase(motion::snappy(), picker.drag == Drag::Hue),
+                move |_, phase| {
+                    let size = KNOB + 4.0 * motion::alpha(phase);
+                    div()
+                        .absolute()
+                        .left(px(hsv.h * PAD_WIDTH - size / 2.0))
+                        .top(px(-(size - HUE_HEIGHT) / 2.0))
+                        .w(px(size))
+                        .h(px(size))
+                        .rounded(px(size / 2.0))
+                        .bg(Hsv::new(hsv.h, 1.0, 1.0).to_rgb())
+                        .border_2()
+                        .border_color(gpui::white())
+                },
+            ),
         )
         .on_mouse_down(MouseButton::Left, cx.listener(|view, event: &MouseDownEvent, _, cx| {
             view.begin_drag(Drag::Hue, event.position);
@@ -1618,13 +2797,16 @@ fn picker_panel(view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement
                                 .hover(|style| style.bg(t::accent()).text_color(t::base()))
                                 .active(|style| style.opacity(0.85))
                                 .child("完成")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.picker = None;
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(|view, _, _, cx| view.close_picker(cx))),
                         ),
                 ),
         )
+        // The picker is a surface that grew out of a row, so it arrives from there and leaves the
+        // same way — the row it belongs to stays visible the whole time, which is what makes the
+        // spatial relationship obvious.
+        .with_spring(("picker-phase", 0usize), motion::phase_from(motion::sheet(), open, false), |element, phase| {
+            motion::rise(element, motion::alpha(phase), 14.0)
+        })
         .into_any_element()
 }
 
@@ -1715,34 +2897,76 @@ impl SettingsApp {
     }
 }
 
-fn info_row(title: &str, detail: &str, body: &str) -> AnyElement {
-    div().px_4().py_3().rounded(px(12.0)).bg(t::surface()).border_1().border_color(t::hairline())
-        .child(div().text_size(px(13.5)).text_color(t::text()).child(title.to_owned()))
-        .child(div().mt_1().text_size(px(11.5)).text_color(t::text_dim()).child(detail.to_owned()))
-        .child(div().mt_3().text_size(px(12.0)).text_color(t::text_dim()).child(body.to_owned()))
-        .into_any_element()
+fn info_row(title: &str, detail: &str, body: &str, view: &SettingsApp, cx: &Context<SettingsApp>) -> AnyElement {
+    tally();
+    let row = div().id(SharedString::from(format!("row-info-{title}")))
+        .flex().flex_col().py(px(16.0)).mx(px(-6.0)).px(px(6.0)).min_w_0()
+        .child(div().text_size(px(14.0)).text_color(t::text()).child(title.to_owned()))
+        .child(div().mt_1().text_size(px(12.0)).text_color(t::text_dim()).child(detail.to_owned()))
+        .child(div().mt_3().text_size(px(12.5)).text_color(t::text_dim()).child(body.to_owned()));
+    live_shell(row, SharedString::from(title), view, cx, |row, liveness| row_wash(row, liveness, false))
 }
 
-/// The switch: a capsule track with a knob. Two nested rounded rectangles, no image assets.
-fn switch(checked: bool) -> impl IntoElement {
-    let (track, knob) = if checked { (t::accent(), t::base()) } else { (t::track(), t::knob()) };
-    div().flex().items_center().w(px(42.0)).h(px(24.0)).rounded(px(12.0)).bg(track)
-        .child(
-            div().ml(px(if checked { 20.0 } else { 2.0 }))
-                .w(px(20.0)).h(px(20.0)).rounded(px(10.0)).bg(knob),
-        )
+/// The switch: a capsule track with a knob, straight from the handoff's `di-switch`.
+///
+/// Track and knob ride one spring, so flipping it half way and changing your mind carries the
+/// velocity into the return rather than hitting a wall — the thing a CSS transition cannot do.
+fn switch(key: &'static str, checked: bool) -> impl IntoElement {
+    switch_at(key, checked, 0.0)
+}
+
+/// [`switch`] with the row's pointer state folded in.
+///
+/// `liveness` arrives already interpolated by the row's own spring, so the knob deforms *with* the
+/// press instead of needing a second spring of its own — one element, one spring, two readings of
+/// it. Held down, the knob stretches toward the end it is about to travel to and flattens slightly,
+/// which is what makes a toggle read as pushed rather than merely clicked.
+fn switch_at(key: &'static str, checked: bool, liveness: f32) -> impl IntoElement {
+    let wash = motion::wash(liveness);
+    let press = motion::sink(liveness);
+    div().with_spring(
+        SharedString::from(format!("switch-{key}")),
+        motion::phase(motion::snappy(), checked),
+        move |_, phase| {
+            let progress = motion::alpha(phase);
+            // Stretching eats travel, so the knob still lands inside the track at both ends.
+            let width = 15.0 + 5.0 * press;
+            let travel = 14.0 - 5.0 * press;
+            div().relative().flex_shrink_0().w(px(35.0)).h(px(21.0)).rounded(px(10.5))
+                .bg(motion::blend_color(phase, t::surface_hi(), t::accent()))
+                .border_1()
+                .border_color(motion::mix(0.45 * wash, motion::blend_color(phase, t::hairline(), t::accent()), t::accent()))
+                .child(
+                    div().absolute().top(px(2.0 + press)).left(px(2.0 + travel * progress))
+                        .w(px(width)).h(px(15.0 - 2.0 * press)).rounded(px(7.5))
+                        .bg(motion::blend_color(phase, t::surface(), t::on_accent()))
+                        .shadow(vec![BoxShadow::new(px(0.0), px(1.0 + wash), t::shadow().into()).blur_radius(px(2.0 + 3.0 * wash))]),
+                )
+        },
+    )
 }
 
 /// Send one edit and fold the reply back into the shared state.
 fn send(shared: &Rc<Mutex<Shared>>, key: &str, value: &str, cx: &mut App) -> Result<(), String> {
     if key=="openGitee" {cx.open_url("https://gitee.com/heiamer/abc");return Ok(())}
     if key=="openGitHub" {cx.open_url("https://github.com/Heiamer/LyricIsland");return Ok(())}
-    if key=="checkUpdate"||key=="installUpdate" {
-        let install=key=="installUpdate";
-        if let Ok(mut s)=shared.lock(){s.message="正在同时检查 Gitee 国内源和 GitHub…".into();}
-        let shared=Rc::clone(shared);let job=cx.background_executor().spawn(async move {if install{lyric_backend::updates::install()}else{lyric_backend::updates::check()}});
-        cx.spawn(async move |cx|{let result=job.await;if let Ok(mut s)=shared.lock(){s.message=match result{Ok(v)=>v["message"].as_str().unwrap_or("检查完成").to_owned(),Err(e)=>e};}let _=cx.update(|cx|cx.refresh_windows());}).detach();return Ok(())
+    if key=="collectLogs" {
+        if let Ok(mut s)=shared.lock(){s.message="正在收集日志…".into();}
+        let shared=Rc::clone(shared);
+        let job=cx.background_executor().spawn(async move { pipe::request("collectLogs", Value::Null) });
+        cx.spawn(async move |cx|{
+            let result=job.await;
+            if let Ok(mut s)=shared.lock(){
+                match result{
+                    Ok(reply)=>{let success=reply["success"].as_bool()==Some(true);s.message=reply["message"].as_str().unwrap_or(if success{"已生成诊断日志"}else{"生成诊断日志失败"}).to_owned();s.connection_error=false;s.message_is_connection_error=false;},
+                    Err(error)=>{s.message=error;s.connection_error=true;s.message_is_connection_error=true;}
+                }
+            }
+            let _=cx.update(|cx|cx.refresh_windows());
+        }).detach();
+        return Ok(())
     }
+    if key=="checkUpdate"||key=="installUpdate" {send_todo(shared,if key=="checkUpdate"{"checkUpdate"}else{"updateDownload"},Value::Null,cx);return Ok(())}
     let key=key.to_owned();let value=value.to_owned();
     let job=cx.background_executor().spawn(async move {pipe::edit(&key,&value)});
     let shared=Rc::clone(shared);
@@ -1834,17 +3058,21 @@ fn main() {
         Some(Picker { key, hsv: Hsv::from_rgb(t::parse(&hex)), drag: Drag::None })
     });
 
-    Application::new().run(move |cx: &mut App| {
+    let platform = gpui_windows::WindowsPlatform::new(false).expect("failed to initialize the Windows platform");
+    Application::with_platform(Rc::new(platform)).with_assets(icons::IconAssets).run(move |cx: &mut App| {
         register_fonts(cx);
 
-        let bounds = Bounds::centered(None, size(px(940.0), px(720.0)), cx);
+        let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
         let window = match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions{title:Some("点屿 · 设置 1.3.2".into()),appears_transparent:true,..Default::default()}),
+                titlebar: Some(TitlebarOptions{title:Some("点屿 · 控制中心".into()),appears_transparent:true,..Default::default()}),
+                // Fixed canvas: no resize border, no maximize, no drag-to-maximize. The layout is
+                // built for one size and every page scrolls inside it.
+                is_resizable: false,
                 ..Default::default()
             },
-            |window, cx| {window.set_window_title("点屿 · 设置 1.3.2");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
+            |window, cx| {window.set_window_title("点屿 · 控制中心");cx.new(|cx| SettingsApp::new(Rc::clone(&shared), smoke_picker, cx))},
         ) {
             Ok(window) => window,
             Err(error) => {
@@ -1854,7 +3082,7 @@ fn main() {
             }
         };
 
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -1868,6 +3096,31 @@ fn main() {
             Some(directory) => run_smoke(cx, window, directory),
             None => {
                 poll_pipe(cx, window, Rc::clone(&shared));
+                if let Ok(fraction) = std::env::var("LYRICISLAND_SMOKE_DRAWER_BOTTOM") {
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_millis(900)).await;
+                        let _ = window.update(cx, |view, _, cx| {
+                            let fraction = fraction.parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
+                            let max = view.drawer_scroll.max_offset();
+                            view.drawer_scroll.set_offset(point(px(0.0), -max.y * fraction));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+                if let Ok(fraction) = std::env::var("LYRICISLAND_SMOKE_PAGE_SCROLL") {
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_millis(900)).await;
+                        let _ = window.update(cx, |view, _, cx| {
+                            let fraction = fraction.parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0);
+                            let index = view.route.index().min(view.scrolls.len() - 1);
+                            let max = view.scrolls[index].max_offset();
+                            view.scrolls[index].set_offset(point(px(0.0), -max.y * fraction));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
                 if let Some(path)=std::env::var_os("LYRICISLAND_SMOKE_RECONNECT"){run_reconnect_smoke(cx,window,PathBuf::from(path),Rc::clone(&shared));}
                 // Bring the picker into view after the first frame. This doubles as a check that a
                 // late update really does repaint — dragging depends on it.
@@ -1875,11 +3128,11 @@ fn main() {
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_millis(900)).await;
                         let outcome = window.update(cx, |view, _, cx| {
-                            let max = view.scrolls[view.page.min(view.scrolls.len() - 1)].max_offset();
+                            let max = view.scrolls[view.route.index().min(view.scrolls.len() - 1)].max_offset();
                             // Scroll to the end so the picker under the last colour row is visible.
-                            view.scrolls[view.page.min(view.scrolls.len() - 1)].set_offset(point(px(0.0), -max.height));
+                            view.scrolls[view.route.index().min(view.scrolls.len() - 1)].set_offset(point(px(0.0), -max.y));
                             cx.notify();
-                            f32::from(max.height)
+                            f32::from(max.y)
                         });
                         log("SMOKE", &format!("late scroll: {outcome:?}"));
                         // Publish the painted pad rectangle so an automated drag can aim at it. The
@@ -1933,16 +3186,20 @@ fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<S
             if value["pendingPage"].as_str().is_some() {
                 let _ = pipe::page_seen();
             }
-            Ok::<Value, String>(value)
+            let quick = value["pendingAction"].as_str() == Some("quickReminder");
+            if quick { let _ = pipe::request("pendingActionSeen", Value::Null); }
+            Ok::<(Value, bool), String>((value, quick))
         }).await;
         let mut jump = None;
+        let mut quick = false;
         let mut changed=true;
         if let Ok(mut state) = shared.lock() {
             let before=(ui_state(&state.state),state.notice.clone(),state.message.clone(),state.connection_error);
             match reply {
-                Ok(value) => {
+                Ok((value, quick_action)) => {
+                    quick = quick_action;
                     jump = match value["pendingPage"].as_str() {
-                        Some("todos") => Some(PAGE_TODOS),Some("timers")=>Some(8),
+                        Some("todos")=>Some(Route::Todos),Some("timers")=>Some(Route::Timers),Some("notifications")=>Some(Route::Notifications),
                         _ => None,
                     };
                     state.state = value;
@@ -1956,10 +3213,16 @@ fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<S
         }
         if let Some(target) = jump {
             if window.update(cx, |view, _, cx| {
-                if view.page != target { view.page = target; }
+                if view.route != target { view.route = target; view.drawer=None; view.return_context=None; }
                 cx.notify();
             }).is_err() { break; }
         }
+        if quick && window.update(cx, |view, _, cx| {
+            view.route = Route::Overview;
+            view.drawer = Some(Drawer::QuickReminder);
+            view.return_context = None;
+            cx.notify();
+        }).is_err() { break; }
         if changed && window.update(cx, |_, _, cx| cx.notify()).is_err() {
             break;
         }
@@ -1967,16 +3230,19 @@ fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<S
     .detach();
 }
 
-/// `--smoke-ui <dir>`: walk every page, then report whether the pipe answered.
+/// `--smoke-ui <dir>`: walk every route, render every drawer once, then report the regressions.
 fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf) {
     let _ = std::fs::create_dir_all(&directory);
     cx.spawn(async move |cx| {
-        for page in 0..PAGES.len() {
-            // The todo page is walked with its form open, so the walk paints the fields and the
-            // daily-repeat control rather than only the list.
+        for route in Route::ALL {
+            // The todo route is walked with its editor drawer open, so the walk paints the fields
+            // and the daily-repeat control rather than only the list.
             if window.update(cx, |view, _, cx| {
-                view.page = page;
-                if page == PAGE_TODOS {
+                view.route = route;
+                view.drawer = None;
+                view.picker = None;
+                view.settings_tab = 0;
+                if route == Route::Todos {
                     view.open_todo_form(None, cx);
                 }
                 cx.notify();
@@ -1984,38 +3250,119 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
                 return;
             }
             cx.background_executor().timer(Duration::from_millis(240)).await;
+            // 设置 has three tabs behind one sidebar entry, so each tab is painted in turn.
+            if route == Route::Settings {
+                for tab in 1..3 {
+                    if window.update(cx, |view, _, cx| { view.settings_tab = tab; cx.notify(); }).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(240)).await;
+                }
+            }
         }
+        // Every drawer must build without a window: a missing arm fails the walk loudly.
+        let drawer_walk = window.update(cx, |view, _, cx| {
+            let state = view.shared.lock().unwrap().state.clone();
+            let todo = state["todos"].as_array().and_then(|list| list.first()).and_then(|todo| todo["id"].as_str()).map(str::to_owned);
+            let notice = state["notificationHistory"].as_array().and_then(|list| list.first()).and_then(|event| event["id"].as_str()).map(str::to_owned);
+            let mut drawers = vec![Drawer::TodoEditor, Drawer::TodoSettings, Drawer::NotificationSettings, Drawer::TimerSettings, Drawer::Changelog, Drawer::Licenses, Drawer::QuickReminder, Drawer::WorkflowEditor, Drawer::RuleEditor(None)];
+            let rule = state["appRules"].as_array().and_then(|list| list.first()).and_then(|rule| rule["id"].as_str()).map(str::to_owned);
+            if let Some(id) = rule {
+                drawers.push(Drawer::RuleEditor(Some(id)));
+            }
+            if let Some(id) = todo {
+                drawers.push(Drawer::Snooze(id.clone()));
+                drawers.push(Drawer::Focus(id));
+            }
+            if let Some(id) = notice {
+                drawers.push(Drawer::NoticeDetail(id));
+            }
+            view.drawer = None;
+            for drawer in drawers {
+                if drawer_rows(&drawer, &state, view, cx).is_empty() {
+                    return false;
+                }
+            }
+            true
+        }).unwrap_or(false);
+        // Every tab of the settings page must build from the same snapshot, and the sound tab is
+        // the largest of the three. Rows are counted individually now that sections are panels.
+        let settings_tabs_regression=window.update(cx,|view,_,cx|{
+            let state=view.shared.lock().unwrap().state.clone();
+            let mut sizes=Vec::new();
+            for tab in 0..3 { view.settings_tab=tab; tally_reset(); let _=settings_page_rows(&state,view,cx); sizes.push(tally_count()); }
+            view.settings_tab=0;
+            sizes.iter().all(|size|*size>=2)&&sizes[2]>sizes[0]
+        }).unwrap_or(false);
+        // The drawer is a stack of panels now, so the number of top-level elements says nothing
+        // about how many rows it builds; count the rows themselves.
         let whitelist_regression=window.update(cx,|view,_,cx|{
-            let mut state=view.shared.lock().unwrap().state.clone();state["settings"]["NotificationWhitelistEnabled"]=json!(false);let collapsed=page_rows(5,&state,view,cx).len();state["settings"]["NotificationWhitelistEnabled"]=json!(true);let expanded=page_rows(5,&state,view,cx).len();collapsed==9&&expanded>=collapsed+3
+            let mut state=view.shared.lock().unwrap().state.clone();
+            state["settings"]["NotificationWhitelistEnabled"]=json!(false);
+            tally_reset();let _=notification_settings_rows(&state,view,cx);let collapsed=tally_count();
+            state["settings"]["NotificationWhitelistEnabled"]=json!(true);
+            tally_reset();let _=notification_settings_rows(&state,view,cx);let expanded=tally_count();
+            collapsed>=9&&expanded>=collapsed+3
         }).unwrap_or(false);
-        // The todo page must grow by exactly one row when the form opens, and the form must not be
-        // built from a fresh entity each frame.
+        // Opening the editor must fill the fields from the snapshot, and closing it must not change
+        // what the todo page renders — the form lives in the one shared drawer now.
         let todo_regression=window.update(cx,|view,_,cx|{
-            view.todo_form_open=false;view.todo_editing=None;
+            view.drawer=None;view.todo_editing=None;view.todo_filter=0;view.todo_completed_open=false;
             let state=view.shared.lock().unwrap().state.clone();
-            let collapsed=page_rows(PAGE_TODOS,&state,view,cx).len();
+            let collapsed=page_rows(Route::Todos,&state,view,cx).len();
             view.open_todo_form(None,cx);
-            let state=view.shared.lock().unwrap().state.clone();
-            let opened=page_rows(PAGE_TODOS,&state,view,cx).len();
+            let editor=view.drawer==Some(Drawer::TodoEditor);
+            let drawer=view.drawer.clone().map(|drawer|drawer_rows(&drawer,&state,view,cx).len()).unwrap_or(0);
             let filled=view.todo_date.read(cx).text()==state["today"].as_str().unwrap_or_default()&&!view.todo_daily;
+            let after=page_rows(Route::Todos,&state,view,cx).len();
             view.close_todo_form(cx);
-            collapsed>=3&&opened==collapsed+1&&filled
+            collapsed>=3&&editor&&drawer>=1&&filled&&after==collapsed&&view.drawer.is_none()
         }).unwrap_or(false);
-        // Every page must own its scroll offset. One shared handle made a page open already scrolled
+        // Jumping to the shared sound settings and coming back must land on the page (and drawer)
+        // that started the jump.
+        let shared_nav_regression=window.update(cx,|view,_,cx|{
+            view.route=Route::Notifications;view.drawer=Some(Drawer::NotificationSettings);view.return_context=None;
+            view.go_sound(cx);
+            let forwarded=view.route==Route::Settings&&view.settings_tab==2&&view.return_context.is_some()&&view.drawer.is_none();
+            view.return_to_context(cx);
+            let returned=view.route==Route::Notifications&&view.drawer==Some(Drawer::NotificationSettings)&&view.return_context.is_none();
+            view.drawer=None;
+            forwarded&&returned
+        }).unwrap_or(false);
+        // Every route must own its scroll offset. One shared handle made a page open already scrolled
         // to wherever the previous page had been left, so the bottom of one page was the bottom of all.
         let scroll_regression=window.update(cx,|view,_,_|{
-            let other=(PAGE_TODOS+1).min(PAGES.len()-1);
-            if view.scrolls.len()!=PAGES.len(){return false}
-            let first=view.scrolls[PAGE_TODOS].clone();let second=view.scrolls[other].clone();
+            if view.scrolls.len()!=Route::ALL.len(){return false}
+            let first=view.scrolls[Route::Todos.index()].clone();let second=view.scrolls[Route::Notifications.index()].clone();
             second.set_offset(point(px(0.0),px(0.0)));
             first.set_offset(point(px(0.0),px(-320.0)));
             let moved=first.offset().y==px(-320.0)&&second.offset().y==px(0.0);
             first.set_offset(point(px(0.0),px(0.0)));
             moved
         }).unwrap_or(false);
+        // New surfaces: the quick drawer, the 流程 editor and the 应用提醒 view must all build from
+        // a live snapshot, and a fresh 流程 form must start with two valid 25-minute stages.
+        let feature_regression=window.update(cx,|view,_,cx|{
+            let state=view.shared.lock().unwrap().state.clone();view.drawer=None;view.open_workflow_form(None,cx);
+            let empty=view.workflow_count==0&&view.workflow_stages_json(cx).is_err();
+            let payload=FlowDrag{source:None,kind:1,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,0,cx);
+            let independent=view.workflow_count==1&&view.workflow_stages[0].1.read(cx).text()=="25";
+            view.workflow_stages[0].1.update(cx,|f,cx|f.set_text("17",cx));
+            let isolated=view.workflow_library[1].read(cx).text()=="25";
+            let payload=FlowDrag{source:None,kind:2,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,1,cx);
+            let valid=view.workflow_stages_json(cx).is_ok();let entity=view.workflow_stages[0].0.entity_id();
+            let payload=FlowDrag{source:Some(0),kind:0,generation:view.workflow_generation,title:String::new()};view.flow_drop(&payload,2,cx);
+            let reordered=view.workflow_stages[1].0.entity_id()==entity;
+            view.workflow_selected=1;view.flow_duplicate(cx);let duplicated=view.workflow_count==3&&view.workflow_stages[2].0.entity_id()!=entity;
+            view.flow_remove(2,cx);let removed=view.workflow_count==2;
+            view.workflow_stages[0].1.update(cx,|f,cx|f.set_text("0",cx));let invalid=view.workflow_stages_json(cx).is_err();
+            let quick=quick_ui::quick_reminder_rows(&state,view,cx).len()>=2;let rules=rules_ui::rules_page_rows(&state,view,cx).len()>=2;
+            view.drawer=None;empty&&independent&&isolated&&valid&&reordered&&duplicated&&removed&&invalid&&quick&&rules
+        }).unwrap_or(false);
         let picker_regression=if std::env::var_os("LYRICISLAND_SMOKE_REGRESSIONS").is_some(){
             let result=window.update(cx,|view,_,cx|{
-                view.page=0;view.picker=Some(Picker{key:"ExpandedComponentColor",hsv:Hsv::new(0.3,0.5,0.7),drag:Drag::None});
+                view.route=Route::Settings;view.settings_tab=1;view.drawer=None;
+                view.picker=Some(Picker{key:"ExpandedComponentColor",hsv:Hsv::new(0.3,0.5,0.7),drag:Drag::None});
                 view.hex_field=Some(make_hex_field("#123456",cx));
                 view.pad_bounds.set(Bounds::new(point(px(10.),px(10.)),size(px(268.),px(150.))));
                 view.begin_drag(Drag::Pad,point(px(130.),px(70.)));view.drag_to(point(px(900.),px(900.)));view.end_drag(cx);
@@ -2027,10 +3374,15 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
             }).unwrap_or(false);
             cx.background_executor().timer(Duration::from_millis(1200)).await;Some(result)
         }else{None};
+        let sound_selection = cx.background_executor().spawn(async { pipe::sound_selection_smoke() }).await;
+        let sound_selection = match sound_selection {
+            Ok(report) => report,
+            Err(error) => json!({"success": false, "error": error}),
+        };
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&picker_regression.unwrap_or(true)&&whitelist_regression&&todo_regression&&scroll_regression,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"todoRegression":todo_regression,"scrollPerPage":scroll_regression,
-            "pages": PAGES.len(),
+            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
+            "pages": Route::ALL.len(),
             "settings": "GPUI",
             "ipc": "Rust",
             "renderer": "directx",
@@ -2054,14 +3406,31 @@ fn smoke_slider() -> Option<&'static str> {
         .and_then(|name| ["CompactWidth", "FontSize", "MotionGap", "MotionDuration", "SpringStiffness"].into_iter().find(|key| *key == name))
 }
 
-/// Self-check hook: open straight onto a given page so each one can be photographed without a human
-/// clicking through the sidebar.
-fn smoke_page() -> usize {
-    std::env::var("LYRICISLAND_SMOKE_PAGE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|page| *page < PAGES.len())
-        .unwrap_or(0)
+/// Self-check hook: open straight onto a given route so each one can be photographed without a
+/// human clicking through the sidebar. `None` falls back to the stored start page.
+fn smoke_page() -> Option<Route> {
+    if let Some(route) = std::env::var("LYRICISLAND_SMOKE_PAGE").ok().and_then(|value| value.parse::<usize>().ok()).and_then(|index| Route::ALL.get(index)) {
+        return Some(*route);
+    }
+    if std::env::var_os("LYRICISLAND_SMOKE_PICKER").is_some() || smoke_slider().is_some_and(|key| key.starts_with("Motion") || key.starts_with("Spring")) {
+        return Some(Route::Settings);
+    }
+    None
+}
+/// Self-check hook: open a drawer without a click so its rows can be photographed.
+fn smoke_drawer() -> Option<Drawer> {
+    match std::env::var("LYRICISLAND_SMOKE_DRAWER").ok().as_deref() {
+        Some("NotificationSettings") => Some(Drawer::NotificationSettings),
+        Some("TimerSettings") => Some(Drawer::TimerSettings),
+        Some("TodoSettings") => Some(Drawer::TodoSettings),
+        Some("TodoEditor") => Some(Drawer::TodoEditor),
+        Some("Changelog") => Some(Drawer::Changelog),
+        Some("Licenses") => Some(Drawer::Licenses),
+        Some("QuickReminder") => Some(Drawer::QuickReminder),
+        Some("WorkflowEditor") => Some(Drawer::WorkflowEditor),
+        Some("RuleEditor") => Some(Drawer::RuleEditor(None)),
+        _ => None,
+    }
 }
 
 /// Paint the non-client frame to match the app's own appearance.
@@ -2099,13 +3468,13 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
     let _=std::fs::create_dir_all(&directory);
     let _=send(&shared,"CompactWidth","279",cx);
     cx.spawn(async move |cx| {
-        for page in 0..7{
+        for route in Route::ALL{
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            let _=window.update(cx,|view,_,cx|{view.page=page;cx.notify();});
+            let _=window.update(cx,|view,_,cx|{view.route=route;view.drawer=None;cx.notify();});
         }
         cx.background_executor().timer(Duration::from_millis(600)).await;
         let offline=shared.lock().is_ok_and(|s|s.connection_error);
-        let _=std::fs::write(directory.join("offline-ready.json"),json!({"offlineErrorRecorded":offline,"pagesNavigatedWhileDisconnected":7}).to_string());
+        let _=std::fs::write(directory.join("offline-ready.json"),json!({"offlineErrorRecorded":offline,"pagesNavigatedWhileDisconnected":Route::ALL.len()}).to_string());
         let mut recovered=false;
         for _ in 0..60{
             cx.background_executor().timer(Duration::from_millis(250)).await;
@@ -2121,10 +3490,11 @@ fn run_reconnect_smoke(cx:&mut App,window:WindowHandle<SettingsApp>,directory:Pa
             saved=shared.lock().is_ok_and(|s|s.state["settings"]["CompactWidth"].as_f64()==Some(278.)&&s.message.is_empty());
             if saved{break}
         }
-        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.3"});
+        let report=json!({"success":offline&&recovered&&unmodified&&saved,"offlineErrorRecorded":offline,"connectionRecovered":recovered,"staleErrorCleared":recovered,"failedEditNotReplayed":unmodified,"nativeSettingSaved":saved,"settings":"GPUI","version":"1.5"});
         let _=std::fs::write(directory.join("report.json"),report.to_string());
         std::process::exit(if report["success"]==true{0}else{1});
     }).detach();
 }
 
 include!("tools_ui.rs");
+include!("pages_ui.rs");

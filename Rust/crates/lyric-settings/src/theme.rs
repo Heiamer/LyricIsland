@@ -29,6 +29,13 @@ pub struct Palette {
     pub surface_hi: Rgba,
     /// A row under the pointer that is not otherwise highlighted.
     pub hover: Rgba,
+    /// A row under the pointer *inside* a panel.
+    ///
+    /// The two appearances need different directions here, not the same value. On white, a hover
+    /// steps back — a light grey fill reads as "this row is live". The same relationship inverts in
+    /// the dark set, where the base is far *darker* than the panel: painting a row with it turns the
+    /// card into a hole with a shadow inside it. Dark therefore lifts one step above `surface`.
+    pub row_hover: Rgba,
     /// Separators: a wash, never a line of solid colour.
     pub hairline: Rgba,
     pub hairline_bright: Rgba,
@@ -42,54 +49,102 @@ pub struct Palette {
     pub accent_dim: Rgba,
     /// Whatever reads clearly on top of `accent`.
     pub on_accent: Rgba,
+    /// Wash behind green-tinted symbols and toasts.
+    pub green_soft: Rgba,
+    /// Warm highlight surface, worn by the next-reminder card.
+    pub yellow: Rgba,
+    /// Stripe colour on a yellow todo card.
+    pub yellow_line: Rgba,
+    /// Quiet green todo surface.
+    pub mint: Rgba,
+    /// Quiet violet todo surface.
+    pub lilac: Rgba,
+    /// Stripe colour on a lilac todo card.
+    pub lilac_bar: Rgba,
+    /// Drop shadow under raised surfaces.
+    pub shadow: Rgba,
+    /// Wash over the page while a drawer is open.
+    pub scrim: Rgba,
     pub track: Rgba,
     pub knob: Rgba,
     pub danger: Rgba,
 }
 
 pub const DARK: Palette = Palette {
-    base: c(0x0E, 0x13, 0x16, 1.0),
-    sidebar: c(0x12, 0x1A, 0x1E, 1.0),
-    surface: c(0x18, 0x21, 0x26, 1.0),
-    surface_hi: c(0x21, 0x2D, 0x33, 1.0),
-    hover: c(0x1B, 0x25, 0x2B, 1.0),
-    hairline: c(0xFF, 0xFF, 0xFF, 0.06),
+    base: c(0x19, 0x1B, 0x1F, 1.0),
+    sidebar: c(0x22, 0x25, 0x2B, 1.0),
+    surface: c(0x29, 0x2D, 0x33, 1.0),
+    surface_hi: c(0x35, 0x3C, 0x44, 1.0),
+    hover: c(0x19, 0x1B, 0x1F, 1.0),
+    row_hover: c(0x30, 0x36, 0x3E, 1.0),
+    hairline: c(0x39, 0x3F, 0x47, 1.0),
     hairline_bright: c(0xFF, 0xFF, 0xFF, 0.14),
-    field: c(0x0B, 0x10, 0x12, 1.0),
-    text: c(0xF2, 0xF5, 0xF6, 1.0),
-    text_dim: c(0x9B, 0xA8, 0xAE, 1.0),
-    text_faint: c(0x66, 0x74, 0x7B, 1.0),
-    accent: c(0xA9, 0xE6, 0xCD, 1.0),
-    accent_dim: c(0xA9, 0xE6, 0xCD, 0.18),
-    on_accent: c(0x0E, 0x13, 0x16, 1.0),
-    track: c(0x2A, 0x36, 0x3C, 1.0),
+    field: c(0x19, 0x1B, 0x1F, 1.0),
+    text: c(0xED, 0xF0, 0xF2, 1.0),
+    text_dim: c(0xAE, 0xB7, 0xC1, 1.0),
+    text_faint: c(0x7C, 0x86, 0x91, 1.0),
+    accent: c(0x73, 0xD4, 0xB7, 1.0),
+    accent_dim: c(0x73, 0xD4, 0xB7, 0.18),
+    on_accent: c(0x09, 0x2B, 0x23, 1.0),
+    green_soft: c(0x24, 0x3E, 0x36, 1.0),
+    yellow: c(0x3F, 0x38, 0x29, 1.0),
+    yellow_line: c(0xE8, 0xC5, 0x6B, 1.0),
+    mint: c(0x29, 0x3D, 0x34, 1.0),
+    lilac: c(0x34, 0x30, 0x44, 1.0),
+    lilac_bar: c(0xB8, 0xA6, 0xD8, 1.0),
+    shadow: c(0x00, 0x00, 0x00, 0.25),
+    scrim: c(0x00, 0x00, 0x00, 0.42),
+    track: c(0x35, 0x3C, 0x44, 1.0),
     knob: c(0xE8, 0xEE, 0xF0, 1.0),
     danger: c(0xFF, 0xB4, 0xA9, 1.0),
 };
 
 pub const LIGHT: Palette = Palette {
     base: c(0xF4, 0xF5, 0xF7, 1.0),
-    sidebar: c(0xEA, 0xEC, 0xEF, 1.0),
+    sidebar: c(0xEA, 0xED, 0xF0, 1.0),
     surface: c(0xFF, 0xFF, 0xFF, 1.0),
-    surface_hi: c(0xE1, 0xE5, 0xE9, 1.0),
-    hover: c(0xFA, 0xFB, 0xFC, 1.0),
-    hairline: c(0x00, 0x00, 0x00, 0.09),
+    surface_hi: c(0xE2, 0xE7, 0xEB, 1.0),
+    hover: c(0xF4, 0xF5, 0xF7, 1.0),
+    row_hover: c(0xF3, 0xF5, 0xF7, 1.0),
+    hairline: c(0xE0, 0xE4, 0xE8, 1.0),
     hairline_bright: c(0x00, 0x00, 0x00, 0.18),
-    field: c(0xEC, 0xEE, 0xF1, 1.0),
-    text: c(0x1B, 0x1F, 0x23, 1.0),
-    text_dim: c(0x5B, 0x66, 0x6E, 1.0),
+    field: c(0xF4, 0xF5, 0xF7, 1.0),
+    text: c(0x23, 0x28, 0x2D, 1.0),
+    text_dim: c(0x64, 0x6F, 0x79, 1.0),
     text_faint: c(0x8A, 0x94, 0x9C, 1.0),
-    // The capsule's mint is too pale on white, so light mode uses a deeper tint of the same hue.
-    accent: c(0x18, 0x8F, 0x6B, 1.0),
-    accent_dim: c(0x18, 0x8F, 0x6B, 0.14),
+    accent: c(0x11, 0x86, 0x68, 1.0),
+    accent_dim: c(0x11, 0x86, 0x68, 0.14),
     on_accent: c(0xFF, 0xFF, 0xFF, 1.0),
-    track: c(0xD2, 0xD7, 0xDC, 1.0),
+    green_soft: c(0xE8, 0xF5, 0xEF, 1.0),
+    yellow: c(0xFB, 0xF4, 0xE3, 1.0),
+    yellow_line: c(0xD5, 0xAA, 0x45, 1.0),
+    mint: c(0xE9, 0xF5, 0xEE, 1.0),
+    lilac: c(0xF0, 0xED, 0xF8, 1.0),
+    lilac_bar: c(0xA9, 0x9A, 0xCB, 1.0),
+    shadow: c(0x19, 0x27, 0x33, 0.10),
+    scrim: c(0x1D, 0x27, 0x36, 0.17),
+    track: c(0xE2, 0xE7, 0xEB, 1.0),
     knob: c(0xFF, 0xFF, 0xFF, 1.0),
     danger: c(0xB4, 0x36, 0x2C, 1.0),
 };
 
 /// The full Noto Sans SC face shipped with the application.
 pub const FONT: &str = "Noto Sans SC";
+/// The faces the reference design asks for: Windows' own UI font first, its Chinese companion
+/// second, the shipped face as the last resort.
+pub const FONT_UI: &str = "Segoe UI";
+pub const FONT_ZH: &str = "Microsoft YaHei UI";
+
+/// The window-wide font stack.
+pub fn ui_font() -> gpui::Font {
+    gpui::Font {
+        family: FONT_UI.into(),
+        features: gpui::FontFeatures::default(),
+        weight: gpui::FontWeight::default(),
+        style: gpui::FontStyle::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![FONT_ZH.to_owned(), FONT.to_owned()])),
+    }
+}
 
 thread_local! {
     static CURRENT: Cell<Palette> = const { Cell::new(DARK) };
@@ -110,6 +165,38 @@ pub fn set_current(palette: Palette) {
     CURRENT.with(|current| current.set(palette));
 }
 
+/// Mix two palettes, field by field.
+///
+/// Switching appearance is a large change in brightness, and snapping between the two sets of
+/// surfaces reads as a flash. Easing the palette itself — rather than fading a screenshot of the old
+/// one — keeps every hairline and shadow coherent while the window travels between the two.
+pub fn blend(from: Palette, to: Palette, progress: f32) -> Palette {
+    // The ends are returned outright: `a + (b - a) * 1.0` lands a rounding step away from `b`, and a
+    // finished theme change should draw the target palette exactly, not almost.
+    if !(progress > 0.0) {
+        return from;
+    }
+    if progress >= 1.0 {
+        return to;
+    }
+    let mix = |a: Rgba, b: Rgba| Rgba {
+        r: a.r + (b.r - a.r) * progress,
+        g: a.g + (b.g - a.g) * progress,
+        b: a.b + (b.b - a.b) * progress,
+        a: a.a + (b.a - a.a) * progress,
+    };
+    macro_rules! fields {
+        ($($name:ident),* $(,)?) => {
+            Palette { $($name: mix(from.$name, to.$name)),* }
+        };
+    }
+    fields!(
+        base, sidebar, surface, surface_hi, hover, row_hover, hairline, hairline_bright, field, text,
+        text_dim, text_faint, accent, accent_dim, on_accent, green_soft, yellow, yellow_line, mint,
+        lilac, lilac_bar, shadow, scrim, track, knob, danger,
+    )
+}
+
 fn current() -> Palette {
     CURRENT.with(Cell::get)
 }
@@ -121,8 +208,8 @@ macro_rules! token {
 }
 
 token!(
-    base, sidebar, surface, surface_hi, hover, hairline, hairline_bright, field, text, text_dim, text_faint, accent,
-    accent_dim, on_accent, track, knob, danger,
+    base, sidebar, surface, surface_hi, hover, row_hover, hairline, hairline_bright, field, text, text_dim, text_faint, accent,
+    accent_dim, on_accent, green_soft, yellow, yellow_line, mint, lilac, lilac_bar, shadow, scrim, track, knob, danger,
 );
 
 /// Parse `#RRGGBB`; anything else falls back to a neutral so a bad setting never panics a frame.
@@ -177,5 +264,22 @@ mod tests {
         assert_eq!(text().r, LIGHT.text.r);
         set_current(DARK);
         assert_eq!(text().r, DARK.text.r);
+    }
+
+    #[test]
+    fn blending_between_appearances_lands_exactly_on_both_ends() {
+        // The ends must be the palettes themselves, or a finished theme change would leave the
+        // window a hair off the colour it claims to be drawing.
+        let start = blend(LIGHT, DARK, 0.0);
+        assert_eq!(start.base.r, LIGHT.base.r);
+        assert_eq!(start.text.r, LIGHT.text.r);
+        let end = blend(LIGHT, DARK, 1.0);
+        assert_eq!(end.base.r, DARK.base.r);
+        assert_eq!(end.sidebar.g, DARK.sidebar.g);
+        // Half way is neither end: the cross-fade has to actually travel.
+        let middle = blend(LIGHT, DARK, 0.5);
+        assert!(middle.base.r < LIGHT.base.r && middle.base.r > DARK.base.r);
+        // An out-of-range progress must not paint a colour that exists nowhere.
+        assert_eq!(blend(LIGHT, DARK, 2.0).base.r, DARK.base.r);
     }
 }

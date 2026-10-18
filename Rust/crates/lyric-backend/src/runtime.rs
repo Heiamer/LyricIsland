@@ -11,7 +11,7 @@ impl Backend{
     pub fn new(settings:Value,data:PathBuf,local:PathBuf,logs:PathBuf)->Arc<Self>{
         let backend=Arc::new(Self{raw:Arc::new(JsonStore::new(data.join("database/lyric-pipeline-raw-v1.json"))),parsed:Arc::new(JsonStore::new(data.join("database/lyric-pipeline-parsed-v1.json"))),final_cache:FinalCache(Arc::new(JsonStore::new_enveloped(data.join("database/resolved-lyrics-v1.json")))),data,local,logs,
             state:Mutex::new(State{settings,playback:PlaybackSnapshot::idle(),clock:PlaybackClock::default(),sync:LyricSyncService::new(),active:None,events:0,cover:None,cover_version:0,cover_key:String::new(),artwork_identity:String::new(),duration_source:"等待歌曲信息".into(),native_status:"等待网易云".into(),native_error:None,track_key:String::new(),pending_weak:None,last_strong_track:None}),closed:AtomicBool::new(false),generation:AtomicU64::new(0),started:Instant::now(),search_cancel:Mutex::new(None)});
-        io::log(&backend.logs,"BUILD","Version=1.2; Backend=Rust; GUI=Direct2D; Settings=GPUI; HTTP=WinHTTP NO_PROXY");
+        io::log(&backend.logs,"BUILD",&format!("Version={}; Backend=Rust; GUI=Direct2D; Settings=GPUI; HTTP=WinHTTP",env!("CARGO_PKG_VERSION")));
         let worker=backend.clone();std::thread::spawn(move||worker.run());backend
     }
     pub fn close(&self){self.closed.store(true,Ordering::Release);self.generation.fetch_add(1,Ordering::AcqRel);if let Ok(mut c)=self.search_cancel.lock(){if let Some(c)=c.take(){c.store(true,Ordering::Release)}}}

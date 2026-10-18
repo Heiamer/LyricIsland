@@ -63,6 +63,9 @@ internal static class Program
                         return 0;
                     }
                     MigratePreviousData(root);
+                    // Login startup registers this launcher, not the extracted runtime, whose
+                    // path is versioned and replaced on the next update.
+                    try { File.WriteAllText(Path.Combine(root, Folder, "launcher.txt"), Assembly.GetExecutingAssembly().Location, new UTF8Encoding(false)); } catch { }
                     Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(executable) });
                     return 0;
                 }

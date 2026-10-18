@@ -14,9 +14,14 @@ unsafe fn read_value(key:&Key)->Option<(REG_VALUE_TYPE,Vec<u8>)>{let name=wide("
     RegQueryValueExW(key.0,PCWSTR(name.as_ptr()),None,Some(&mut kind),None,Some(&mut length)).ok().ok()?;
     if length>65536{return None}let mut bytes=vec![0u8;length as usize];RegQueryValueExW(key.0,PCWSTR(name.as_ptr()),None,Some(&mut kind),Some(bytes.as_mut_ptr()),Some(&mut length)).ok().ok()?;Some((kind,bytes))
 }
+/// Accepts both the extracted runtime executable and the single-file launcher
+/// (`DotIsle-<version>.exe`), which is the path login startup registers.
+fn launcher_name(name:&str)->bool{
+    name.eq_ignore_ascii_case("LyricIsland.exe")||(name.len()>12&&name.get(..8).is_some_and(|p|p.eq_ignore_ascii_case("DotIsle-"))&&name.to_ascii_lowercase().ends_with(".exe"))
+}
 pub fn parse_command(command:&str)->Option<String>{
     if !command.starts_with('"'){return None}let end=command[1..].find('"')?+1;if command[end+1..].trim()!="--startup"{return None}
-    let path=&command[1..end];if !Path::new(path).is_absolute()||!Path::new(path).file_name()?.to_string_lossy().eq_ignore_ascii_case("LyricIsland.exe"){return None}Some(path.into())
+    let path=&command[1..end];if !Path::new(path).is_absolute()||!launcher_name(&Path::new(path).file_name()?.to_string_lossy()){return None}Some(path.into())
 }
 pub fn startup_info(path:Option<&str>)->Value{
     let registered=unsafe{open(path.unwrap_or(RUN),false).ok().and_then(|k|read_value(&k)).and_then(|(kind,bytes)|{
@@ -85,7 +90,7 @@ pub fn favorite(title:&str,source:&str,invoke:bool)->Value{
 }
 #[cfg(test)]mod tests{
 use super::*;
-#[test]fn only_scoped_startup_commands_are_accepted(){assert!(parse_command("\"C:\\Apps\\LyricIsland.exe\" --startup").is_some());assert!(parse_command("\"C:\\Apps\\Other.exe\" --startup").is_none());assert!(parse_command("\"C:\\Apps\\LyricIsland.exe\" --startup --extra").is_none());}
+#[test]fn only_scoped_startup_commands_are_accepted(){assert!(parse_command("\"C:\\Apps\\LyricIsland.exe\" --startup").is_some());assert!(parse_command("\"C:\\Apps\\DotIsle-2.0.0.exe\" --startup").is_some());assert!(parse_command("\"C:\\Apps\\DotIsle-2.0.0.exe\" --startup").as_deref()==Some("C:\\Apps\\DotIsle-2.0.0.exe"));assert!(parse_command("\"C:\\Apps\\Other.exe\" --startup").is_none());assert!(parse_command("\"C:\\Apps\\DotIsle-.exe\" --startup").is_none());assert!(parse_command("\"C:\\Apps\\LyricIsland.exe\" --startup --extra").is_none());}
 /// Removes the scratch key and directory even when an assertion fails.
 struct Scratch{key:String,dir:std::path::PathBuf}
 impl Drop for Scratch{fn drop(&mut self){unsafe{let path=wide(&self.key);let _=RegDeleteKeyW(HKEY_CURRENT_USER,PCWSTR(path.as_ptr()));}let _=std::fs::remove_dir_all(&self.dir);}}

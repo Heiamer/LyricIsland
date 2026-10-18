@@ -7,28 +7,37 @@ impl Spring {
     fn retarget(&mut self,to:f64,now:f64){let (from,velocity)=self.sample(now);*self=Self{from,to,velocity,time:now};}
     fn snap(&mut self,to:f64,now:f64){*self=Self{from:to,to,time:now,velocity:0.};}
 }
-pub struct Banner {pub notice:Option<Notice>,motion:[Spring;6],pub open:bool,deadline:f64,changed:f64}
-impl Default for Banner {fn default()->Self{Self{notice:None,motion:[Spring::default();6],open:false,deadline:0.,changed:0.}}}
+pub struct Banner {pub notice:Option<Notice>,motion:[Spring;6],pub open:bool,deadline:f64,changed:f64,compact:bool}
+impl Default for Banner {fn default()->Self{Self{notice:None,motion:[Spring::default();6],open:false,deadline:0.,changed:0.,compact:false}}}
 impl Banner {
     pub fn visible(&self)->bool{self.notice.is_some()}
     pub fn presentation(&self,now:f64)->(Rect,f64,f64){let a=self.motion.map(|s|s.sample(now).0);(Rect::new(a[0],a[1],a[2],a[3]),a[4],a[5].clamp(0.,1.))}
     pub fn show(&mut self,notice:Notice,base:Rect,radius:f64,host_width:f64,height:f64,now:f64,animate:bool){
         if self.notice.is_none(){for (s,v) in self.motion.iter_mut().zip([base.x,base.y,base.w,base.h,radius,0.]){s.snap(v,now);}}
-        self.notice=Some(notice);self.open=true;self.changed=now;self.deadline=now+7.;
+        self.notice=Some(notice);self.open=true;self.changed=now;self.deadline=now+7.;self.compact=false;
         let width=440_f64.min(host_width-48.);let target=[(host_width-width)/2.,base.y,width,height.clamp(64.,96.),24.,1.];
         for (s,v) in self.motion.iter_mut().zip(target){if animate{s.retarget(v,now)}else{s.snap(v,now)}}
     }
+    /// A compact, non-interactive hint: same spring and interruption rules, shorter hold.
+    pub fn show_compact(&mut self,notice:Notice,base:Rect,radius:f64,host_width:f64,now:f64,animate:bool){
+        if self.notice.is_none(){for (s,v) in self.motion.iter_mut().zip([base.x,base.y,base.w,base.h,radius,0.]){s.snap(v,now);}}
+        self.notice=Some(notice);self.open=true;self.changed=now;self.deadline=now+1.6;self.compact=true;
+        let width=220_f64.min(host_width-48.);let target=[(host_width-width)/2.,base.y,width,44.,22.,1.];
+        // Reduced motion still gets a short opacity fade; the shell never scales.
+        for (i,(s,v)) in self.motion.iter_mut().zip(target).enumerate(){if animate||i==5{s.retarget(v,now)}else{s.snap(v,now)}}
+    }
     pub fn dismiss(&mut self,base:Rect,radius:f64,now:f64,animate:bool){
         if !self.visible()||!self.open{return}self.open=false;self.changed=now;
-        for (s,v) in self.motion.iter_mut().zip([base.x,base.y,base.w,base.h,radius,0.]){if animate{s.retarget(v,now)}else{s.snap(v,now)}}
+        for (i,(s,v)) in self.motion.iter_mut().zip([base.x,base.y,base.w,base.h,radius,0.]).enumerate(){if animate||(self.compact&&i==5){s.retarget(v,now)}else{s.snap(v,now)}}
     }
     pub fn tick(&mut self,base:Rect,radius:f64,now:f64,hover:bool,animate:bool){
         if self.open {if hover{self.deadline=now+1.;}if now>=self.deadline{self.dismiss(base,radius,now,animate);}}
         if !self.open&&self.visible(){
             let target=[base.x,base.y,base.w,base.h,radius,0.];
-            for (s,v) in self.motion.iter_mut().zip(target){if (s.to-v).abs()>0.001{if animate{s.retarget(v,now)}else{s.snap(v,now)}}}
+            for (i,(s,v)) in self.motion.iter_mut().zip(target).enumerate(){if (s.to-v).abs()>0.001{if animate||(self.compact&&i==5){s.retarget(v,now)}else{s.snap(v,now)}}}
             let settled=self.motion.iter().zip(target).all(|(s,v)|(s.sample(now).0-v).abs()<0.1);
-            if !animate||(now-self.changed>0.65&&settled){self.notice=None;}
+            let reduced=if self.compact{0.16}else{0.};
+            if if animate{now-self.changed>if self.compact{0.45}else{0.65}&&settled}else{now-self.changed>reduced&&settled}{self.notice=None;}
         }
     }
 }

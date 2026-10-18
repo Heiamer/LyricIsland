@@ -263,7 +263,7 @@ impl TextField {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Focus on the press, not on the release: the IME must already know where the caret is.
-        window.focus(&self.focus);
+        window.focus(&self.focus, cx);
         self.dragging = true;
         let offset = self.index_for_position(event.position);
         if event.modifiers.shift {
@@ -554,7 +554,7 @@ impl Render for TextField {
                         t::accent_dim(),
                     ));
                 }
-                let _ = shaped.paint(origin, line_height, window, cx);
+                let _ = shaped.paint(origin, line_height, TextAlign::Left, None, window, cx);
                 if focus.is_focused(window) {
                     let x = if empty { px(0.0) } else { shaped.x_for_index(caret.min(text_len)) };
                     window.paint_quad(fill(
@@ -572,22 +572,29 @@ impl Render for TextField {
             },
         )
         .size_full();
+        // The paint surface floats above the field instead of taking part in layout: otherwise the
+        // shaped text reports its full width as the field's minimum and a long value pushes the
+        // whole row (and drawer) past its container.
+        let body = div().absolute().left(px(10.0)).right(px(10.0)).top(px(0.0)).bottom(px(0.0)).overflow_hidden().child(body);
 
         div()
             .id(self.id.clone())
+            .relative()
             .flex()
             .flex_row()
             .items_center()
-            .h(px(26.0))
-            .px_2()
-            .rounded(px(7.0))
-            .bg(t::field())
+            .min_w_0()
+            .overflow_hidden()
+            .h(px(34.0))
+            .px(px(10.0))
+            .rounded(px(9.0))
+            .bg(t::base())
             .border_1()
             .border_color(if focused { t::accent() } else { t::hairline() })
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_click(cx.listener(|this, _, window, cx| {
-                window.focus(&this.focus);
+                window.focus(&this.focus, cx);
                 cx.notify();
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))

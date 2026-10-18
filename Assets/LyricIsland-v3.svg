@@ -1,1 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs><linearGradient id="tile" x2="0" y2="1"><stop stop-color="#f0fcf7"/><stop offset="1" stop-color="#d4efe4"/></linearGradient></defs><rect x="48" y="48" width="928" height="928" rx="218" fill="url(#tile)"/><rect x="146" y="350" width="732" height="332" rx="166" fill="#005743" opacity=".1"/><rect x="146" y="338" width="732" height="332" rx="166" fill="#128f74"/><rect x="154" y="344" width="716" height="316" rx="158" fill="none" stroke="#28a78a" stroke-width="3"/><circle cx="306" cy="504" r="74" fill="#f5fffb"/><rect x="466" y="462" width="258" height="28" rx="14" fill="#e9fff6"/><rect x="466" y="521" width="169" height="26" rx="13" fill="#92d8be"/><circle cx="796" cy="260" r="72" fill="#d9f2e8"/><circle cx="796" cy="260" r="60" fill="#14967a"/><circle cx="796" cy="260" r="22" fill="#f5fffb"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<title>DotIsle · 石墨与微光</title><desc>暖瓷白圆角底板，中央仅保留一个石墨黑灵动岛胶囊，胶囊内部靠右一颗暖黄状态点，无外置卫星点、音符或文字。</desc>
+<defs>
+<linearGradient id="porcelain" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#FAF9F6"/><stop offset="1" stop-color="#E6E7E3"/></linearGradient>
+<linearGradient id="graphite" x1="0" y1="0" x2=".15" y2="1"><stop stop-color="#363C3D"/><stop offset=".55" stop-color="#202627"/><stop offset="1" stop-color="#151B1C"/></linearGradient>
+<linearGradient id="edge" x2="0" y2="1"><stop stop-color="#FFFFFF" stop-opacity=".30"/><stop offset=".5" stop-color="#FFFFFF" stop-opacity=".04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity=".07"/></linearGradient>
+<filter id="shadow" x="-20%" y="-50%" width="140%" height="220%"><feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#18201F" flood-opacity=".14"/></filter>
+</defs>
+<rect x="48" y="48" width="928" height="928" rx="218" fill="url(#porcelain)"/>
+<rect x="50" y="50" width="924" height="924" rx="216" fill="none" stroke="#FFFFFF" stroke-opacity=".6" stroke-width="3"/>
+<rect x="164" y="380" width="696" height="264" rx="132" fill="url(#graphite)" filter="url(#shadow)"/>
+<rect x="166" y="382" width="692" height="260" rx="130" fill="none" stroke="url(#edge)" stroke-width="3"/>
+<circle cx="756" cy="512" r="22" fill="#F4C34D"/></svg>

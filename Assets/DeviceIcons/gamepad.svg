@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><title>点屿 · 手柄连接图标</title><desc>图标化轻拟物矢量，银白与石墨灰材质，柔和体积，不使用照片纹理；统一雾蓝灰圆角方形底板。</desc><defs>
+<linearGradient id="shell" x1=".15" y1="0" x2=".9" y2="1"><stop stop-color="#FFFFFF"/><stop offset=".48" stop-color="#EEF2F5"/><stop offset="1" stop-color="#BFCBD5"/></linearGradient>
+<linearGradient id="silver" x1="0" y1="0" x2="1" y2=".7"><stop stop-color="#BBC7D0"/><stop offset=".33" stop-color="#F4F7F9"/><stop offset=".67" stop-color="#D2DCE3"/><stop offset="1" stop-color="#94A5B2"/></linearGradient>
+<linearGradient id="dark" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#596978"/><stop offset=".52" stop-color="#344350"/><stop offset="1" stop-color="#1E2A34"/></linearGradient>
+<linearGradient id="pad" x2=".8" y2="1"><stop stop-color="#677888"/><stop offset="1" stop-color="#2E3B46"/></linearGradient>
+<linearGradient id="key" x2=".2" y2="1"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#EDF2F5"/></linearGradient>
+<linearGradient id="screen" x1="0" y1="0" x2=".85" y2="1"><stop stop-color="#B6D8E8"/><stop offset=".48" stop-color="#7EACCF"/><stop offset="1" stop-color="#657DAB"/></linearGradient>
+<filter id="shadow" x="-35%" y="-30%" width="170%" height="175%"><feDropShadow dx="0" dy="3" stdDeviation="2.4" flood-color="#172D45" flood-opacity=".17"/></filter>
+<filter id="inset" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="1" stdDeviation=".65" flood-color="#4B6277" flood-opacity=".21"/></filter>
+<linearGradient id="device-tile" x1=".12" y1="0" x2=".82" y2="1"><stop stop-color="#DFE9F0"/><stop offset=".48" stop-color="#CCDCE7"/><stop offset="1" stop-color="#AAC0D0"/></linearGradient><linearGradient id="device-rim" x2="0" y2="1"><stop stop-color="#FFFFFF" stop-opacity=".9"/><stop offset=".65" stop-color="#FFFFFF" stop-opacity=".06"/><stop offset="1" stop-color="#54758C" stop-opacity=".18"/></linearGradient><filter id="tile-shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="2" stdDeviation="1.5" flood-color="#34546B" flood-opacity=".15"/></filter><radialGradient id="stick-top" cx=".32" cy=".23" r=".86"><stop stop-color="#6E8394"/><stop offset=".62" stop-color="#496173"/><stop offset="1" stop-color="#2C4354"/></radialGradient></defs><rect x="7" y="7" width="114" height="114" rx="27" fill="url(#device-tile)" filter="url(#tile-shadow)"/><rect x="7.7" y="7.7" width="112.6" height="112.6" rx="26.3" fill="none" stroke="url(#device-rim)" stroke-width="1.2"/><g transform="translate(14.08 14.08) scale(.78)"><g filter="url(#shadow)"><path d="M41 33h46c13 0 18 8 22 22l7 27c4 18-10 25-21 14L83 87H45L33 96C22 107 8 100 12 82l7-27c4-14 9-22 22-22Z" fill="#A9B8C4" transform="translate(0 3)"/><path d="M41 33h46c13 0 18 8 22 22l7 27c4 18-10 25-21 14L83 87H45L33 96C22 107 8 100 12 82l7-27c4-14 9-22 22-22Z" fill="url(#shell)"/><path d="M27 45c4-5 9-7 17-7h40c8 0 13 2 17 7" fill="none" stroke="#FFF" stroke-width="2" stroke-opacity=".8" stroke-linecap="round"/>
+<circle cx="38" cy="55" r="12" fill="#CAD5DD"/><path d="M34.5 45.5h7v6h6v7h-6v6h-7v-6h-6v-7h6Z" fill="url(#dark)"/>
+<g fill="#94A9B9"><circle cx="90" cy="45" r="3.8"/><circle cx="100" cy="55" r="3.8"/><circle cx="80" cy="55" r="3.8"/><circle cx="90" cy="65" r="3.8"/></g><circle cx="90" cy="45" r="3.8" fill="#93B5AD"/>
+<rect x="55" y="45" width="18" height="9" rx="3" fill="#CCD7DF"/>
+<g data-part="analog-stick" data-center-x="49" data-center-y="77" data-view="top-down">
+<circle cx="49" cy="77" r="10.2" fill="#B7C8D5"/>
+<circle cx="49" cy="77" r="8.9" fill="#233A4B"/>
+<circle cx="49" cy="77" r="7.2" fill="url(#stick-top)" stroke="#93A6B6" stroke-width=".65"/>
+<circle cx="49" cy="77" r="4.8" fill="#3D5669" stroke="#263F52" stroke-width=".55"/>
+</g><g data-part="analog-stick" data-center-x="79" data-center-y="77" data-view="top-down">
+<circle cx="79" cy="77" r="10.2" fill="#B7C8D5"/>
+<circle cx="79" cy="77" r="8.9" fill="#233A4B"/>
+<circle cx="79" cy="77" r="7.2" fill="url(#stick-top)" stroke="#93A6B6" stroke-width=".65"/>
+<circle cx="79" cy="77" r="4.8" fill="#3D5669" stroke="#263F52" stroke-width=".55"/>
+</g></g></g></svg>

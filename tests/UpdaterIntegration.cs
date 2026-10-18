@@ -16,7 +16,7 @@ internal static class UpdaterIntegration {
         Environment.SetEnvironmentVariable("LYRICISLAND_TEST_PIPE",pipe);
         try{
             Call("Verify",zip,expected);bool rejected=false;try{Call("Verify",zip,new string('0',64));}catch(IOException){rejected=true;}if(!rejected)throw new Exception("bad checksum accepted");
-            Call("Extract",zip,target,"1.2.1");Call("Extract",zip,stage,"1.2.1");Directory.CreateDirectory(data);File.WriteAllText(Path.Combine(data,"settings.json"),"{\"CompactWidth\":317,\"MusicClickOpenApp\":true,\"NotificationsEnabled\":false,\"AllowedSources\":[\"LyricIsland.OTATest\"],\"OnlineSongInfo\":false}");
+            Call("Extract",zip,target,args.Length>4?args[4]:"1.2.1");Call("Extract",zip,stage,args.Length>4?args[4]:"1.2.1");Directory.CreateDirectory(data);File.WriteAllText(Path.Combine(data,"settings.json"),"{\"CompactWidth\":317,\"MusicClickOpenApp\":true,\"NotificationsEnabled\":false,\"AllowedSources\":[\"LyricIsland.OTATest\"],\"OnlineSongInfo\":false}");
             old=Process.Start(new ProcessStartInfo(Path.Combine(target,"LyricIsland.exe"),"--data-dir \""+data+"\""){UseShellExecute=false,WorkingDirectory=target});
             if(!State(pipe).Contains("317"))throw new Exception("initial settings missing");int oldId=old.Id;Call("StopApp",pipe);Call("Wait",oldId);
             Call("Apply",stage,target,Path.Combine(root,"backup"),0,(Action)(()=>Call("Start",target,data)));

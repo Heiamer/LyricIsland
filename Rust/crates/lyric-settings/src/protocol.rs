@@ -61,6 +61,12 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     if NOTIFICATION_COMMANDS.contains(&key) {
         return request(key, Value::Null);
     }
+    if key=="notificationBlockedApps"||key.starts_with("notification-blocked:"){
+        let mut blocked=state["settings"]["NotificationBlockedApps"].as_array().cloned().unwrap_or_default();
+        if let Some(id)=key.strip_prefix("notification-blocked:"){blocked.retain(|v|!v.as_str().is_some_and(|s|s.eq_ignore_ascii_case(id)));if text=="true"{blocked.push(json!(id));}}
+        else{for id in text.split([';','；',',','，','\n','\r']).map(str::trim).filter(|s|!s.is_empty()){if id.len()>256||id.chars().any(char::is_control){return Err("应用标识无效".into())}if !blocked.iter().any(|v|v.as_str().is_some_and(|s|s.eq_ignore_ascii_case(id))){blocked.push(json!(id));}}}
+        if blocked.len()>32{return Err("最多添加32个应用".into())}return request("update",json!({"key":"NotificationBlockedApps","value":blocked}));
+    }
     if let Some(id) = key.strip_prefix("notification-app:") {
         let mut allowed = state["settings"]["NotificationAllowedApps"]
             .as_array()
@@ -92,6 +98,26 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     if key == "SettingsTheme" {
         if !["System", "Light", "Dark"].contains(&text) {
             return Err("外观选项无效。".into());
+        }
+        return request("update", json!({"key": key, "value": text}));
+    }
+    // Segmented controls pass raw labels, not JSON string literals.
+    if ["NotificationSound", "TodoSound", "DeviceSound"].contains(&key) {
+        if !["Soft", "Glass", "Bell", "Connect"].contains(&text) {
+            return Err("音色选项无效。".into());
+        }
+        return request("update", json!({"key": key, "value": text}));
+    }
+    if key == "ControlCenterStartPage" {
+        if !["overview", "notifications", "todos", "timers", "island", "settings", "about"].contains(&text) {
+            return Err("起始页选项无效。".into());
+        }
+        return request("update", json!({"key": key, "value": text}));
+    }
+    // A layout type, never a raw boolean pair.
+    if key == "MusicExpandedLayout" {
+        if !["Separated", "SideBySide"].contains(&text) {
+            return Err("布局选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
     }
@@ -149,4 +175,55 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
 /// Accept only `#RRGGBB`, matching the native validator.
 pub fn is_hex_color(value: &str) -> bool {
     value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+
+/// Exercise the same conversion as the visible sound buttons, on isolated test data only.
+pub fn sound_selection_smoke() -> Result<Value, String> {
+    if !pipe_name().starts_with("LyricIsland.Settings.test.") {
+        return Err("音色自检只能使用独立测试管道".into());
+    }
+    let initial = request("state", Value::Null)?;
+    let keys = ["NotificationSound", "TodoSound", "DeviceSound"];
+    let outcome = (|| -> Result<Value, String> {
+        let mut combinations = 0;
+        let mut rejected = 0;
+        for key in keys {
+            for kind in ["Soft", "Glass", "Bell", "Connect"] {
+                let reply = change(key, kind, &initial)?;
+                if reply["success"] != true {
+                    return Err(format!("{key}/{kind}: {}", reply["message"]));
+                }
+                let state = request("state", Value::Null)?;
+                if state["settings"][key] != kind {
+                    return Err(format!("{key}/{kind} 未保存"));
+                }
+                combinations += 1;
+            }
+            for invalid in ["", "soft", "Chime", "\"Soft\"", "true", "null"] {
+                if change(key, invalid, &initial).is_ok() {
+                    return Err(format!("{key} 接受了无效音色"));
+                }
+                rejected += 1;
+            }
+            if request("state", Value::Null)?["settings"][key] != "Connect" {
+                return Err(format!("{key} 被无效输入覆盖"));
+            }
+        }
+        Ok(json!({"success": true, "combinations": combinations, "invalidRejected": rejected}))
+    })();
+    // Restore even when one check failed. Never leave the test fixture in its final selection.
+    let mut restoration_error = None;
+    for key in keys {
+        match request("update", json!({"key": key, "value": initial["settings"][key]})) {
+            Ok(reply) if reply["success"] == true => {},
+            other => restoration_error = Some(format!("恢复 {key} 失败：{other:?}")),
+        }
+    }
+    if let Some(error) = restoration_error { return Err(error); }
+    let final_state = request("state", Value::Null)?;
+    if keys.iter().any(|key| final_state["settings"][*key] != initial["settings"][*key]) {
+        return Err("音色自检未恢复原配置".into());
+    }
+    outcome
 }

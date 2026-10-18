@@ -12,6 +12,7 @@ args.add_argument('--binary-dir',type=Path,required=True)
 args.add_argument('--output',type=Path,required=True)
 args.add_argument('--sqlite',type=Path,default=Path.home()/'.nuget/packages/sqlitepclraw.lib.e_sqlite3/2.1.6/runtimes/win-x64/native/e_sqlite3.dll')
 args.add_argument('--version',default='1.3')
+args.add_argument('--portable',action='store_true',help='Also emit an independent portable distribution')
 options=args.parse_args()
 root=Path(__file__).resolve().parents[1]
 version=options.version
@@ -37,7 +38,7 @@ framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
 updater=root/'publish'/'LyricIsland.Updater.exe'
 subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+',
     '/out:'+str(updater),'/reference:'+str(framework/'System.IO.Compression.dll'),
-    '/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll','/reference:System.Web.Extensions.dll',
+    '/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll',
     str(root/'LyricIsland.Bootstrap/Updater.cs')],check=True)
 copy(updater,'LyricIsland.Updater.exe')
 copy(options.sqlite,'e_sqlite3.dll')
@@ -56,19 +57,37 @@ for path in sorted((root/'licenses').rglob('*')):
     if path.is_file():copy(path,path.relative_to(root))
 copy(root/'NATIVE-README.md','README.md')
 
-payload=out/(name+'-Portable.zip')
-with zipfile.ZipFile(payload,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
-    for path in sorted(files): z.write(path,bundle_name+'/'+path.relative_to(stage).as_posix())
+# The installer remains the default distribution; portable output is explicit.
+for path in sorted((root/'Assets/DeviceIcons').glob('*')):
+    if path.is_file():copy(path,path.relative_to(root))
+portable=None
+if options.portable:
+    portable=out/(name+'-Portable.zip')
+    with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+        for path in sorted(files):z.write(path,name+'/'+path.relative_to(stage).as_posix())
+        z.writestr(name+'/Portable.json',json.dumps({'portable':True,'version':version}))
+        z.writestr(name+'/便携版说明.txt','点屿 DotIsle 便携版\r\n解压到可写文件夹，运行 LyricIsland.exe。\r\n设置、待办和流程等数据保存在旁边的 Data 文件夹。\r\n移动时请连同整个文件夹一起移动；不要删除 Portable.json。\r\n便携版与安装版共享单实例限制，切换前请先退出正在运行的点屿。\r\n')
 
 generated=root/'publish'/'NativeBundleVersion.g.cs'
+generated.write_text('internal static class BundleVersion { internal const string Version="'+version+'"; internal const string PayloadHash=""; }\n',encoding='utf-8')
+compiler=str(framework/'csc.exe')
+references=['/reference:'+str(framework/'System.IO.Compression.dll'),'/reference:'+str(framework/'System.IO.Compression.FileSystem.dll'),'/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll']
+uninstall=root/'publish/Uninstall.exe'
+subprocess.run([compiler,'/nologo','/target:winexe','/main:Installer','/platform:x64','/optimize+','/out:'+str(uninstall),*references,str(root/'LyricIsland.Bootstrap/Installer.cs'),str(root/'LyricIsland.Bootstrap/Updater.cs'),str(generated)],check=True)
+copy(uninstall,'Uninstall.exe')
+payload=root/'publish/InstallPayload.zip'
+with zipfile.ZipFile(payload,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+    for path in sorted(files):z.write(path,bundle_name+'/'+path.relative_to(stage).as_posix())
 generated.write_text('internal static class BundleVersion { internal const string Version="'+version+'"; internal const string PayloadHash="'+hashlib.sha256(payload.read_bytes()).hexdigest()+'"; }\n',encoding='utf-8')
-framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
-share=out/(name+'.exe')
-subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe','/platform:x64','/optimize+',
-    '/out:'+str(share),'/win32icon:'+str(root/'Assets/LyricIsland-v2.ico'),
-    '/resource:'+str(payload)+',LyricIsland.Payload.zip',
-    '/reference:'+str(framework/'System.IO.Compression.dll'),
-    str(root/'LyricIsland.Bootstrap/Program.cs'),str(generated)],check=True)
+share=out/(name+'-Setup.exe')
+subprocess.run([compiler,'/nologo','/target:winexe','/main:Installer','/platform:x64','/optimize+','/out:'+str(share),'/win32icon:'+str(root/'Assets/LyricIsland-v2.ico'),'/resource:'+str(payload)+',DotIsle.InstallPayload.zip',*references,str(root/'LyricIsland.Bootstrap/Installer.cs'),str(root/'LyricIsland.Bootstrap/Updater.cs'),str(generated)],check=True)
+copy(share,'DotIsle.Setup.exe')
+offer=stage/'OtaInstall.json';offer.write_text('{"offerInstaller":true}',encoding='utf-8');files.append(offer)
+legacy=out/'OTA-Compatibility';legacy.mkdir(exist_ok=True)
+payload=legacy/(bundle_name+'-Portable.zip')
+with zipfile.ZipFile(payload,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+    for path in sorted(files):z.write(path,bundle_name+'/'+path.relative_to(stage).as_posix())
+(legacy/(bundle_name+'-SHA256.txt')).write_text(hashlib.sha256(payload.read_bytes()).hexdigest()+'  '+payload.name+'\n',encoding='utf-8')
 
 excluded={'bin','obj','target','target-native','artifacts','Logs','Data','TestResults','.git','__pycache__','publish'}
 source=out/(name+'-Source.zip')
@@ -78,12 +97,7 @@ with zipfile.ZipFile(source,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
         if path.is_file() and not any(part in excluded for part in rel.parts):
             z.write(path,name+'-Source/'+rel.as_posix())
 
-checks=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name for p in [payload,share,source]]
+checks=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name for p in [share,source]+([portable] if portable else [])]
 (out/(name+'-SHA256.txt')).write_text('\n'.join(checks)+'\n',encoding='utf-8')
 print(json.dumps({'nativeBytes':(stage/'LyricIsland.exe').stat().st_size,'portableBytes':payload.stat().st_size,'shareBytes':share.stat().st_size,'sourceBytes':source.stat().st_size,'fontSha256':font_hash}))
 
-legacy=out/'OTA-Compatibility'
-legacy.mkdir(exist_ok=True)
-legacy_zip=legacy/(bundle_name+'-Portable.zip')
-shutil.copy2(payload,legacy_zip)
-(legacy/(bundle_name+'-SHA256.txt')).write_text(hashlib.sha256(legacy_zip.read_bytes()).hexdigest()+'  '+legacy_zip.name+'\n',encoding='utf-8')
