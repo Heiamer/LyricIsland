@@ -1196,10 +1196,9 @@ fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyE
                     .border_1()
                     .border_color(motion::blend_color(phase, t::hairline().opacity(0.0), t::hairline()))
                     .font_weight(if progress > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                    .shadow(vec![
-                        BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(progress).into()).blur_radius(px(3.0)),
-                        BoxShadow::new(px(0.0), px(7.0), t::shadow().opacity(progress * 0.55).into()).blur_radius(px(16.0)).spread_radius(px(-8.0)),
-                    ])
+                    // No drop shadow on the rail rows: the raised surface, the border and the
+                    // accent bar already separate the selected row, and the shadow only smudged
+                    // the flat white rail.
                     // The accent bar grows out of the rail as the row is picked: motion that
                     // telegraphs the outcome instead of just interpolating to it.
                     .child(

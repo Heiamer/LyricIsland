@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-archive"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "flate2",
  "sha2",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-backend"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "aes",
  "base64",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-bootstrap"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "flate2",
  "lyric-archive",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-core"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-native"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "base64",
  "image",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-settings"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "embed-manifest",
  "gpui-pre",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-tools"
-version = "2.0.5"
+version = "2.0.6"
 dependencies = [
  "lyric-archive",
  "lyric-bootstrap",
