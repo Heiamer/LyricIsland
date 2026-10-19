@@ -17,7 +17,7 @@ fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:
 pub struct Scene<'a>{
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
     pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
-    pub lyric_cover_color:bool,pub cover_background:bool,pub demo:bool,pub animate:bool,
+    pub glass_material:bool,pub lyric_cover_color:bool,pub cover_background:bool,pub demo:bool,pub animate:bool,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
     pub osd:Option<&'a crate::notifications::Notice>,pub osd_rect:Rect,pub osd_radius:f64,pub osd_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
@@ -38,7 +38,7 @@ pub struct Renderer{
     factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
     _device:ID3D11Device,_composition:IDCompositionDevice,_target:IDCompositionTarget,_visual:IDCompositionVisual,
     screen:ID2D1Bitmap1,compact:ID2D1Bitmap1,expanded:ID2D1Bitmap1,shadow:ID2D1Bitmap1,
-    blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
+    poster_cover:Option<ID2D1Bitmap1>,poster_blur:ID2D1Effect,blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
     write:IDWriteFactory,body_fonts:IDWriteFontCollection,system_fonts:IDWriteFontCollection,fallback:IDWriteFontFallback,body_family:String,japanese_family:String,
     pub body_line_spacing:f64,pub body_baseline:f64,
     icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,measured:HashMap<String,f64>,cover:Option<ID2D1Bitmap1>,previous_cover:Option<ID2D1Bitmap1>,cover_changed:std::time::Instant,flip_from:f64,pub width:u32,pub height:u32,pub dpi:f32,
@@ -86,6 +86,9 @@ impl Renderer{
         let japanese_path=font.with_file_name("NotoSansJP.ttf").to_string_lossy().encode_utf16().chain(Some(0)).collect::<Vec<_>>();
         builder.AddFontFile(&write.CreateFontFileReference(PCWSTR(japanese_path.as_ptr()),None)?)?;
         let body_fonts:IDWriteFontCollection=fw.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?.cast()?;
+        let poster_blur=dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+        poster_blur.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&12_f32.to_ne_bytes())?;
+        poster_blur.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,D2D1_PROPERTY_TYPE_ENUM,&(D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes())?;
         let blur=dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;let shadow_fx=dc.CreateEffect(&CLSID_D2D1Shadow)?;
         dc.SetTarget(&screen);let mut system_fonts=None;write.GetSystemFontCollection(&mut system_fonts,false)?;let system_fonts=system_fonts.unwrap();let fallback=write.cast::<IDWriteFactory2>()?.GetSystemFontFallback()?;
         let mut index=0;let mut body_family=String::new();
@@ -99,7 +102,7 @@ impl Renderer{
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
         dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,blur,shadow_fx})
+        Ok(Self{factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{self.load_cover(bytes,true)}
     /// `theme` runs the Monet palette; notification icons skip it so they never recolour the music card.
@@ -318,7 +321,7 @@ impl Renderer{
         self.dc.PopLayer();self.dc.SetTransform(&identity());Ok(())
     }
     pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{
-        let mut themed=*s;if s.panel.is_some(){themed.cover_background=false;}if self.cover.is_some(){let accent=0xff000000|self.cover_palette.accent;if themed.cover_background{themed.component_color=accent;}if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
+        let mut themed=*s;if s.panel.is_some()&&!s.glass_material{themed.cover_background=false;}if self.cover.is_some(){let accent=0xff000000|self.cover_palette.accent;if themed.cover_background{themed.component_color=accent;}if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
         let (base_shape,base_radius)=s.layout.morph_shape(s.frame.card_reveal,s.radius,s.fluid_motion);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
@@ -346,7 +349,30 @@ impl Renderer{
             let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
             self.surface_brush=Some((top,bottom,shape,brush));
         }
-        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);self.brush.SetColor(&color(0x22ffffff));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
+        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);
+        // Frost the cover, never the text. This is a self-contained poster acrylic,
+        // not desktop capture; the classic material and compact capsule stay intact.
+        let glass=if s.glass_material&&s.notification.is_none()&&s.osd.is_none(){blend(p,0.16,0.92)}else{0.};
+        if glass>0.001{
+            self.clip(shape,radius,glass as f32)?;
+            if s.cover_background{
+                if let Some(cover)=&self.cover{
+                    
+                    if self.poster_cover.as_ref()!=Some(cover){self.poster_blur.SetInput(0,cover,true);self.poster_cover=Some(cover.clone());}
+                    // Effect bounds, unlike bitmap DIPs, stay correct across render-target DPI.
+                    let output=self.poster_blur.GetOutput()?;let bounds=self.dc.GetImageLocalBounds(&output)?;
+                    let width=(bounds.right-bounds.left)as f64;let height=(bounds.bottom-bounds.top)as f64;
+                    let scale=(shape.w/width.max(1.)).max(shape.h/height.max(1.));
+                    self.dc.SetTransform(&matrix(scale,shape.x+(shape.w-width*scale)/2.-bounds.left as f64*scale,shape.y+(shape.h-height*scale)/2.-bounds.top as f64*scale));
+                    self.dc.DrawImage(&output,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                    self.dc.SetTransform(&identity());
+                }
+            }
+            // An opaque dark scrim bounds the brightest possible cover for legibility.
+            self.fill(shape,radius,0xc9000000|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));
+            self.dc.PopLayer();
+        }
+        self.brush.SetColor(&color(if glass>0.001{0x42ffffff}else{0x22ffffff}));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
         if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
             let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(0x44ffffff)},D2D1_GRADIENT_STOP{position:0.32,color:color(0x00ffffff)}];
             let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
@@ -359,7 +385,7 @@ impl Renderer{
         let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;
         if alpha>0.001{self.draw_layer(&self.expanded,if s.resizing{s.frame.card_blur}else{0.},alpha as f32,matrix(content_scale,tx,ty),(shape,radius))?;}
         let alpha=(1.-blend(p,0.06,0.46))*music_alpha;
-        if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,identity(),(s.layout.capsule,s.layout.capsule.h/2.))?;}
+        if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,matrix(1.,base_shape.x-s.layout.capsule.x,base_shape.y-s.layout.capsule.y),(shape,radius))?;}
         if s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none()&&s.osd.is_none(){self.satellite(s)?;}
         if let Some(notice)=s.notification{self.clip(shape,radius,s.notification_mix as f32)?;self.notification_content(notice,shape)?;self.dc.PopLayer();}
         if let Some(osd)=s.osd{self.clip(shape,radius,s.osd_mix as f32)?;self.osd_content(osd,shape)?;self.dc.PopLayer();}

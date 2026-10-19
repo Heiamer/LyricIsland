@@ -45,8 +45,11 @@ use protocol as pipe;
 use serde_json::{json, Value};
 use theme as t;
 
+/// The tiny island mark used by the onboarding tutorial's simulated tray.
+fn brand_pill()->AnyElement{canvas(|_,_,_|{},|bounds,_,window,_|{let x=bounds.origin.x;let y=bounds.origin.y;window.paint_quad(quad(Bounds::new(point(x+px(4.0),y),size(px(27.0),px(17.0))),px(8.5),rgb(0x222829),px(0.),transparent_black(),BorderStyle::Solid));window.paint_quad(quad(Bounds::new(point(x+px(22.4),y+px(6.1)),size(px(4.8),px(4.8))),px(2.4),rgb(0xF4C34D),px(0.),transparent_black(),BorderStyle::Solid));}).w(px(35.)).h(px(17.)).into_any_element()}
+
 /// Sidebar width, straight from the 1.5 handoff's `--di-sidebar`.
-const SIDEBAR: f32 = 184.0;
+const SIDEBAR: f32 = 208.0;
 
 /// The control centre is a fixed canvas.
 ///
@@ -433,7 +436,7 @@ impl SettingsApp {
             Route::from_key(setting_str(&state, "ControlCenterStartPage", "overview")).unwrap_or(Route::Overview)
         });
         Self {
-            timer_motion:RefCell::new(std::collections::HashMap::new()),timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:"workflow".into(),timer_new:false,timer_adjust_open:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
+            timer_motion:RefCell::new(std::collections::HashMap::new()),timer_name,timer_duration,timer_focus,timer_rest,timer_rounds,timer_mode:std::env::var("LYRICISLAND_SMOKE_TIMER_MODE").ok().filter(|mode| ["workflow","pomodoro","countdown","stopwatch"].contains(&mode.as_str())).unwrap_or_else(|| "workflow".into()),timer_new:false,timer_adjust_open:false,todo_filter:0,todo_completed_open:false,todo_color:"#F3D79B".into(),
             shared:Rc::clone(&shared),
             route: start_route,
             drawer: smoke_drawer(),
@@ -637,14 +640,34 @@ fn stacked(rows: Vec<AnyElement>, rounded_panel: bool) -> Div {
 const PANEL_PAD: f32 = 18.0;
 const PANEL_RADIUS: f32 = 16.0;
 
+/// The raised sheet every group, list and card is cut from.
+///
+/// Three quiet layers do the work: a vertical wash a hair lighter at the top, a one-pixel inset
+/// sheen along the top edge, and a shadow that hugs the outline. The border is kept so the panel
+/// still separates from the base when the shadow is invisible (light mode, low-contrast displays).
+fn raised(radius: f32) -> Div {
+    div().w_full().min_w_0().rounded(px(radius))
+        .border_1().border_color(t::hairline())
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(t::panel_top(), 0.0),
+            linear_color_stop(t::panel_bottom(), 1.0),
+        ))
+        .shadow(vec![
+            BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
+            BoxShadow::new(px(0.0), px(1.0), t::shadow().into()).blur_radius(px(2.0)),
+            BoxShadow::new(px(0.0), px(10.0), t::shadow().opacity(0.30).into())
+                .blur_radius(px(24.0)).spread_radius(px(-16.0)),
+        ])
+}
+
 fn panel(rows: Vec<AnyElement>) -> AnyElement {
-    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden()
-        .px(px(PANEL_PAD)).py(px(0.0)).child(stacked(rows, true)).into_any_element()
+    raised(PANEL_RADIUS).overflow_hidden().px(px(PANEL_PAD)).py(px(0.0)).child(stacked(rows, true)).into_any_element()
 }
 
 /// A borderless panel whose rows carry their own horizontal padding (notification and timer lists).
 fn list(rows: Vec<AnyElement>) -> AnyElement {
-    div().w_full().min_w_0().rounded(px(16.0)).border_1().border_color(t::hairline()).bg(t::surface()).overflow_hidden().p(px(8.0)).child(stacked(rows, false)).into_any_element()
+    raised(PANEL_RADIUS).overflow_hidden().p(px(8.0)).child(stacked(rows, false)).into_any_element()
 }
 
 /// A 34px icon tile (`di-symbol`): notification rows and task lines wear one.
@@ -684,9 +707,11 @@ fn taskcheck(sym: AnyElement, title: &str, detail: &str, trailing: Option<AnyEle
 /// A card holding one content block and, below a hairline, an inset action strip (`di-inset`).
 fn inset_card(highlight: bool, body: AnyElement, actions: Option<AnyElement>) -> AnyElement {
     let card = if highlight {
-        div().w_full().min_w_0().rounded(px(16.0)).bg(t::yellow())
+        div().w_full().min_w_0().rounded(px(PANEL_RADIUS))
+            .bg(linear_gradient(180.0, linear_color_stop(t::yellow(), 0.0), linear_color_stop(motion::mix(0.5, t::yellow(), t::surface()), 1.0)))
+            .border_1().border_color(t::yellow_line().opacity(0.35))
     } else {
-        div().w_full().min_w_0().rounded(px(16.0)).bg(t::surface()).border_1().border_color(t::hairline())
+        raised(PANEL_RADIUS)
     };
     let card = card.child(div().px(px(18.0)).pt(px(18.0)).pb(px(if actions.is_some() { 14.0 } else { 18.0 })).child(body));
     match actions {
@@ -695,11 +720,13 @@ fn inset_card(highlight: bool, body: AnyElement, actions: Option<AnyElement>) ->
     }
 }
 
-/// One section: a 16px heading, an optional green jump link, and one body below. The 22px section
-/// rhythm lives here, so the page column itself carries no gap.
+/// One section: a 14px heading with its accent tick, an optional green jump link, and one body
+/// below. The 22px section rhythm lives here, so the page column itself carries no gap.
 fn section_block(title: &str, link: Option<(&'static str, &str, Route)>, body: AnyElement, cx: &mut Context<SettingsApp>) -> AnyElement {
-    let head = div().flex().items_center().justify_between().gap_3().mb(px(10.0))
-        .child(div().text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()));
+    let head = div().flex().items_center().justify_between().gap_3().mb(px(11.0))
+        .child(div().flex().items_center().gap(px(9.0))
+            .child(div().w(px(3.0)).h(px(14.0)).rounded(px(1.5)).bg(t::accent()))
+            .child(div().text_size(px(14.5)).font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child(title.to_owned())));
     let head = match link {
         Some((id, label, route)) => head.child(link_button(id, label, route, cx)),
         None => head,
@@ -731,8 +758,13 @@ fn section_group(title: &str, link: Option<(&'static str, &str, Route)>, rows: V
 }
 
 /// A row of `di-tab` pills: the page-level filters (待办筛选、通知分类、计时模式、设置分页).
+///
+/// The pills sit inside a recessed track, so the row reads as one segmented control instead of a
+/// scatter of buttons. The active pill keeps its own spring fill — the track stays put while the
+/// selection travels, which is the same "one object changed" story the nav rail tells.
 fn tab_row(id_prefix: &'static str, labels: &[&'static str], selected: usize, cx: &mut Context<SettingsApp>, pick: impl Fn(&mut SettingsApp, usize) + Clone + 'static) -> AnyElement {
-    let mut row = div().flex().items_center().flex_wrap().gap(px(6.0)).mb(px(16.0));
+    let mut bar = div().flex().items_center().flex_wrap().gap(px(2.0)).p(px(3.0)).rounded(px(13.0))
+        .bg(t::field()).border_1().border_color(t::hairline());
     for (index, label) in labels.iter().enumerate() {
         let text: &'static str = *label;
         let active = index == selected;
@@ -745,23 +777,25 @@ fn tab_row(id_prefix: &'static str, labels: &[&'static str], selected: usize, cx
             cx.notify();
         });
         let id = SharedString::from(format!("tab-{id_prefix}-{index}"));
-        row = row.child(
+        bar = bar.child(
             div().id((id.clone(), 1usize)).with_spring(
                 (id.clone(), 0usize),
                 motion::phase(motion::snappy(), active),
                 move |_, phase| {
-                    div().id(id.clone()).px(px(12.0)).py(px(7.0)).rounded(px(10.0))
-                        .bg(motion::blend_color(phase, t::surface(), t::surface_hi()))
-                        .text_size(px(13.0))
+                    let lift = motion::alpha(phase);
+                    div().id(id.clone()).px(px(15.0)).py(px(7.0)).rounded(px(10.0))
+                        .bg(motion::blend_color(phase, t::field(), t::surface()))
+                        .text_size(px(12.5))
                         .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
-                        .font_weight(if motion::alpha(phase) > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .font_weight(if lift > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(lift).into()).blur_radius(px(2.0))])
                         .cursor_pointer().active(|style| style.opacity(0.72)).child(text.to_owned())
                         .on_click(click)
                 },
             ),
         );
     }
-    row.into_any_element()
+    div().flex().w_full().mb(px(16.0)).child(bar).into_any_element()
 }
 
 /// A select-style control: the handoff's `di-select` at rest. The dropdown itself is painted by
@@ -778,13 +812,14 @@ fn select_control(id: &'static str, value_label: &str, open: bool, width: Option
     }, |_, _, _, _| {}).absolute().inset_0();
     let control = div().id(id).relative().flex().items_center().justify_between().gap_2()
         .min_h(px(34.0))
-        .px(px(10.0)).py(px(8.0)).rounded(px(9.0))
-        .bg(t::base()).border_1().border_color(if open { t::accent() } else { t::hairline() })
-        .text_size(px(13.0)).text_color(t::text()).cursor_pointer()
+        .px(px(11.0)).py(px(8.0)).rounded(px(10.0))
+        .bg(t::field()).border_1().border_color(if open { t::accent() } else { t::hairline() })
+        .text_size(px(12.5)).text_color(t::text()).cursor_pointer()
+        .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(0.7).into()).blur_radius(px(2.0)).inset()])
         .hover(|style| style.bg(t::surface_hi()))
         .child(probe)
         .child(div().min_w_0().overflow_hidden().child(value_label.to_owned()))
-        .child(icons::tinted("chevron-down", t::text_dim()))
+        .child(icons::tinted("chevron-down", if open { t::accent() } else { t::text_dim() }))
         .on_click(cx.listener(move |view, _, _, cx| {
             view.select = if view.select == Some(id) { None } else { Some(id) };
             // A fresh epoch per opening: the menu drops in every time, even when it is reopened
@@ -834,16 +869,20 @@ fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsAp
     let menu_height=options.len()as f32*36.+12.;let menu_left=f32::from(anchor.origin.x).clamp(8.,WINDOW_WIDTH-218.);
     let below=f32::from(anchor.origin.y+anchor.size.height)+6.;
     let menu_top=if below+menu_height<=WINDOW_HEIGHT-12.{below}else{(f32::from(anchor.origin.y)-menu_height-6.).max(48.)};
-    let mut menu = div().flex().flex_col().p(px(6.0));
+    let mut menu = div().flex().flex_col().gap(px(1.0)).p(px(6.0));
     for (value, label) in options {
         let active = current == *value;
         let value = value.to_string();
+        let mut option = div().id(SharedString::from(format!("select-option-{key}-{value}"))).flex().items_center().justify_between().gap_3()
+            .px(px(11.0)).py(px(8.0)).rounded(px(9.0)).text_size(px(12.5)).text_color(t::text()).cursor_pointer();
+        if active {
+            option = option.bg(t::accent_dim()).text_color(t::accent());
+        }
         menu = menu.child(
-            div().id(SharedString::from(format!("select-option-{key}-{value}"))).flex().items_center().justify_between().gap_3()
-                .px(px(12.0)).py(px(8.0)).rounded(px(8.0)).text_size(px(13.0)).text_color(t::text()).cursor_pointer()
-                .hover(|style| style.bg(t::surface_hi()))
+            option
+                .hover(move |style| if active { style } else { style.bg(t::surface_hi()) })
                 .child((*label).to_owned())
-                .child(if active { icons::icon("check").into_any_element() } else { div().into_any_element() })
+                .child(if active { icons::tinted("check", t::accent()).into_any_element() } else { div().into_any_element() })
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.select = None;
                     match key {
@@ -861,8 +900,12 @@ fn select_overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsAp
         .child(div().id("select-scrim").absolute().inset_0().on_click(cx.listener(|view, _, _, cx| {view.select = None;cx.notify();})))
         .child(
             div().absolute().left(px(menu_left)).w(px(210.0))
-                .rounded(px(12.0)).border_1().border_color(t::hairline()).bg(t::surface())
-                .shadow(vec![BoxShadow::new(px(0.0), px(4.0), t::shadow().into()).blur_radius(px(14.0))])
+                .rounded(px(14.0)).border_1().border_color(t::hairline())
+                .bg(linear_gradient(180.0, linear_color_stop(t::panel_top(), 0.0), linear_color_stop(t::panel_bottom(), 1.0)))
+                .shadow(vec![
+                    BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
+                    BoxShadow::new(px(0.0), px(14.0), t::shadow().opacity(0.9).into()).blur_radius(px(30.0)),
+                ])
                 .child(menu)
                 // The menu grows out of the control that owns it and travels the short distance to
                 // its resting place, so the eye never has to search for where it came from.
@@ -895,7 +938,11 @@ impl Render for SettingsApp {
         }
         let route = self.route;
         let (title, subtitle) = route.heading();
-        let theme = setting_str(&state, "SettingsTheme", "System").to_owned();
+        // Screenshots need both appearances without touching the user's stored theme; the smoke
+        // hook is read only when an automated run sets it.
+        let theme = std::env::var("LYRICISLAND_SMOKE_THEME").ok()
+            .filter(|value| value == "Light" || value == "Dark")
+            .unwrap_or_else(|| setting_str(&state, "SettingsTheme", "System").to_owned());
         let system_dark = matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -962,41 +1009,47 @@ impl Render for SettingsApp {
             .unwrap_or_default();
 
         // 桌面入口 sits alone at the top; the tools group below; help stays pinned at the bottom.
-        let mut sidebar = div().flex().flex_col().w(px(SIDEBAR)).flex_shrink_0().h_full().pt(px(24.)).px_3().pb(px(14.)).gap(px(5.)).bg(t::sidebar());
-        sidebar = sidebar.child(group_label("桌面入口")).child(nav_item(Route::Island, route, cx));
-        sidebar = sidebar.child(div().mx(px(10.)).my(px(14.)).h(px(1.0)).bg(t::hairline()));
-        sidebar = sidebar.child(group_label("提醒与工具"));
+        let online = notice.starts_with("已连接");
+        let mut sidebar = div().flex().flex_col().w(px(SIDEBAR)).flex_shrink_0().h_full().pt(px(20.)).px(px(14.)).pb(px(14.)).gap(px(4.)).bg(t::sidebar());
+        sidebar = sidebar.child(group_label("桌面", "01")).child(nav_item(Route::Island, route, cx));
+        sidebar = sidebar.child(sidebar_rule());
+        sidebar = sidebar.child(group_label("工作台", "02"));
         for item in [Route::Overview, Route::Notifications, Route::Todos, Route::Timers] {
             sidebar = sidebar.child(nav_item(item, route, cx));
         }
         sidebar = sidebar
-            .child(div().flex_1().min_h(px(28.)))
+            .child(div().flex_1().min_h(px(24.)))
+            .child(sidebar_rule())
+            .child(group_label("系统", "03"))
             .child(nav_item(Route::Settings, route, cx))
             .child(nav_item(Route::About, route, cx))
-            .child(div().pt(px(17.)).px_3().text_size(px(12.)).text_color(t::text_dim()).child("重要的事，一眼可见。"));
+            .child(sidebar_notes());
 
         // The scroll container's child must be content-sized: giving it `h_full` pinned it to the
         // viewport, so anything past the fold was clipped instead of becoming scrollable.
-        let head = div().flex().items_start().justify_between().gap_4().mb(px(24.))
+        let number = format!("{:02}", route.index() + 1);
+        let head = div().flex().items_center().justify_between().gap_4().mb(px(26.))
             .child(
-                div().flex().flex_col()
-                    .child(div().text_size(px(27.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
-                    .child(div().mt(px(7.)).text_size(px(13.0)).text_color(t::text_dim()).child(subtitle.to_owned())),
+                div().flex().flex_col().flex_1().min_w_0()
+                    .child(div().flex().items_center().gap(px(8.0))
+                        .child(div().font(t::mono_font()).text_size(px(10.0)).font_weight(FontWeight::MEDIUM).text_color(t::accent()).child(format!("控制中心 · {number}")))
+                        .child(div().w(px(20.0)).h(px(1.0)).rounded(px(0.5)).bg(t::accent_dim())))
+                    .child(div().mt(px(9.)).font(t::display_font()).text_size(px(30.0)).font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child(title.to_owned()))
+                    .child(div().mt(px(7.)).text_size(px(12.5)).text_color(t::text_dim()).child(subtitle.to_owned())),
             )
-            .child(head_actions(route, &state, self, cx));
+            .child(div().flex_shrink_0().child(head_actions(route, &state, self, cx)));
         // The heading and the rows enter together, the rows one after another. Both are keyed off
         // the route epoch, so a new page always starts its cascade from zero rather than
         // inheriting whatever the previous page's animations had already finished.
-        let head = head.with_animation(("page-head", self.route_epoch), motion::enter(240, 0), |element, progress| {
-            motion::rise(element, progress, 8.0)
+        let head = head.with_animation(("page-head", self.route_epoch), motion::enter(260, 0), |element, progress| {
+            motion::rise(element, progress, 10.0)
         });
         let rows=page_rows(route,&state,self,cx);let rows=if route==Route::Timers{rows}else{motion::cascade(rows,self.route_epoch,self.content_epoch,22)};
-        let mut column = div().flex().flex_col().w_full().min_w_0().pt(px(28.)).px(px(22.)).pb(px(24.)).child(head);
+        let mut column = div().flex().flex_col().w_full().min_w_0().pt(px(26.)).px(px(26.)).pb(px(26.)).child(head);
         column = column.child(div().flex().flex_col().children(rows));
 
         // Each route owns its offset, so switching routes always starts where that route was left.
         let scroll = self.scrolls[route.index().min(self.scrolls.len() - 1)].clone();
-        let online = notice.starts_with("已连接");
         // While the island is not answering, the status dot breathes. It is the one looping
         // animation in the window: it says "still trying" without asking for attention, and it
         // stops the moment the pipe connects.
@@ -1015,9 +1068,13 @@ impl Render for SettingsApp {
                 )
                 .into_any_element()
         };
-        let footer = div().flex().items_center().gap_2().text_size(px(12.0)).text_color(t::text_dim())
+        let footer = div().flex().items_center().gap_2().text_size(px(11.5)).text_color(t::text_dim())
             .child(dot)
-            .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice });
+            .child(if notice.is_empty() { "正在连接灵动岛…".to_owned() } else { notice })
+            .child(div().flex_1())
+            .child(div().flex().items_center().gap(px(5.0)).text_size(px(10.5)).text_color(t::text_faint())
+                .child(icons::tinted("circle-check", t::text_faint()))
+                .child("所有更改即时保存"));
         let drawer = drawer_panel(&state, self, cx);
         if self.tutorial_step.is_some(){window.focus(&self.music_focus,cx);}
 
@@ -1043,10 +1100,13 @@ impl Render for SettingsApp {
             .child(sidebar)
             .child(div().w(px(1.0)).flex_shrink_0().h_full().bg(t::hairline()))
             .child(
-                div().flex().flex_col().flex_1().min_w_0().h_full()
+                div().relative().flex().flex_col().flex_1().min_w_0().h_full()
+                    // The glow sits behind the scroll surface; pages paint no background of their
+                    // own, so it reads as light falling into the top-right of the content column.
+                    .child(page_halo(self.route_epoch))
                     .child(div().id("content").flex_1().min_w_0().overflow_y_scroll().track_scroll(&scroll).child(column))
                     .child(hairline())
-                    .child(div().px(px(22.)).pt(px(9.)).pb(px(12.)).min_w_0()
+                    .child(div().px(px(26.)).pt(px(9.)).pb(px(12.)).min_w_0()
                         .children(if message.is_empty(){None}else{Some(
                             // A fresh id per message: each new line slides in on its own, and an
                             // identical repeat of the last one does not restart it.
@@ -1064,7 +1124,6 @@ impl Render for SettingsApp {
 }
 
 /// The 2.0 brand mark: one graphite capsule with an amber state dot inside its right half.
-fn brand_pill()->AnyElement{canvas(|_,_,_|{},|bounds,_,window,_|{let x=bounds.origin.x;let y=bounds.origin.y;window.paint_quad(quad(Bounds::new(point(x+px(4.0),y),size(px(27.0),px(17.0))),px(8.5),rgb(0x222829),px(0.),transparent_black(),BorderStyle::Solid));window.paint_quad(quad(Bounds::new(point(x+px(22.4),y+px(6.1)),size(px(4.8),px(4.8))),px(2.4),rgb(0xF4C34D),px(0.),transparent_black(),BorderStyle::Solid));}).w(px(35.)).h(px(17.)).into_any_element()}
 fn settings_titlebar()->AnyElement {
     let mut controls=div().flex().items_center().h_full().pr_2().gap_1();
     // No maximize button: the window is a fixed canvas (see `WINDOW_WIDTH`), so the control would
@@ -1072,15 +1131,28 @@ fn settings_titlebar()->AnyElement {
     // window is created non-resizable, so nothing here has to defend the size.
     for (id,area,glyph) in [("window-minimize",WindowControlArea::Min,"\u{e921}"),("window-close",WindowControlArea::Close,"\u{e8bb}")] {
         let close=area==WindowControlArea::Close;
-        controls=controls.child(div().id(id).window_control_area(area).w(px(38.)).h(px(30.)).rounded(px(9.)).flex().items_center().justify_center().font_family("Segoe Fluent Icons").text_size(px(10.)).text_color(t::text_dim()).hover(move|s|if close{s.bg(t::danger()).text_color(rgb(0xffffff))}else{s.bg(t::hover()).text_color(t::text())}).child(glyph));
+        controls=controls.child(div().id(id).window_control_area(area).w(px(36.)).h(px(28.)).rounded(px(8.)).flex().items_center().justify_center().font_family("Segoe Fluent Icons").text_size(px(10.)).text_color(t::text_dim()).hover(move|s|if close{s.bg(t::danger()).text_color(rgb(0xffffff))}else{s.bg(t::surface_hi()).text_color(t::text())}).child(glyph));
     }
-    div().flex().w_full().h(px(50.)).flex_shrink_0().border_b_1().border_color(t::hairline())
-        .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).flex_1().min_w_0().h_full().pl(px(20.)).flex().items_center().gap(px(9.))
-            .child(brand_pill())
-            .child(div().flex().items_center().gap(px(5.)).text_size(px(13.5))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(t::text()).child("点屿"))
-                .child(div().text_color(t::text_dim()).child("控制中心"))))
-        .child(div().px_3().flex_shrink_0().text_size(px(12.)).text_color(t::text_dim()).child(format!("v{}", env!("CARGO_PKG_VERSION"))))
+    // The brand mark: a jade island capsule with the amber state dot, lifted off the chrome by its
+    // own light. It is the same mark the capsule wears, so the control centre reads as the same app.
+    let brand = div().relative().w(px(26.0)).h(px(26.0)).rounded(px(8.0))
+        .bg(linear_gradient(145.0, linear_color_stop(t::accent(), 0.0), linear_color_stop(t::accent_deep(), 1.0)))
+        .shadow(vec![
+            BoxShadow::new(px(0.0), px(5.0), t::accent().opacity(0.28).into()).blur_radius(px(12.0)),
+            BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
+        ])
+        .flex().items_center().justify_center()
+        .child(div().flex().items_center().gap(px(2.0))
+            .child(div().w(px(11.0)).h(px(4.5)).rounded(px(2.25)).bg(t::on_accent()))
+            .child(div().w(px(4.0)).h(px(4.0)).rounded(px(2.0)).bg(t::yellow_line())));
+    div().flex().w_full().h(px(52.)).flex_shrink_0().bg(t::chrome()).border_b_1().border_color(t::hairline())
+        .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).flex_1().min_w_0().h_full().pl(px(22.)).flex().items_center().gap(px(11.))
+            .child(brand)
+            .child(div().flex().items_center().gap(px(8.)).text_size(px(13.5))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child("点屿"))
+                .child(div().px(px(6.0)).py(px(1.5)).rounded(px(5.0)).bg(t::surface_hi()).text_size(px(9.5)).text_color(t::text_dim()).child("控制中心"))))
+        .child(div().mr(px(6.0)).px(px(7.0)).py(px(3.0)).rounded(px(6.0)).bg(t::field()).border_1().border_color(t::hairline())
+            .font(t::mono_font()).text_size(px(9.5)).text_color(t::text_faint()).child(format!("v{}", env!("CARGO_PKG_VERSION"))))
         .child(controls).into_any_element()
 }
 
@@ -1105,31 +1177,37 @@ fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyE
             move |_, phase| {
                 let progress = motion::alpha(phase);
                 let text = motion::blend_color(phase, t::text_dim(), t::text());
+                let icon_color = motion::blend_color(phase, t::text_faint(), t::accent());
                 let mut row = div()
                     .id(id.clone())
                     .relative()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .min_h(px(41.0))
+                    .min_h(px(42.0))
                     .w_full()
-                    .px_3()
+                    .px(px(12.0))
                     .py(px(9.0))
-                    .rounded(px(10.0))
+                    .rounded(px(12.0))
                     .cursor_pointer()
-                    .text_size(px(13.5))
+                    .text_size(px(13.0))
                     .text_color(text)
                     .bg(motion::blend_color(phase, t::sidebar(), t::surface()))
+                    .border_1()
+                    .border_color(motion::blend_color(phase, t::hairline().opacity(0.0), t::hairline()))
                     .font_weight(if progress > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                    .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(progress).into()).blur_radius(px(3.0))])
+                    .shadow(vec![
+                        BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(progress).into()).blur_radius(px(3.0)),
+                        BoxShadow::new(px(0.0), px(7.0), t::shadow().opacity(progress * 0.55).into()).blur_radius(px(16.0)).spread_radius(px(-8.0)),
+                    ])
                     // The accent bar grows out of the rail as the row is picked: motion that
                     // telegraphs the outcome instead of just interpolating to it.
                     .child(
-                        div().absolute().left(px(-7.0)).top(px(12.0)).w(px(3.0))
-                            .h(px(6.0 + 11.0 * progress)).rounded(px(1.5))
+                        div().absolute().left(px(-8.0)).top(px(12.0)).w(px(3.0))
+                            .h(px(6.0 + 12.0 * progress)).rounded(px(1.5))
                             .bg(t::accent()).opacity(progress),
                     )
-                    .child(icons::tinted(icon, text))
+                    .child(icons::tinted(icon, icon_color))
                     .child(label.to_owned())
                     .on_click(click);
                 if !selected {
@@ -1141,8 +1219,61 @@ fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyE
         .into_any_element()
 }
 
-fn group_label(label: &str) -> AnyElement {
-    div().px_3().pt_1().pb(px(7.0)).text_size(px(12.0)).text_color(t::text_dim()).child(label.to_owned()).into_any_element()
+/// A numbered group label in the rail. The monospaced index is the only Latin the rail carries,
+/// and it gives the three groups an unambiguous order without a second heading level.
+fn group_label(label: &str, index: &'static str) -> AnyElement {
+    div().flex().items_center().gap(px(7.0)).px(px(12.0)).pt(px(6.0)).pb(px(7.0))
+        .child(div().font(t::mono_font()).text_size(px(9.0)).text_color(t::text_faint()).child(index.to_owned()))
+        .child(div().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(t::text_dim()).child(label.to_owned()))
+        .into_any_element()
+}
+
+fn sidebar_rule() -> AnyElement {
+    div().mx(px(12.0)).my(px(10.0)).h(px(1.0)).bg(t::hairline()).into_any_element()
+}
+
+/// The pinned card at the foot of the rail: a reassurance, not a control.
+fn sidebar_notes() -> AnyElement {
+    div().mt(px(16.0)).w_full().rounded(px(14.0)).p(px(12.0))
+        .bg(t::surface().opacity(0.55)).border_1().border_color(t::hairline())
+        .flex().flex_col().gap(px(5.0))
+        .child(div().flex().items_center().gap(px(7.0))
+            .child(icons::tinted("circle-check", t::accent()))
+            .child(div().text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child("修改即时保存")))
+        .child(div().text_size(px(10.0)).text_color(t::text_faint()).child("所有设置写入本机，无需确认。"))
+        .into_any_element()
+}
+
+/// The light in the top-right of the content column.
+///
+/// Six translucent discs stack into a soft falloff. A single tinted rectangle would show its edge;
+/// layered hairline steps of alpha read as a glow, and the window clips the rest.
+fn page_halo(epoch: u32) -> AnyElement {
+    let accent = t::glow();
+    let halo = canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let right = f32::from(bounds.origin.x + bounds.size.width) - 30.0;
+            let top = f32::from(bounds.origin.y) + 6.0;
+            for (index, radius) in [300.0f32, 250.0, 200.0, 150.0, 100.0, 56.0].iter().enumerate() {
+                let r = *radius;
+                let origin = point(px(right - r), px(top - r));
+                let alpha = 0.012 + 0.007 * index as f32;
+                window.paint_quad(quad(
+                    Bounds::new(origin, size(px(r * 2.0), px(r * 2.0))),
+                    px(r),
+                    accent.opacity(alpha),
+                    px(0.0),
+                    transparent_black(),
+                    BorderStyle::Solid,
+                ));
+            }
+        },
+    )
+    .absolute().top_0().right_0().w(px(420.0)).h(px(340.0));
+    halo.with_animation(("page-halo", epoch), motion::enter(380, 20), |element, progress| {
+        element.opacity(progress)
+    }).into_any_element()
 }
 
 /// 音乐卡片: one radio group, because the two layouts are alternatives rather than features that
@@ -1229,7 +1360,10 @@ fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, layout: u8) {
 /// the tool pages. Music and lyric preferences live here because only the capsule renders them.
 fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
     let mut sections: Vec<AnyElement> = Vec::new();
-    sections.push(section_group("音乐卡片", None, vec![music_layout_row(state, view, cx)], cx));
+    sections.push(section_group("音乐卡片", None, vec![
+        toggle_row("IslandGlassMaterial", "磨砂玻璃材质", "展开后使用莫奈封面色与磨砂海报。默认关闭，保留经典材质；适用于音乐、计时与待办卡片。", flag(state, "IslandGlassMaterial", false), view, cx),
+        music_layout_row(state, view, cx)
+    ], cx));
     sections.push(section_group("系统状态提示", None, vec![
         toggle_row("SystemStateHintsEnabled","系统状态提示","统一提醒大写锁定、小键盘锁定、麦克风静音和触控板状态。",flag(state,"SystemStateHintsEnabled",true),view,cx),
         segmented_row("osd-placement","SystemStateHintPlacement","提示位置","屏幕下方使用独立浮层，不打断岛上的音乐或计时。",&[("Island","灵动岛内"),("Bottom","屏幕下方")],setting_str(state,"SystemStateHintPlacement","Island"),cx),
@@ -1344,7 +1478,7 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
                 select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
                 toggle_row("CoverBackground", "封面取色背景", "根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view, cx),
                 toggle_row("Animation", "界面动画", "连续形变可以随时反向操作，由软件开关控制，不跟随 Windows 动画设置。", flag(state, "Animation", true), view, cx),
-                toggle_row("IslandFluidMotion", "灵动岛流体动画", "容器先到位、内容随后落定，整段比原来更短。关闭则完全回到 2.0.0 的原始曲线；「界面动画」关闭时此项不生效。", flag(state, "IslandFluidMotion", true), view, cx),
+                toggle_row("IslandFluidMotion", "灵动岛流体动画", "胶囊轻抛后舒展成卡片，收起沿原路回到胶囊；途中反向也保持连续。关闭后使用经典曲线。", flag(state, "IslandFluidMotion", true), view, cx),
             ]));
             let mut palette: Vec<AnyElement> = Vec::new();
             for (key, title) in [("ExpandedTextColor", "展开卡片字体颜色"), ("ExpandedComponentColor", "展开卡片组件颜色"), ("LyricProgressColor", "歌词进度填色")] {
@@ -1357,8 +1491,8 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
             let mut motion: Vec<AnyElement> = Vec::new();
             for (key, title, detail, min, max, default, unit) in [
                 ("MotionGap", "内容间距", "调整展开后的内容留白。", 0., 24., 8., "px"),
-                ("MotionDuration", "展开响应", "调整展开速度。", 250., 1200., 360., "ms"),
-                ("MotionCollapseDuration", "收起响应", "调整收起速度。", 150., 700., 300., "ms"),
+                ("MotionDuration", "展开响应", "调整展开速度。", 250., 1200., 480., "ms"),
+                ("MotionCollapseDuration", "收起响应", "调整收起速度。", 150., 700., 440., "ms"),
                 ("MotionRadius", "卡片圆角", "胶囊形变后平滑落到这个圆角。", 8., 48., 30., "px"),
                 ("SpringStiffness", "弹簧刚度", "越高响应越快。", 100., 1000., 420., ""),
                 ("SpringDamping", "弹簧阻尼", "越高回弹越少。", 10., 80., 30., ""),
@@ -1381,7 +1515,7 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
             rows.push(plain_group(vec![
                 select_row("startPage", "打开时显示的页面", "下次打开控制中心时直接进入这一页。", start_page_label(state), view, cx),
                 select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
-                toggle_row("AutoStart", "开机启动", "登录 Windows 后驻留系统托盘。", flag(state, "AutoStart", false), view, cx),
+                toggle_row("AutoStart", "开机启动", "默认开启，登录 Windows 后驻留托盘；也可右键托盘图标切换。", flag(state, "AutoStart", true), view, cx),
                 toggle_row("AlwaysOnTop", "灵动岛保持置顶", "显示在其他软件上方，不抢占键盘焦点。", flag(state, "AlwaysOnTop", true), view, cx),
                 info_row("偏好保存在本机", "调整会自动保存", "设置写入点屿的数据目录；重装或版本更新不会重置。", view, cx),
                 info_row("数据与隐私", "默认不离开本机", "待办、计时与通知记录只保存在本机；唯一的外部请求是在线补全歌曲信息。", view, cx),
@@ -1467,16 +1601,17 @@ fn gear_button(id: &'static str, drawer: Drawer, cx: &mut Context<SettingsApp>) 
         .w(px(36.0))
         .h(px(36.0))
         .flex_shrink_0()
-        .rounded(px(18.0))
+        .rounded(px(11.0))
         .bg(t::surface())
         .border_1()
         .border_color(t::hairline())
+        .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset()])
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .text_color(t::text_dim())
-        .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
+        .hover(|style| style.bg(t::surface_hi()).border_color(t::hairline_bright()).text_color(t::text()))
         .child(icons::tinted("settings-2", t::text()))
         .on_click(cx.listener(move |view, _, _, cx| {view.drawer = Some(drawer.clone());cx.notify();}))
         .into_any_element()
@@ -1572,18 +1707,24 @@ fn drawer_panel(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>
     // The scrim is a different thing and gets a different spring — see `motion::scrim`.
     let spring = || motion::phase_from(motion::sheet(), open, false);
     let scrim = || motion::phase_from(motion::scrim(), open, false);
-    let panel = div().id("drawer-panel").w(px(if matches!(drawer,Drawer::WorkflowEditor){1000.}else{385.0})).max_w_full().h_full().flex_shrink_0().flex().flex_col().bg(t::surface())
-        .shadow(vec![BoxShadow::new(px(-8.0), px(0.0), t::shadow().into()).blur_radius(px(30.0))])
+    let panel = div().id("drawer-panel").w(px(if matches!(drawer,Drawer::WorkflowEditor){1000.}else{385.0})).max_w_full().flex_1().min_h_0().flex_shrink_0().flex().flex_col()
+        .rounded(px(18.0)).border_1().border_color(t::hairline())
+        .bg(linear_gradient(180.0, linear_color_stop(t::panel_top(), 0.0), linear_color_stop(t::panel_bottom(), 1.0)))
+        .shadow(vec![
+            BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
+            BoxShadow::new(px(-10.0), px(0.0), t::shadow().opacity(0.9).into()).blur_radius(px(40.0)),
+        ])
+        .overflow_hidden()
         .child(
             div().flex().items_start().justify_between().gap(px(12.0)).px(px(23.0)).pt(px(23.0)).pb(px(25.0))
                 .child(
                     div().flex().flex_col().min_w_0()
-                        .child(div().text_size(px(19.0)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
+                        .child(div().font(t::display_font()).text_size(px(19.0)).font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child(title.to_owned()))
                         .child(div().mt(px(5.0)).text_size(px(12.0)).text_color(t::text_dim()).child(subtitle.to_owned())),
                 )
                 .child(
-                    div().id("drawer-close").w(px(36.0)).h(px(36.0)).flex_shrink_0().rounded(px(18.0)).flex().items_center().justify_center().cursor_pointer().text_color(t::text_dim())
-                        .bg(t::base()).border_1().border_color(t::hairline())
+                    div().id("drawer-close").w(px(34.0)).h(px(34.0)).flex_shrink_0().rounded(px(10.0)).flex().items_center().justify_center().cursor_pointer().text_color(t::text_dim())
+                        .bg(t::field()).border_1().border_color(t::hairline())
                         .hover(|style| style.bg(t::surface_hi()).text_color(t::text()))
                         .child(icons::icon("x"))
                         .on_click(cx.listener(|view, _, _, cx| view.close_drawer(cx))),
@@ -1601,9 +1742,14 @@ fn drawer_panel(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>
                     element.opacity(motion::alpha(phase))
                 }),
         )
-        .child(panel.with_spring(("drawer-panel", tag), spring(), |element, phase| {
-            motion::slide_in(element, phase.0, 44.0)
-        }))
+        // The sheet floats clear of the window's edges: a 10px gutter all round tells the eye it
+        // was thrown on top of the page rather than docked into it.
+        .child(
+            div().flex().flex_col().h_full().py(px(10.0)).pr(px(10.0))
+                .child(panel.with_spring(("drawer-panel", tag), spring(), |element, phase| {
+                    motion::slide_in(element, phase.0, 44.0)
+                })),
+        )
         .into_any_element()
 }
 
@@ -1883,12 +2029,9 @@ fn pill_button_icon(
     filled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (background, foreground, border) = if filled {
-        (t::accent(), t::on_accent(), t::accent())
-    } else {
-        (t::surface(), t::text(), t::hairline())
-    };
-    div()
+    let foreground = if filled { t::on_accent() } else { t::text() };
+    let border = if filled { t::accent_deep() } else { t::hairline() };
+    let mut button = div()
         .id(id)
         .flex()
         .items_center()
@@ -1897,16 +2040,30 @@ fn pill_button_icon(
         .min_h(px(36.0))
         .px(px(13.0))
         .py(px(8.0))
-        .rounded(px(10.0))
-        .bg(background)
+        .rounded(px(11.0))
         .border_1()
         .border_color(border)
-        .text_size(px(13.5))
+        .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(foreground)
-        .cursor_pointer()
-        .hover(move |style| if filled { style.opacity(0.92) } else { style.bg(t::surface_hi()) })
-        .active(|style| style.opacity(0.8))
+        .cursor_pointer();
+    if filled {
+        button = button
+            .bg(linear_gradient(180.0, linear_color_stop(t::accent(), 0.0), linear_color_stop(t::accent_deep(), 1.0)))
+            .shadow(vec![
+                BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
+                BoxShadow::new(px(0.0), px(5.0), t::accent().opacity(0.30).into()).blur_radius(px(12.0)),
+            ])
+            .hover(|style| style.opacity(0.93))
+            .active(|style| style.opacity(0.82));
+    } else {
+        button = button
+            .bg(t::surface())
+            .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset()])
+            .hover(|style| style.bg(t::surface_hi()).border_color(t::hairline_bright()))
+            .active(|style| style.opacity(0.82));
+    }
+    button
         .children(icon.map(|name| icons::tinted(name, foreground)))
         .child(label.to_owned())
         .on_click(on_click)
@@ -1933,7 +2090,8 @@ fn segmented_row(
     current: &str,
     cx: &mut Context<SettingsApp>,
 ) -> AnyElement {
-    let mut segments = div().flex().flex_row().gap(px(6.0));
+    let mut segments = div().flex().flex_row().gap(px(2.0)).p(px(3.0)).rounded(px(11.0))
+        .bg(t::field()).border_1().border_color(t::hairline());
     for (value, label) in choices {
         let value: &'static str = *value;
         let label: &'static str = *label;
@@ -1948,16 +2106,18 @@ fn segmented_row(
                 (SharedString::from(format!("{id_prefix}-{value}")), 0usize),
                 motion::phase(motion::snappy(), selected),
                 move |_, phase| {
+                    let lift = motion::alpha(phase);
                     div()
                         .id(SharedString::from(format!("{id_prefix}-{value}")))
                         .px(px(12.0))
-                        .py(px(7.0))
-                        .rounded(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(8.0))
                         .cursor_pointer()
-                        .bg(motion::blend_color(phase, t::surface(), t::surface_hi()))
-                        .text_size(px(13.0))
+                        .bg(motion::blend_color(phase, t::field(), t::surface()))
+                        .text_size(px(12.5))
                         .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
-                        .font_weight(if motion::alpha(phase) > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .font_weight(if lift > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(lift).into()).blur_radius(px(2.0))])
                         .active(|style| style.opacity(0.72))
                         .child(label.to_owned())
                         .on_click(click)
@@ -2320,11 +2480,11 @@ fn calibrate_row(position: f64, view: &SettingsApp, cx: &mut Context<SettingsApp
 fn card(id: impl Into<ElementId>, title: &str, detail: &str) -> Stateful<Div> {
     tally();
     let mut body = div().flex().flex_col().gap_1().flex_1().min_w_0()
-        .child(div().text_size(px(14.0)).text_color(t::text()).child(title.to_owned()));
+        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()));
     if !detail.is_empty() {
-        body = body.child(div().text_size(px(12.0)).text_color(t::text_dim()).child(detail.to_owned()));
+        body = body.child(div().text_size(px(11.5)).text_color(t::text_dim()).child(detail.to_owned()));
     }
-    div().id(id).flex().flex_row().items_center().justify_between().gap(px(15.0)).py(px(16.0)).min_w_0()
+    div().id(id).flex().flex_row().items_center().justify_between().gap(px(15.0)).py(px(15.0)).min_w_0()
         .mx(px(-PANEL_PAD)).px(px(PANEL_PAD))
         .child(body)
 }
@@ -2395,7 +2555,8 @@ fn row_wash(row: Stateful<Div>, liveness: f32, interactive: bool) -> Stateful<Di
 fn accent_bar(liveness: f32) -> AnyElement {
     let wash = motion::wash(liveness);
     div().absolute().left_0().right_0().top_0().bottom_0().flex().items_center()
-        .child(div().w(px(3.0)).h(px(26.0 * wash)).rounded(px(1.5)).bg(t::accent()).opacity(wash))
+        .child(div().w(px(3.0)).h(px(26.0 * wash)).rounded(px(1.5)).bg(t::accent()).opacity(wash)
+            .shadow(vec![BoxShadow::new(px(0.0), px(0.0), t::accent().opacity(0.35 * wash).into()).blur_radius(px(7.0))]))
         .into_any_element()
 }
 
@@ -3055,16 +3216,17 @@ fn switch_at(key: &'static str, checked: bool, liveness: f32) -> impl IntoElemen
         move |_, phase| {
             let progress = motion::alpha(phase);
             // Stretching eats travel, so the knob still lands inside the track at both ends.
-            let width = 15.0 + 5.0 * press;
-            let travel = 14.0 - 5.0 * press;
-            div().relative().flex_shrink_0().w(px(35.0)).h(px(21.0)).rounded(px(10.5))
-                .bg(motion::blend_color(phase, t::surface_hi(), t::accent()))
+            let width = 17.0 + 5.0 * press;
+            let travel = 16.0 - 5.0 * press;
+            div().relative().flex_shrink_0().w(px(40.0)).h(px(24.0)).rounded(px(12.0))
+                .bg(motion::blend_color(phase, t::track(), t::accent()))
                 .border_1()
                 .border_color(motion::mix(0.45 * wash, motion::blend_color(phase, t::hairline(), t::accent()), t::accent()))
+                .shadow(vec![BoxShadow::new(px(0.0), px(2.0), t::accent().opacity(0.28 * progress).into()).blur_radius(px(8.0))])
                 .child(
-                    div().absolute().top(px(2.0 + press)).left(px(2.0 + travel * progress))
-                        .w(px(width)).h(px(15.0 - 2.0 * press)).rounded(px(7.5))
-                        .bg(motion::blend_color(phase, t::surface(), t::on_accent()))
+                    div().absolute().top(px(2.5 + press)).left(px(2.5 + travel * progress))
+                        .w(px(width)).h(px(18.0 - 2.5 * press)).rounded(px(9.0))
+                        .bg(motion::blend_color(phase, t::knob(), t::on_accent()))
                         .shadow(vec![BoxShadow::new(px(0.0), px(1.0 + wash), t::shadow().into()).blur_radius(px(2.0 + 3.0 * wash))]),
                 )
         },
@@ -3191,6 +3353,7 @@ fn main() {
         let window = match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: WindowBackgroundAppearance::Blurred,
                 titlebar: Some(TitlebarOptions{title:Some("点屿 · 控制中心".into()),appears_transparent:true,..Default::default()}),
                 // Fixed canvas: no resize border, no maximize, no drag-to-maximize. The layout is
                 // built for one size and every page scrolls inside it.
@@ -3530,7 +3693,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         };
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with("2.0.2")&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with("2.0.2")&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
+            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
             "pages": Route::ALL.len(),
             "settings": "GPUI",
             "ipc": "Rust",

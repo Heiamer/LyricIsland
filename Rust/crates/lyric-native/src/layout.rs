@@ -12,8 +12,11 @@ impl Layout {
     /// Horizontal expansion leads the vertical unfolding; both are derived from
     /// the same live spring, so reversing the gesture never swaps coordinate spaces.
     pub fn morph_shape(self,p:f64,r:f64,fluid:bool)->(Rect,f64){
-        if !fluid{return self.shape(p,r)}let p=p.clamp(0.,1.);let x=crate::motion::blend(p,0.,0.84);let y=crate::motion::blend(p,0.08,1.);
-        let a=self.capsule;let b=self.card;let rect=Rect::new(a.x+(b.x-a.x)*x,a.y+(b.y-a.y)*y,a.w+(b.w-a.w)*x,a.h+(b.h-a.h)*y);
+        if !fluid{return self.shape(p,r)}let p=p.clamp(0.,1.);let x=crate::motion::blend(p,0.10,0.88);let y=crate::motion::blend(p,0.22,1.);
+        let a=self.capsule;let b=self.card;// A restrained parabolic toss: lift as a capsule, unfold, then settle.
+        // One live progress parameter makes collapse retrace this exact path.
+        let arc=(std::f64::consts::PI*p).sin();
+        let rect=Rect::new(a.x+(b.x-a.x)*x+5.*arc,a.y+(b.y-a.y)*y-12.*arc,a.w+(b.w-a.w)*x,a.h+(b.h-a.h)*y);
         (rect,(a.h/2.+(r-a.h/2.)*y).min(rect.w.min(rect.h)/2.).max(0.))
     }
     pub fn satellite(self)->Rect{Rect::new(self.capsule.x+self.capsule.w+8.,self.capsule.y,self.capsule.h,self.capsule.h)}
@@ -101,4 +104,18 @@ pub fn todo_footer(width:f64)->Rect{Rect::new(20.,164.,width-40.,24.)}
 
 #[cfg(test)]mod focus_layout_tests{use super::*;
  #[test]fn all_three_layouts_keep_lyrics_and_controls_separate(){for width in [400.,440.,592.]{for mix in [0.,0.5,1.,1.5,2.]{let g=music_geometry(width,MusicLayout::LyricFocus,mix,1.5,17.);assert!(g.lyric.y>=g.cover.y+g.cover.h||g.lyric.x>=g.cover.x+g.cover.w+20.);assert!(g.track.y>=g.secondary.y+g.secondary.h+12.);assert!(g.buttons[3].1.y>=g.elapsed.y+g.elapsed.h+6.);if mix>=1.{assert!(g.title.x+g.title.w+12.<=g.status_dot.x);}}}}
+}
+
+#[cfg(test)] mod throw_geometry_tests {
+    use super::*;
+    #[test] fn toss_stays_in_host_and_retraces_the_same_path() {
+        for width in [140.,260.,480.] {let l=Layout::new(width);
+            assert_eq!(l.morph_shape(0.,30.,true),l.shape(0.,30.));
+            let (end,r)=l.morph_shape(1.,30.,true);assert!((end.x-l.card.x).abs()<1e-8);assert!((end.y-l.card.y).abs()<1e-8);assert_eq!(r,30.);
+            for i in 0..=1000 {let p=i as f64/1000.;let(a,_)=l.morph_shape(p,30.,true);let(b,_)=l.morph_shape(1.-(1.-p),30.,true);
+                assert!(a.x>=0.&&a.y>=0.&&a.x+a.w<=l.host.w&&a.y+a.h<=l.host.h);
+                assert!((a.y-b.y).abs()<1e-8);assert!((a.w-b.w).abs()<1e-8);
+            }
+        }
+    }
 }

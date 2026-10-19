@@ -8,7 +8,15 @@ fn kind_icon(kind:&str)->&'static str{match kind{"notice"=>"message-circle","tod
 fn overview_rows(state:&Value,_view:&SettingsApp,cx:&mut Context<SettingsApp>)->Vec<AnyElement>{
  let mut rows=Vec::new();
  rows.extend(quick_ui::focus_resume_rows(state,cx));
- rows.push(button_row("overview-quick","一句话快速提醒","例如：20分钟后取快递 · 明天9:00交稿。","添加",cx,|v,cx|{v.drawer=Some(Drawer::QuickReminder);cx.notify();}));
+ let add=pill_button_icon(SharedString::from("overview-quick-open"),Some("plus"),"添加",false,cx.listener(|v,_,_,cx|{v.drawer=Some(Drawer::QuickReminder);cx.notify();}));
+ rows.push(div().w_full().mb(px(22.)).child(
+  raised(18.0).p(px(14.)).flex().flex_row().items_center().gap(px(12.))
+   .child(div().w(px(34.)).h(px(34.)).flex_shrink_0().rounded(px(11.)).bg(t::green_soft()).flex().items_center().justify_center().child(icons::tinted("plus",t::accent())))
+   .child(div().flex().flex_col().gap(px(2.)).flex_1().min_w_0()
+    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child("一句话快速提醒"))
+    .child(div().text_size(px(11.5)).text_color(t::text_dim()).child("例如：20 分钟后取快递 · 明天 9:00 交稿。")))
+   .child(add)
+ ).into_any_element());
  let today=text(state,"today","");
  let next=state["todos"].as_array().and_then(|list|list.iter().filter(|todo|todo["completed"]!=true).min_by_key(|todo|format!("{} {}",todo["date"].as_str().unwrap_or(""),todo["time"].as_str().unwrap_or("")))).cloned();
  let body=match next{

@@ -49,6 +49,8 @@ fn check_defaults(runtime: &Runtime) -> Result<Value> {
         "NotificationsEnabled": true,
         "DefaultsOnboardingVersion": 1,
         "CoverBackground": true,
+        "IslandGlassMaterial": false,
+        "AutoStart": true,
         "NotificationClickOpenApp": true,
         "MusicClickOpenApp": false,
         "PauseNotifications": false,
@@ -107,6 +109,9 @@ fn check_todos(runtime: &Runtime, data: &Path) -> Result<()> {
 }
 
 fn check_settings_updates(runtime: &Runtime, runtime_directory: &Path) -> Result<()> {
+    for value in [true,false,true]{update(runtime,"IslandGlassMaterial",json!(value))?;check(settings(runtime)?["IslandGlassMaterial"]==value,"玻璃材质切换未保存")?;}
+    check(rejected(runtime,"update",Some(json!({"key":"IslandGlassMaterial","value":"true"})))?,"玻璃材质应拒绝非布尔值")?;
+    update(runtime,"IslandGlassMaterial",json!(false))?;
     process::call(runtime.pipe(), "update", Some(json!({"key": "AutoCompactWidth", "value": true})))?;
     check(settings(runtime)?["AutoCompactWidth"] == true, "自适应宽度未生效")?;
 

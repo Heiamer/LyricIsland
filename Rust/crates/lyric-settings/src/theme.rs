@@ -21,14 +21,22 @@ const fn c(r: u32, g: u32, b: u32, a: f32) -> Rgba {
 pub struct Palette {
     /// Window base, one step darker (or lighter) than any content surface.
     pub base: Rgba,
+    /// Caption bar. One step off `base`, so the chrome reads as its own material rather than as a
+    /// strip of the page that happens to sit above it.
+    pub chrome: Rgba,
     /// Navigation rail.
     pub sidebar: Rgba,
     /// A card resting on the base.
     pub surface: Rgba,
+    /// The two ends of the vertical wash inside a raised panel. Tinting the top a hair lighter and
+    /// the bottom a hair deeper gives a flat fill a faint sense of thickness without a second card.
+    pub panel_top: Rgba,
+    pub panel_bottom: Rgba,
+    /// Inset highlight along a panel's top edge: the one-pixel "lit edge" that makes a flat card
+    /// read as a raised sheet of glass.
+    pub sheen: Rgba,
     /// A card under the pointer, or a selected navigation row.
     pub surface_hi: Rgba,
-    /// A row under the pointer that is not otherwise highlighted.
-    pub hover: Rgba,
     /// A row under the pointer *inside* a panel.
     ///
     /// The two appearances need different directions here, not the same value. On white, a hover
@@ -46,6 +54,10 @@ pub struct Palette {
     pub text_faint: Rgba,
     /// The product accent, shared with the capsule's lyric fill.
     pub accent: Rgba,
+    /// The deeper stop of an accent gradient: brand mark, primary buttons, the active tab.
+    pub accent_deep: Rgba,
+    /// A wide, very quiet accent wash. The page header paints one behind its title.
+    pub glow: Rgba,
     pub accent_dim: Rgba,
     /// Whatever reads clearly on top of `accent`.
     pub on_accent: Rgba,
@@ -71,61 +83,71 @@ pub struct Palette {
 }
 
 pub const DARK: Palette = Palette {
-    base: c(0x19, 0x1B, 0x1F, 1.0),
-    sidebar: c(0x22, 0x25, 0x2B, 1.0),
-    surface: c(0x29, 0x2D, 0x33, 1.0),
-    surface_hi: c(0x35, 0x3C, 0x44, 1.0),
-    hover: c(0x19, 0x1B, 0x1F, 1.0),
-    row_hover: c(0x30, 0x36, 0x3E, 1.0),
-    hairline: c(0x39, 0x3F, 0x47, 1.0),
+    base: c(0x0A, 0x10, 0x0E, 0.88),
+    chrome: c(0x0D, 0x14, 0x12, 0.88),
+    sidebar: c(0x0E, 0x15, 0x13, 0.88),
+    surface: c(0x13, 0x1D, 0x19, 1.0),
+    panel_top: c(0x17, 0x23, 0x1E, 1.0),
+    panel_bottom: c(0x12, 0x1C, 0x18, 1.0),
+    sheen: c(0xFF, 0xFF, 0xFF, 0.10),
+    surface_hi: c(0x1D, 0x2A, 0x25, 1.0),
+    row_hover: c(0x19, 0x24, 0x1F, 1.0),
+    hairline: c(0x22, 0x30, 0x29, 1.0),
     hairline_bright: c(0xFF, 0xFF, 0xFF, 0.14),
-    field: c(0x19, 0x1B, 0x1F, 1.0),
-    text: c(0xED, 0xF0, 0xF2, 1.0),
-    text_dim: c(0xAE, 0xB7, 0xC1, 1.0),
-    text_faint: c(0x7C, 0x86, 0x91, 1.0),
-    accent: c(0x73, 0xD4, 0xB7, 1.0),
-    accent_dim: c(0x73, 0xD4, 0xB7, 0.18),
-    on_accent: c(0x09, 0x2B, 0x23, 1.0),
-    green_soft: c(0x24, 0x3E, 0x36, 1.0),
-    yellow: c(0x3F, 0x38, 0x29, 1.0),
-    yellow_line: c(0xE8, 0xC5, 0x6B, 1.0),
-    mint: c(0x29, 0x3D, 0x34, 1.0),
-    lilac: c(0x34, 0x30, 0x44, 1.0),
-    lilac_bar: c(0xB8, 0xA6, 0xD8, 1.0),
-    shadow: c(0x00, 0x00, 0x00, 0.25),
-    scrim: c(0x00, 0x00, 0x00, 0.42),
-    track: c(0x35, 0x3C, 0x44, 1.0),
-    knob: c(0xE8, 0xEE, 0xF0, 1.0),
-    danger: c(0xFF, 0xB4, 0xA9, 1.0),
+    field: c(0x0D, 0x14, 0x12, 1.0),
+    text: c(0xE6, 0xEF, 0xEA, 1.0),
+    text_dim: c(0xA3, 0xB2, 0xAB, 1.0),
+    text_faint: c(0x6E, 0x7F, 0x77, 1.0),
+    accent: c(0x67, 0xDD, 0xBA, 1.0),
+    accent_deep: c(0x43, 0xC6, 0xA2, 1.0),
+    glow: c(0x67, 0xDD, 0xBA, 0.10),
+    accent_dim: c(0x67, 0xDD, 0xBA, 0.15),
+    on_accent: c(0x04, 0x25, 0x1C, 1.0),
+    green_soft: c(0x16, 0x33, 0x2A, 1.0),
+    yellow: c(0x33, 0x2F, 0x24, 1.0),
+    yellow_line: c(0xE5, 0xC0, 0x69, 1.0),
+    mint: c(0x18, 0x30, 0x26, 1.0),
+    lilac: c(0x28, 0x25, 0x38, 1.0),
+    lilac_bar: c(0xB4, 0xA5, 0xD6, 1.0),
+    shadow: c(0x00, 0x00, 0x00, 0.34),
+    scrim: c(0x00, 0x00, 0x00, 0.50),
+    track: c(0x26, 0x34, 0x30, 1.0),
+    knob: c(0xEA, 0xF2, 0xED, 1.0),
+    danger: c(0xFF, 0xB3, 0xA7, 1.0),
 };
 
 pub const LIGHT: Palette = Palette {
-    base: c(0xF4, 0xF5, 0xF7, 1.0),
-    sidebar: c(0xEA, 0xED, 0xF0, 1.0),
-    surface: c(0xFF, 0xFF, 0xFF, 1.0),
-    surface_hi: c(0xE2, 0xE7, 0xEB, 1.0),
-    hover: c(0xF4, 0xF5, 0xF7, 1.0),
-    row_hover: c(0xF3, 0xF5, 0xF7, 1.0),
-    hairline: c(0xE0, 0xE4, 0xE8, 1.0),
-    hairline_bright: c(0x00, 0x00, 0x00, 0.18),
-    field: c(0xF4, 0xF5, 0xF7, 1.0),
-    text: c(0x23, 0x28, 0x2D, 1.0),
-    text_dim: c(0x64, 0x6F, 0x79, 1.0),
-    text_faint: c(0x8A, 0x94, 0x9C, 1.0),
-    accent: c(0x11, 0x86, 0x68, 1.0),
-    accent_dim: c(0x11, 0x86, 0x68, 0.14),
+    base: c(0xF1, 0xF4, 0xF2, 0.88),
+    chrome: c(0xF6, 0xF8, 0xF7, 0.88),
+    sidebar: c(0xE7, 0xEC, 0xE9, 0.88),
+    surface: c(0xFB, 0xFC, 0xFB, 1.0),
+    panel_top: c(0xFD, 0xFE, 0xFD, 1.0),
+    panel_bottom: c(0xF7, 0xFA, 0xF8, 1.0),
+    sheen: c(0xFF, 0xFF, 0xFF, 0.85),
+    surface_hi: c(0xE3, 0xEA, 0xE6, 1.0),
+    row_hover: c(0xEF, 0xF3, 0xF0, 1.0),
+    hairline: c(0xDD, 0xE5, 0xE0, 1.0),
+    hairline_bright: c(0x00, 0x00, 0x00, 0.16),
+    field: c(0xF2, 0xF5, 0xF3, 1.0),
+    text: c(0x14, 0x20, 0x1B, 1.0),
+    text_dim: c(0x5B, 0x68, 0x61, 1.0),
+    text_faint: c(0x8C, 0x97, 0x90, 1.0),
+    accent: c(0x0D, 0x7A, 0x5E, 1.0),
+    accent_deep: c(0x0A, 0x68, 0x51, 1.0),
+    glow: c(0x0D, 0x7A, 0x5E, 0.10),
+    accent_dim: c(0x0D, 0x7A, 0x5E, 0.12),
     on_accent: c(0xFF, 0xFF, 0xFF, 1.0),
-    green_soft: c(0xE8, 0xF5, 0xEF, 1.0),
-    yellow: c(0xFB, 0xF4, 0xE3, 1.0),
-    yellow_line: c(0xD5, 0xAA, 0x45, 1.0),
-    mint: c(0xE9, 0xF5, 0xEE, 1.0),
-    lilac: c(0xF0, 0xED, 0xF8, 1.0),
-    lilac_bar: c(0xA9, 0x9A, 0xCB, 1.0),
-    shadow: c(0x19, 0x27, 0x33, 0.10),
-    scrim: c(0x1D, 0x27, 0x36, 0.17),
-    track: c(0xE2, 0xE7, 0xEB, 1.0),
+    green_soft: c(0xE3, 0xF2, 0xEA, 1.0),
+    yellow: c(0xF9, 0xF2, 0xDF, 1.0),
+    yellow_line: c(0xD2, 0xA3, 0x3E, 1.0),
+    mint: c(0xE6, 0xF2, 0xEA, 1.0),
+    lilac: c(0xEF, 0xEC, 0xF7, 1.0),
+    lilac_bar: c(0xA7, 0x9A, 0xC9, 1.0),
+    shadow: c(0x10, 0x23, 0x1B, 0.10),
+    scrim: c(0x0D, 0x1A, 0x15, 0.24),
+    track: c(0xE1, 0xE8, 0xE4, 1.0),
     knob: c(0xFF, 0xFF, 0xFF, 1.0),
-    danger: c(0xB4, 0x36, 0x2C, 1.0),
+    danger: c(0xB2, 0x3A, 0x30, 1.0),
 };
 
 /// The full Noto Sans SC face shipped with the application.
@@ -143,6 +165,30 @@ pub fn ui_font() -> gpui::Font {
         weight: gpui::FontWeight::default(),
         style: gpui::FontStyle::default(),
         fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![FONT_ZH.to_owned(), FONT.to_owned()])),
+    }
+}
+
+/// Display face. The bundled Noto Sans SC carries both Chinese and Latin, and its slightly larger
+/// x-height lets the page titles hold their weight without shouting.
+pub fn display_font() -> gpui::Font {
+    gpui::Font {
+        family: FONT.into(),
+        features: gpui::FontFeatures::default(),
+        weight: gpui::FontWeight::default(),
+        style: gpui::FontStyle::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![FONT_UI.to_owned(), FONT_ZH.to_owned()])),
+    }
+}
+
+/// Small caps-ish meta face for eyebrows and numbers. Cascadia ships with Windows 11; Consolas is
+/// the fallback on older installs, so a missing face never turns a label into tofu.
+pub fn mono_font() -> gpui::Font {
+    gpui::Font {
+        family: "Cascadia Mono".into(),
+        features: gpui::FontFeatures::default(),
+        weight: gpui::FontWeight::default(),
+        style: gpui::FontStyle::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec!["Consolas".to_owned(), FONT_UI.to_owned(), FONT_ZH.to_owned()])),
     }
 }
 
@@ -191,9 +237,10 @@ pub fn blend(from: Palette, to: Palette, progress: f32) -> Palette {
         };
     }
     fields!(
-        base, sidebar, surface, surface_hi, hover, row_hover, hairline, hairline_bright, field, text,
-        text_dim, text_faint, accent, accent_dim, on_accent, green_soft, yellow, yellow_line, mint,
-        lilac, lilac_bar, shadow, scrim, track, knob, danger,
+        base, chrome, sidebar, surface, panel_top, panel_bottom, sheen, surface_hi, row_hover,
+        hairline, hairline_bright, field, text, text_dim, text_faint, accent, accent_deep, glow,
+        accent_dim, on_accent, green_soft, yellow, yellow_line, mint, lilac, lilac_bar, shadow,
+        scrim, track, knob, danger,
     )
 }
 
@@ -208,8 +255,10 @@ macro_rules! token {
 }
 
 token!(
-    base, sidebar, surface, surface_hi, hover, row_hover, hairline, hairline_bright, field, text, text_dim, text_faint, accent,
-    accent_dim, on_accent, green_soft, yellow, yellow_line, mint, lilac, lilac_bar, shadow, scrim, track, knob, danger,
+    base, chrome, sidebar, surface, panel_top, panel_bottom, sheen, surface_hi, row_hover,
+    hairline, hairline_bright, field, text, text_dim, text_faint, accent, accent_deep, glow,
+    accent_dim, on_accent, green_soft, yellow, yellow_line, mint, lilac, lilac_bar, shadow,
+    scrim, track, knob, danger,
 );
 
 /// Parse `#RRGGBB`; anything else falls back to a neutral so a bad setting never panics a frame.
