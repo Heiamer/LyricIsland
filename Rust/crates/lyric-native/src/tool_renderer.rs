@@ -9,14 +9,14 @@ impl Renderer{
     }
     unsafe fn tool_expanded(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{
         if p.kind==3{return self.update_expanded(s,p)}
-        let w=s.layout.card.w;let accent=p.accent;
+        let w=s.layout.card.w;let accent=s.tool_theme.fill;
         self.text(&p.title,Rect::new(24.,17.,w-74.,22.),14.,600,0xfff4f6f8)?;
         if p.kind==2{
             for (t,r) in p.tasks.iter().zip(crate::layout::todo_rows(w,p.tasks.len())){let y=r.y;self.fill(r,9.,0xff000000|crate::cover_color::mix(0x171d24,t.color,0.10));self.fill(Rect::new(r.x+8.,y+7.,3.,18.),1.5,t.color);self.text(&t.title,Rect::new(r.x+19.,y+1.,w-100.,18.),11.5,500,0xfff4f6f8)?;self.text(&t.detail,Rect::new(r.x+19.,y+18.,w-100.,12.),8.5,400,0xff9faab6)?;self.brush.SetColor(&color(0xff79828c));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(w-38.,y+16.),radiusX:8.,radiusY:8.},&self.brush,1.3,None);}
             let footer=crate::layout::todo_footer(w);self.fill(footer,10.,0x08ffffff);self.text("打开待办清单",Rect::new(footer.x+10.,footer.y+2.,footer.w-42.,20.),10.5,500,accent)?;self.text("＋",Rect::new(footer.x+footer.w-27.,footer.y+1.,20.,20.),13.,400,accent)?;
         }else{
             let detail=p.timer.clone().unwrap_or_else(||crate::activities::TimerPresentation{label:"剩余时间".into(),elapsed:String::new(),footnote:p.subtitle.clone(),primary:if p.running{"暂停"}else{"继续"}.into(),expanded_value:p.value.clone(),indefinite:false});
-            let accent=0xffa9e6cd;self.fill(Rect::new(24.,49.,4.,4.),2.,accent);
+            let accent=s.tool_theme.fill;self.fill(Rect::new(24.,49.,4.,4.),2.,accent);
             self.text(&detail.label,Rect::new(34.,44.,w/2.-42.,16.),10.,400,0xffa9b3bf)?;
             self.text_family(&p.subtitle,Rect::new(w/2.,44.,w/2.-24.,16.),9.,400,0xff9ca8b4,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
             // One layout paints every digit, including hundredths, on a single baseline.
@@ -27,10 +27,10 @@ impl Renderer{
             self.text(&detail.elapsed,Rect::new(24.,132.,w/2.-24.,14.),9.,400,0xffa9b3bf)?;
             self.text_family(&detail.footnote,Rect::new(w/2.,132.,w/2.-24.,14.),9.,400,0xffa9b3bf,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
             for(id,r)in crate::layout::timer_buttons(w){let hovered=s.hover==id;let pressed=s.pressed==id;
-             if id==30{self.fill(r,12.,if pressed{0xff076b57}else if hovered{0xff169a7d}else{0xff0f8a70});}
+             if id==30{self.fill(r,12.,if pressed{s.tool_theme.pressed}else if hovered{s.tool_theme.hover}else{s.tool_theme.fill});}
              else{self.fill(r,10.,if pressed{0x22ffffff}else if hovered{0x14ffffff}else{0x08ffffff});}
              let label=if id==30{detail.primary.as_str()}else if id==31{"重置"}else{"设置"};
-             self.text_family(label,Rect::new(r.x,r.y+7.,r.w,18.),11.,if id==30{600}else{500},if id==30{0xffffffff}else{0xffbec7d1},"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(18.))?;
+             self.text_family(label,Rect::new(r.x,r.y+7.,r.w,18.),11.,if id==30{600}else{500},if id==30{s.tool_theme.ink}else{0xffbec7d1},"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(18.))?;
             }
         }Ok(())
     }
@@ -126,16 +126,16 @@ impl Renderer{unsafe fn device_icon(&mut self,r:Rect,kind:&str)->Result<()>{
 }}
 
 impl Renderer{
- unsafe fn update_ring(&mut self,x:f64,y:f64,radius:f64,progress:f64,time:f64,animate:bool)->Result<()>{
+ unsafe fn update_ring(&mut self,x:f64,y:f64,radius:f64,progress:f64,time:f64,animate:bool,accent:u32)->Result<()>{
   self.brush.SetColor(&color(0xff304339));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(x,y),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);
   let fraction=if progress<0.{0.22}else{progress.clamp(0.,1.)};let start=if progress<0.&&animate{time/1200.*std::f64::consts::TAU}else{-std::f64::consts::FRAC_PI_2};
-  self.brush.SetColor(&color(0xff8dd6ad));
+  self.brush.SetColor(&color(accent));
   if fraction>=0.9999{self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(x,y),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);}else if fraction>0.{let end=start+fraction*std::f64::consts::TAU;let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;sink.BeginFigure(point(x+radius*start.cos(),y+radius*start.sin()),D2D1_FIGURE_BEGIN_HOLLOW);sink.AddArc(&D2D1_ARC_SEGMENT{point:point(x+radius*end.cos(),y+radius*end.sin()),size:D2D_SIZE_F{width:radius as f32,height:radius as f32},rotationAngle:0.,sweepDirection:D2D1_SWEEP_DIRECTION_CLOCKWISE,arcSize:if fraction>0.5{D2D1_ARC_SIZE_LARGE}else{D2D1_ARC_SIZE_SMALL}});sink.EndFigure(D2D1_FIGURE_END_OPEN);sink.Close()?;self.dc.DrawGeometry(&path,&self.brush,3.,None);}Ok(())
  }
- unsafe fn update_compact(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{let c=s.layout.capsule;self.update_ring(c.x+23.,c.y+c.h/2.,11.,p.progress,s.time_ms,s.animate)?;self.text(&p.title,Rect::new(c.x+46.,c.y+6.,c.w-58.,18.),11.,500,0xfff4f6f8)?;self.text(&p.value,Rect::new(c.x+46.,c.y+23.,c.w-58.,14.),9.,400,0xff8dd6ad)?;Ok(())}
- unsafe fn update_expanded(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{let w=s.layout.card.w;self.text("软件更新",Rect::new(24.,20.,w-80.,24.),14.,600,0xfff4f6f8)?;self.text("×",Rect::new(w-43.,18.,24.,24.),18.,400,0xffa9b3bf)?;self.update_ring(65.,98.,27.,p.progress,s.time_ms,s.animate)?;
-  if p.progress>=0.{self.text_family(&p.value,Rect::new(36.,88.,58.,20.),12.,500,0xff8dd6ad,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
+ unsafe fn update_compact(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{let c=s.layout.capsule;self.update_ring(c.x+23.,c.y+c.h/2.,11.,p.progress,s.time_ms,s.animate,s.tool_theme.fill)?;self.text(&p.title,Rect::new(c.x+46.,c.y+6.,c.w-58.,18.),11.,500,0xfff4f6f8)?;self.text(&p.value,Rect::new(c.x+46.,c.y+23.,c.w-58.,14.),9.,400,s.tool_theme.fill)?;Ok(())}
+ unsafe fn update_expanded(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{let w=s.layout.card.w;self.text("软件更新",Rect::new(24.,20.,w-80.,24.),14.,600,0xfff4f6f8)?;self.text("×",Rect::new(w-43.,18.,24.,24.),18.,400,0xffa9b3bf)?;self.update_ring(65.,98.,27.,p.progress,s.time_ms,s.animate,s.tool_theme.fill)?;
+  if p.progress>=0.{self.text_family(&p.value,Rect::new(36.,88.,58.,20.),12.,500,s.tool_theme.fill,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
   self.text(&p.title,Rect::new(112.,71.,w-136.,30.),16.,500,0xfff4f6f8)?;self.text(&p.subtitle,Rect::new(112.,111.,w-136.,45.),10.5,400,0xffa9b3bf)?;
-  if let Some(action)=p.tasks.first().filter(|t|!t.title.is_empty()){self.fill(Rect::new(24.,190.,w-48.,42.),16.,0xff8dd6ad);self.text_family(&action.title,Rect::new(24.,201.,w-48.,22.),12.,600,0xff14251d,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}Ok(())
+  if let Some(action)=p.tasks.first().filter(|t|!t.title.is_empty()){self.fill(Rect::new(24.,190.,w-48.,42.),16.,s.tool_theme.fill);self.text_family(&action.title,Rect::new(24.,201.,w-48.,22.),12.,600,s.tool_theme.ink,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}Ok(())
  }
 }

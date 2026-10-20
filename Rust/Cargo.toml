@@ -6,7 +6,7 @@ members = ["crates/lyric-core", "crates/lyric-archive", "crates/lyric-bootstrap"
 exclude = ["vendor/material-colors-0.4.2"]
 
 [workspace.package]
-version = "2.0.6"
+version = "2.1.5"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -25,3 +25,8 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 opt-level = 3
 lto = true
 strip = true
+
+# The local GPUI patch uses the owning display's compositor cadence and keeps
+# animation changes reproducible without depending on an external fork.
+[patch.crates-io]
+gpui-fast = { path = "vendor/gpui-fast" }

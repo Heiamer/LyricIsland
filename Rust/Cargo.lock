@@ -884,10 +884,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
-name = "gpui-pre"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
+name = "gpui-fast"
+version = "0.1.10"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -901,9 +899,9 @@ dependencies = [
  "etagere",
  "futures",
  "getrandom 0.3.4",
+ "gpui-fast-macros",
  "gpui-pre-collections",
  "gpui-pre-http-client",
- "gpui-pre-macros",
  "gpui-pre-refineable",
  "gpui-pre-scheduler",
  "gpui-pre-shared-string",
@@ -947,6 +945,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-fast-macros"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce9b7a528e074c62bf71f05d886d6c8db88d567de2ccd8ab3d228ea2a6f6711"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "gpui-fast-windows"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f034e131f83ff84b67f009cde41e0cbecb3be09d7ebba7c548ea78fe0fdee5b0"
+dependencies = [
+ "accesskit",
+ "accesskit_windows",
+ "anyhow",
+ "dunce",
+ "etagere",
+ "futures",
+ "gpui-fast",
+ "gpui-pre-collections",
+ "gpui-pre-scheduler",
+ "gpui-pre-util",
+ "image",
+ "itertools",
+ "log",
+ "parking_lot",
+ "rand",
+ "raw-window-handle",
+ "smallvec",
+ "uuid",
+ "windows",
+ "windows-core",
+ "windows-numerics",
+ "windows-registry",
+]
+
+[[package]]
 name = "gpui-pre-collections"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -985,19 +1025,6 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "url",
-]
-
-[[package]]
-name = "gpui-pre-macros"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bb80dac5e1f6b8cde1d2740389e77dfc0071bfcc81fba5526d5dc90f68171cc"
-dependencies = [
- "heck",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1057,36 +1084,6 @@ dependencies = [
  "anyhow",
  "log",
  "which",
-]
-
-[[package]]
-name = "gpui-pre-windows"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513d4f0fc7d596d3bdef2a73a524ffb83dabc95bf484f2855a698e7f431290a9"
-dependencies = [
- "accesskit",
- "accesskit_windows",
- "anyhow",
- "dunce",
- "etagere",
- "futures",
- "gpui-pre",
- "gpui-pre-collections",
- "gpui-pre-scheduler",
- "gpui-pre-util",
- "image",
- "itertools",
- "log",
- "parking_lot",
- "rand",
- "raw-window-handle",
- "smallvec",
- "uuid",
- "windows",
- "windows-core",
- "windows-numerics",
- "windows-registry",
 ]
 
 [[package]]
@@ -1571,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-archive"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "flate2",
  "sha2",
@@ -1579,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-backend"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "aes",
  "base64",
@@ -1594,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-bootstrap"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "flate2",
  "lyric-archive",
@@ -1606,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-core"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -1620,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-native"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "base64",
  "image",
@@ -1637,11 +1634,11 @@ dependencies = [
 
 [[package]]
 name = "lyric-settings"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "embed-manifest",
- "gpui-pre",
- "gpui-pre-windows",
+ "gpui-fast",
+ "gpui-fast-windows",
  "lyric-backend",
  "lyric-core",
  "raw-window-handle",
@@ -1651,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "lyric-tools"
-version = "2.0.6"
+version = "2.1.5"
 dependencies = [
  "lyric-archive",
  "lyric-bootstrap",
@@ -2007,15 +2004,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "proc-macro-crate"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
-dependencies = [
- "toml_edit",
 ]
 
 [[package]]
@@ -2693,9 +2681,9 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f"
+checksum = "639627c87f43b9181c811f40a6296409e093a17bc761214cba3c15df74f86b99"
 dependencies = [
  "arrayvec",
  "serde",
@@ -2778,36 +2766,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "toml_datetime"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
-name = "toml_edit"
-version = "0.25.17+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
-dependencies = [
- "indexmap",
- "toml_datetime",
- "toml_parser",
- "winnow",
-]
-
-[[package]]
-name = "toml_parser"
-version = "1.1.5+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
-dependencies = [
- "winnow",
-]
 
 [[package]]
 name = "tracing"
@@ -3191,15 +3149,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "winnow"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
-dependencies = [
- "memchr",
 ]
 
 [[package]]

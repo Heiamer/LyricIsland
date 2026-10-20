@@ -39,7 +39,7 @@ pub fn overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>)
         let entity = cx.entity().downgrade();
         let mode = view.tutorial_recovery;
         if motion::enabled() {
-            let animation = Animation::new(Duration::from_millis(if mode == 0 { 6000 } else { 260 })).with_max_fps(30.);
+            let animation = Animation::new(Duration::from_millis(if mode == 0 { 6000 } else { 260 }));
             let animation = if mode == 0 { animation.repeat() } else { animation };
             demo.with_animation(
                 SharedString::from(format!("tray-demo-{}-{mode}", view.tutorial_epoch)), animation,
@@ -51,7 +51,7 @@ pub fn overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>)
     } else if motion::enabled() {
         demo.with_animation(
             SharedString::from(format!("gesture-demo-{}-{index}", view.tutorial_epoch)),
-            Animation::new(Duration::from_millis(3200)).repeat().with_max_fps(30.),
+            Animation::new(Duration::from_millis(3200)).repeat(),
             move |element, progress| element.child(drawing(kind, progress)),
         ).into_any_element()
     } else {

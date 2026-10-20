@@ -49,7 +49,7 @@ fn check_defaults(runtime: &Runtime) -> Result<Value> {
         "NotificationsEnabled": true,
         "DefaultsOnboardingVersion": 1,
         "CoverBackground": true,
-        "IslandGlassMaterial": false,
+        "IslandMaterial": "Acrylic",
         "AutoStart": true,
         "NotificationClickOpenApp": true,
         "MusicClickOpenApp": false,
@@ -109,9 +109,23 @@ fn check_todos(runtime: &Runtime, data: &Path) -> Result<()> {
 }
 
 fn check_settings_updates(runtime: &Runtime, runtime_directory: &Path) -> Result<()> {
-    for value in [true,false,true]{update(runtime,"IslandGlassMaterial",json!(value))?;check(settings(runtime)?["IslandGlassMaterial"]==value,"玻璃材质切换未保存")?;}
-    check(rejected(runtime,"update",Some(json!({"key":"IslandGlassMaterial","value":"true"})))?,"玻璃材质应拒绝非布尔值")?;
-    update(runtime,"IslandGlassMaterial",json!(false))?;
+    let original=settings(runtime)?;
+    for (key,color) in [("SettingsLightAccentColor","#9B4BC7"),("SettingsDarkAccentColor","#E5B86A")]{
+        update(runtime,key,json!(color))?;check(settings(runtime)?[key]==color,"主题色未保存")?;
+        check(rejected(runtime,"update",Some(json!({"key":key,"value":"#bad"})))?,"主题色应拒绝非法色号")?;
+    }
+    process::call(runtime.pipe(),"resetSettingsColors",None)?;
+    let reset=settings(runtime)?;
+    check(reset["SettingsLightAccentColor"]=="#2563EB"&&reset["SettingsDarkAccentColor"]=="#6EA8FF"&&reset["Motion"]==original["Motion"],"配色还原影响动效")?;
+    update(runtime,"SettingsLightAccentColor",json!("#9B4BC7"))?;
+    update(runtime,"SettingsDarkAccentColor",json!("#E5B86A"))?;
+    update(runtime,"MotionDuration",json!(900.))?;update(runtime,"SpringMass",json!(1.7))?;
+    update(runtime,"Animation",json!(false))?;update(runtime,"IslandFluidMotion",json!(false))?;
+    process::call(runtime.pipe(),"resetMotion",None)?;
+    let reset=settings(runtime)?;
+    check(reset["Motion"]==original["Motion"]&&reset["Animation"]==true&&reset["IslandFluidMotion"]==true&&reset["SettingsLightAccentColor"]=="#9B4BC7"&&reset["SettingsDarkAccentColor"]=="#E5B86A","动效还原不完整或改变主题色")?;
+    for value in ["Classic","Acrylic","LiquidGlass","Acrylic"]{update(runtime,"IslandMaterial",json!(value))?;check(settings(runtime)?["IslandMaterial"]==value,"展开卡片材质切换未保存")?;}
+    check(rejected(runtime,"update",Some(json!({"key":"IslandMaterial","value":"acrylic"})))?,"材质应拒绝未知取值")?;
     process::call(runtime.pipe(), "update", Some(json!({"key": "AutoCompactWidth", "value": true})))?;
     check(settings(runtime)?["AutoCompactWidth"] == true, "自适应宽度未生效")?;
 
@@ -323,6 +337,8 @@ fn check_persistence(runtime: &mut Runtime, data: &Path) -> Result<Runtime> {
     runtime.stop();
     let mut restarted = Runtime::new(directory, data.to_path_buf(), run_ms);
     restarted.start()?;
+    let persisted=settings(&restarted)?;
+    check(persisted["SettingsLightAccentColor"]=="#9B4BC7"&&persisted["SettingsDarkAccentColor"]=="#E5B86A","两套主题色重启后未保留")?;
     let listed = process::call(restarted.pipe(), "todos", None)?;
     check(listed["todos"].as_array().is_some_and(|todos| todos.len() == 1 && todos[0]["title"] == "交稿"), format!("待办未持久化：{listed}"))?;
     Ok(restarted)

@@ -114,7 +114,7 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
         }
         return request("update", json!({"key": "NotificationAllowedApps", "value": allowed}));
     }
-    if key == "resetAppearance" {
+    if ["resetAppearance", "resetMotion", "resetSettingsColors"].contains(&key) {
         return request(key, Value::Null);
     }
     // A plain string setting: the generic branch below parses JSON, and `System` is not JSON.
@@ -142,6 +142,13 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     if key == "MusicExpandedLayout" {
         if !["Separated", "SideBySide", "LyricFocus"].contains(&text) {
             return Err("布局选项无效。".into());
+        }
+        return request("update", json!({"key": key, "value": text}));
+    }
+    // The material picker is a segmented control: it sends a bare label, not a JSON literal.
+    if key == "IslandMaterial" {
+        if !["Classic", "Acrylic", "LiquidGlass"].contains(&text) {
+            return Err("材质选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
     }
@@ -180,6 +187,8 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     } else if key.ends_with("Color") {
         let value = if text == "default" {
             match key {
+                "SettingsLightAccentColor" => "#2563EB",
+                "SettingsDarkAccentColor" => "#6EA8FF",
                 "ExpandedComponentColor" => "#B1E8D1",
                 "LyricProgressColor" => "#A9E6CD",
                 _ => "#F4F6F8",
@@ -250,6 +259,44 @@ pub fn sound_selection_smoke() -> Result<Value, String> {
     let final_state = request("state", Value::Null)?;
     if keys.iter().any(|key| final_state["settings"][*key] != initial["settings"][*key]) {
         return Err("音色自检未恢复原配置".into());
+    }
+    outcome
+}
+
+/// Exercise the same conversion as the visible material segments, on isolated test data only.
+pub fn material_selection_smoke() -> Result<Value, String> {
+    if !pipe_name().starts_with("LyricIsland.Settings.test.") {
+        return Err("材质自检只能使用独立测试管道".into());
+    }
+    let initial = request("state", Value::Null)?;
+    let original = initial["settings"]["IslandMaterial"].as_str().unwrap_or("Acrylic").to_owned();
+    let outcome = (|| -> Result<Value, String> {
+        for kind in ["Classic", "Acrylic", "LiquidGlass"] {
+            let reply = change("IslandMaterial", kind, &initial)?;
+            if reply["success"] != true {
+                return Err(format!("{kind}: {}", reply["message"]));
+            }
+            if request("state", Value::Null)?["settings"]["IslandMaterial"] != kind {
+                return Err(format!("{kind} 未保存"));
+            }
+        }
+        for invalid in ["", "acrylic", "Glass", "\"Acrylic\"", "true"] {
+            if change("IslandMaterial", invalid, &initial).is_ok() {
+                return Err(format!("材质接受了无效取值：{invalid}"));
+            }
+        }
+        if request("state", Value::Null)?["settings"]["IslandMaterial"] != "LiquidGlass" {
+            return Err("无效输入覆盖了材质".into());
+        }
+        Ok(json!({"success": true}))
+    })();
+    // Restore even when one check failed, so the test fixture keeps its starting material.
+    match request("update", json!({"key": "IslandMaterial", "value": original})) {
+        Ok(reply) if reply["success"] == true => {},
+        other => return Err(format!("恢复 IslandMaterial 失败：{other:?}")),
+    }
+    if request("state", Value::Null)?["settings"]["IslandMaterial"].as_str() != Some(original.as_str()) {
+        return Err("材质自检未恢复原配置".into());
     }
     outcome
 }

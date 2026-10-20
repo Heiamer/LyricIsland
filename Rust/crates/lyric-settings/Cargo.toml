@@ -16,11 +16,11 @@ serde_json.workspace = true
 # Only the Windows DirectX backend is needed. Disabling the defaults also drops
 # `windows-manifest`, which would require a resource compiler (rc.exe) that is not installed
 # here; this crate embeds its own activation manifest instead (see build.rs).
-gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
+gpui = { package = "gpui-fast", version = "=0.1.10", default-features = false }
 # 0.3.x moved the platform implementations out of the core crate; the Windows one carries the
 # DirectX renderer and the app bootstraps through `WindowsPlatform::new`. Its default features
 # would re-enable gpui's `windows-manifest`, so they stay off.
-gpui_windows = { package = "gpui-pre-windows", version = "=0.3.9", default-features = false }
+gpui_windows = { package = "gpui-fast-windows", version = "=0.1.10", default-features = false }
 # Used only to reach the window handle so the non-client frame can be switched to dark mode, which
 # gpui decides from the system theme rather than from the app's own palette.
 raw-window-handle = "0.6"

@@ -71,6 +71,8 @@ pub fn scrim() -> SpringConfig {
     spring(1.0, 0.22)
 }
 
+/// UI motion rides the owning display's compositor cadence without a fixed FPS ceiling.
+
 /// A spring that drives a 0..1 phase from `on`, preserving whatever the element is already doing.
 pub fn phase(config: SpringConfig, on: bool) -> SpringAnimation<bool> {
     SpringAnimation::new(config).to(on).with_epsilon(0.0015)

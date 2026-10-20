@@ -26,6 +26,8 @@ mod quick_ui;
 mod rules_ui;
 mod tutorial;
 mod row_edges;
+mod music_preview;
+mod frame_probe;
 
 use text_field::TextField;
 use value::{format_value, position_to_value};
@@ -964,7 +966,7 @@ impl Render for SettingsApp {
         // Appearance is resolved before anything is built: `theme` holds the palette for this frame.
         // A change of appearance eases between the two palettes instead of snapping — a sudden
         // jump between light and dark is exactly the brightness flash the skill warns about.
-        let target = t::select(&theme, system_dark);
+        let target = t::customize(t::select(&theme, system_dark), setting_str(&state,"SettingsLightAccentColor","#2563EB"), setting_str(&state,"SettingsDarkAccentColor","#6EA8FF"), want_dark);
         let theme_key = (theme.clone(), system_dark);
         match self.theme_key.as_ref() {
             // First frame: adopt the palette outright; there is nothing to travel from.
@@ -1060,7 +1062,7 @@ impl Render for SettingsApp {
             dot.bg(t::text_faint())
                 .with_animation(
                     "status-breath",
-                    Animation::new(Duration::from_millis(1400)).repeat_synced().with_max_fps(30.0),
+                    Animation::new(Duration::from_millis(1400)).repeat_synced(),
                     |element, progress| {
                         let breath = 0.5 - 0.5 * (progress * std::f32::consts::TAU).cos();
                         element.opacity(0.35 + 0.65 * breath)
@@ -1192,9 +1194,7 @@ fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyE
                     .cursor_pointer()
                     .text_size(px(13.0))
                     .text_color(text)
-                    .bg(motion::blend_color(phase, t::sidebar(), t::surface()))
-                    .border_1()
-                    .border_color(motion::blend_color(phase, t::hairline().opacity(0.0), t::hairline()))
+                    
                     .font_weight(if progress > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                     // No drop shadow on the rail rows: the raised surface, the border and the
                     // accent bar already separate the selected row, and the shadow only smudged
@@ -1210,7 +1210,7 @@ fn nav_item(route: Route, current: Route, cx: &mut Context<SettingsApp>) -> AnyE
                     .child(label.to_owned())
                     .on_click(click);
                 if !selected {
-                    row = row.hover(|style| style.bg(t::surface_hi()).text_color(t::text()));
+                    row = row.hover(|style| style.text_color(t::accent()));
                 }
                 row
             },
@@ -1296,8 +1296,8 @@ fn music_layout_row(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
     let footer=div().flex().items_center().gap_2().pt(px(2.))
         .child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(t::accent()))
         .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("当前选择：{label}")));
-    card("row-music-layout","展开卡片布局","三种布局保留相同的内容与播放操作。")
-        .flex_col().items_stretch().gap_3().child(options).child(footer).into_any_element()
+    card("row-music-layout","展开卡片布局","预览跟随当前歌曲、歌词与配色；选择布局可查看连续变换。")
+        .flex_col().items_stretch().gap_3().child(music_preview::live(state)).child(options).child(footer).into_any_element()
 }
 
 fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, layout: u8, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
@@ -1322,45 +1322,14 @@ fn music_layout_option(value: &'static str, title: &'static str, detail: &'stati
     tile.into_any_element()
 }
 
-/// A grayscale schematic of the expanded card: only the arrangement changes between A and B.
-fn paint_music_thumb(bounds: Bounds<Pixels>, window: &mut Window, layout: u8) {
-    let w=f32::from(bounds.size.width);let h=f32::from(bounds.size.height);let s=(w/300.).min(h/150.);
-    let ox=bounds.origin.x+px((w-300.*s)/2.);let oy=bounds.origin.y+px((h-150.*s)/2.);
-    let mut r=|x:f32,y:f32,ww:f32,hh:f32,rad:f32,c:gpui::Rgba|{window.paint_quad(quad(Bounds::new(point(ox+px(x*s),oy+px(y*s)),size(px(ww*s),px(hh*s))),px(rad*s),c,px(0.),transparent_black(),BorderStyle::Solid))};
-    let (card,cover,bright,dim,faint,control)=(rgb(0x222829),rgb(0x3B4344),rgb(0xD7DAD8),rgb(0x7C8584),rgb(0x4E5757),rgb(0xC9CDCB));
-    r(0.,0.,300.,150.,12.,card);
-    if layout==1{
-        r(16.,14.,54.,54.,8.,cover);
-        r(82.,16.,104.,7.,3.5,bright);r(82.,29.,74.,5.,2.5,dim);r(82.,41.,92.,5.,2.5,dim);
-        r(266.,18.,6.,6.,3.,dim);
-        r(16.,78.,184.,6.,3.,dim);r(16.,90.,220.,7.,3.5,bright);
-        r(16.,114.,268.,2.5,1.25,faint);r(16.,122.,30.,3.,1.5,dim);r(254.,122.,30.,3.,1.5,dim);
-        r(116.,133.,4.,10.,1.5,bright);r(123.,133.,4.,10.,1.5,bright);
-        r(144.,131.,14.,14.,7.,control);
-        r(174.,133.,4.,10.,1.5,bright);r(181.,133.,4.,10.,1.5,bright);
-    }else if layout==2{
-        r(16.,14.,38.,38.,7.,cover);r(66.,17.,95.,7.,3.5,bright);r(66.,31.,60.,5.,2.5,dim);r(266.,18.,6.,6.,3.,dim);
-        r(58.,72.,184.,7.,3.5,bright);r(90.,87.,120.,5.,2.5,dim);
-        r(16.,112.,268.,2.5,1.25,faint);r(16.,120.,30.,3.,1.5,dim);r(254.,120.,30.,3.,1.5,dim);
-        r(116.,131.,4.,10.,1.5,bright);r(123.,131.,4.,10.,1.5,bright);r(144.,129.,14.,14.,7.,control);r(174.,131.,4.,10.,1.5,bright);r(181.,131.,4.,10.,1.5,bright);
-    }else{
-        r(16.,14.,46.,46.,7.,cover);
-        r(74.,16.,84.,7.,3.5,bright);r(74.,29.,58.,5.,2.5,dim);
-        r(266.,18.,6.,6.,3.,dim);
-        r(16.,74.,200.,7.,3.5,bright);r(16.,87.,152.,6.,3.,dim);
-        r(16.,112.,268.,2.5,1.25,faint);r(16.,120.,30.,3.,1.5,dim);r(254.,120.,30.,3.,1.5,dim);
-        r(116.,131.,4.,10.,1.5,bright);r(123.,131.,4.,10.,1.5,bright);
-        r(144.,129.,14.,14.,7.,control);
-        r(174.,131.,4.,10.,1.5,bright);r(181.,131.,4.,10.,1.5,bright);
-    }
-}
+fn paint_music_thumb(bounds:Bounds<Pixels>,window:&mut Window,layout:u8){music_preview::thumbnail(bounds,window,layout);}
 
 /// 灵动岛 owns the capsule itself: when it appears, how it looks, what feeds it, and the way into
 /// the tool pages. Music and lyric preferences live here because only the capsule renders them.
 fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
     let mut sections: Vec<AnyElement> = Vec::new();
     sections.push(section_group("音乐卡片", None, vec![
-        toggle_row("IslandGlassMaterial", "磨砂玻璃材质", "展开后使用莫奈封面色与磨砂海报。默认关闭，保留经典材质；适用于音乐、计时与待办卡片。", flag(state, "IslandGlassMaterial", false), view, cx),
+        segmented_row("island-material","IslandMaterial","展开卡片材质","经典保留纯色平面；亚克力使用磨砂与细噪点；液态玻璃使用透镜折射、柔和散射与反光边缘；封面色彩仍由莫奈取色。默认亚克力。",&[("Classic","经典"),("Acrylic","亚克力"),("LiquidGlass","液态玻璃")],setting_str(state,"IslandMaterial","Acrylic"),cx),
         music_layout_row(state, view, cx)
     ], cx));
     sections.push(section_group("系统状态提示", None, vec![
@@ -1391,6 +1360,16 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
     display.push(toggle_row("ChineseTwoLine", "中文双行模式", "默认开启；没有翻译时，下面显示较小的下一句。", flag(state, "ChineseTwoLine", true), view, cx));
     display.push(toggle_row("Translation", "展开卡片显示翻译", "有翻译时优先显示翻译。", flag(state, "Translation", true), view, cx));
     sections.push(section_group("尺寸与显示", None, display, cx));
+    let mut palette: Vec<AnyElement> = vec![
+        toggle_row("CoverBackground", "封面取色背景", "根据歌曲封面为展开卡片取色，自动压低亮度；与下方三种颜色一起管理。", flag(state, "CoverBackground", true), view, cx),
+    ];
+    for (key, title) in [("ExpandedTextColor", "展开卡片字体颜色"), ("ExpandedComponentColor", "展开卡片组件颜色"), ("LyricProgressColor", "歌词进度填色")] {
+        palette.push(color_row(key, title, state, view, cx));
+        if view.picker.as_ref().is_some_and(|picker| picker.key == key) {
+            palette.push(picker_panel(view, cx));
+        }
+    }
+    sections.push(section_group("配色", None, palette, cx));
     sections.push(section_group("交互", None, vec![
         button_row("gesture-tutorial","手势教程","跟着动画了解展开、切换与隐藏。","查看教程",cx,|v,cx|{v.tutorial_epoch+=1;v.tutorial_recovery=0;v.tutorial_step=Some(0);cx.notify();}),
         toggle_row("HoverExpand", "悬停展开", "鼠标经过时展开当前组件。", flag(state, "HoverExpand", false), view, cx),
@@ -1475,18 +1454,9 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
         1 => {
             rows.push(plain_group(vec![
                 select_row("theme", "界面主题", "跟随 Windows，或固定为浅色 / 深色。", theme_label(state), view, cx),
-                toggle_row("CoverBackground", "封面取色背景", "根据歌曲封面为展开卡片取色，自动压低亮度。", flag(state, "CoverBackground", true), view, cx),
                 toggle_row("Animation", "界面动画", "连续形变可以随时反向操作，由软件开关控制，不跟随 Windows 动画设置。", flag(state, "Animation", true), view, cx),
                 toggle_row("IslandFluidMotion", "灵动岛流体动画", "胶囊轻抛后舒展成卡片，收起沿原路回到胶囊；途中反向也保持连续。关闭后使用经典曲线。", flag(state, "IslandFluidMotion", true), view, cx),
             ]));
-            let mut palette: Vec<AnyElement> = Vec::new();
-            for (key, title) in [("ExpandedTextColor", "展开卡片字体颜色"), ("ExpandedComponentColor", "展开卡片组件颜色"), ("LyricProgressColor", "歌词进度填色")] {
-                palette.push(color_row(key, title, state, view, cx));
-                if view.picker.as_ref().is_some_and(|picker| picker.key == key) {
-                    palette.push(picker_panel(view, cx));
-                }
-            }
-            rows.push(section_group("配色", None, palette, cx));
             let mut motion: Vec<AnyElement> = Vec::new();
             for (key, title, detail, min, max, default, unit) in [
                 ("MotionGap", "内容间距", "调整展开后的内容留白。", 0., 24., 8., "px"),
@@ -1499,6 +1469,7 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
             ] {
                 motion.push(slider_row(key, title, detail, min, max, unit, slider_value(state, key, view, default), view, cx));
             }
+            motion.push(action_row("resetMotion", "还原动效", "恢复展开、收起、弹簧与圆角的默认值，并开启界面与流体动画。", "还原动效", view, cx));
             motion.push(action_row("resetAppearance", "恢复紧凑尺寸", "恢复宽度、字号与固定位置。", "恢复紧凑尺寸", view, cx));
             rows.push(section_group("动效", None, motion, cx));
         }
@@ -1519,6 +1490,13 @@ fn settings_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settin
                 info_row("偏好保存在本机", "调整会自动保存", "设置写入点屿的数据目录；重装或版本更新不会重置。", view, cx),
                 info_row("数据与隐私", "默认不离开本机", "待办、计时与通知记录只保存在本机；唯一的外部请求是在线补全歌曲信息。", view, cx),
             ]));
+            let mut colors=Vec::new();
+            for (key,title) in [("SettingsLightAccentColor","浅色主题色"),("SettingsDarkAccentColor","深色主题色")]{
+                colors.push(color_row(key,title,state,view,cx));
+                if view.picker.as_ref().is_some_and(|p|p.key==key){colors.push(picker_panel(view,cx));}
+            }
+            colors.push(action_row("resetSettingsColors","还原主题配色","恢复浅色与深色主题原有的蓝色。","还原配色",view,cx));
+            rows.push(section_group("主题配色",None,colors,cx));
             rows.push(section_group("快速提醒", None, quick_ui::quick_hotkey_rows(state, view, cx), cx));
         }
     }
@@ -2392,6 +2370,7 @@ fn action_row(
 ) -> AnyElement {
     let shared = Rc::clone(&view.shared);
     card(SharedString::from(format!("action-{command}")), title, detail)
+        .bg(t::surface())
         .child(
             div()
                 .id(SharedString::from(format!("run-{command}")))
@@ -2795,6 +2774,8 @@ fn toggle_row(key: &'static str, title: &str, detail: &str, checked: bool, view:
 
 fn default_color(key: &str) -> &'static str {
     match key {
+        "SettingsLightAccentColor" => "#2563EB",
+        "SettingsDarkAccentColor" => "#6EA8FF",
         "ExpandedComponentColor" => "#B1E8D1",
         "LyricProgressColor" => "#A9E6CD",
         "TodoDefaultColor"=>"#F3D79B",
@@ -3335,7 +3316,7 @@ fn main() {
     // Self-check hook: start with one picker already open so a screenshot can capture it without a
     // human clicking. Only the three real colour settings are accepted.
     let smoke_picker = std::env::var("LYRICISLAND_SMOKE_PICKER").ok().and_then(|requested| {
-        let key = ["ExpandedTextColor", "ExpandedComponentColor", "LyricProgressColor"]
+        let key = ["ExpandedTextColor", "ExpandedComponentColor", "LyricProgressColor", "SettingsLightAccentColor", "SettingsDarkAccentColor"]
             .into_iter()
             .find(|key| *key == requested)?;
         let state = shared.lock().ok()?.state.clone();
@@ -3456,6 +3437,9 @@ fn main() {
                 }
             }
         }
+        if let Some(path)=std::env::var_os("LYRICISLAND_FRAME_PROBE"){
+            let _=window.update(cx,|_,window,cx|frame_probe::start(window,cx,PathBuf::from(path)));
+        }
         cx.activate(true);
     });
 }
@@ -3465,7 +3449,7 @@ fn ui_state(state:&Value)->Value {let mut state=state.clone();if let Some(map)=s
 /// The 750 ms refresh loop, mirroring the Slint frontend so the native side keeps one client.
 fn poll_pipe(cx: &mut App, window: WindowHandle<SettingsApp>, shared: Rc<Mutex<Shared>>) {
     cx.spawn(async move |cx| loop {
-        cx.background_executor().timer(Duration::from_millis(750)).await;
+        cx.background_executor().timer(Duration::from_millis(250)).await;
         let reply = cx.background_executor().spawn(async {
             let value = pipe::request("state", Value::Null)?;
             // Clicking a reminder banner asks this window to show the todo page. Acknowledge it in
@@ -3690,9 +3674,14 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
             Ok(report) => report,
             Err(error) => json!({"success": false, "error": error}),
         };
+        let material_selection = cx.background_executor().spawn(async { pipe::material_selection_smoke() }).await;
+        let material_selection = match material_selection {
+            Ok(report) => report,
+            Err(error) => json!({"success": false, "error": error}),
+        };
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": connected&&sound_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
+            "success": t::accent_regression()&&connected&&sound_selection["success"]==true&&material_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"accentContrastRegression":t::accent_regression(),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"materialSelection":material_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
             "pages": Route::ALL.len(),
             "settings": "GPUI",
             "ipc": "Rust",

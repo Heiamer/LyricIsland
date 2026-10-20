@@ -35,6 +35,7 @@ pub mod lines;
 pub mod local;
 pub mod log;
 pub mod matching;
+pub mod music_layout;
 pub mod models;
 pub mod payload;
 pub mod planner;

@@ -83,18 +83,18 @@ pub struct Palette {
 }
 
 pub const DARK: Palette = Palette {
-    base: c(0x0A, 0x0D, 0x14, 0.88),
-    chrome: c(0x0C, 0x10, 0x18, 0.88),
-    sidebar: c(0x0D, 0x11, 0x1A, 0.88),
-    surface: c(0x13, 0x18, 0x22, 1.0),
-    panel_top: c(0x18, 0x1E, 0x29, 1.0),
-    panel_bottom: c(0x12, 0x17, 0x21, 1.0),
-    sheen: c(0xFF, 0xFF, 0xFF, 0.10),
+    base: c(0x0A, 0x0D, 0x14, 0.80),
+    chrome: c(0x1E, 0x24, 0x30, 0.56),
+    sidebar: c(0x14, 0x1B, 0x27, 0.44),
+    surface: c(0x25, 0x2D, 0x3B, 0.70),
+    panel_top: c(0x35, 0x3E, 0x4F, 0.68),
+    panel_bottom: c(0x1C, 0x24, 0x32, 0.76),
+    sheen: c(0xFF, 0xFF, 0xFF, 0.20),
     surface_hi: c(0x1E, 0x25, 0x33, 1.0),
     row_hover: c(0x19, 0x20, 0x2C, 1.0),
-    hairline: c(0x23, 0x2B, 0x39, 1.0),
+    hairline: c(0xBD, 0xD0, 0xEF, 0.13),
     hairline_bright: c(0xFF, 0xFF, 0xFF, 0.14),
-    field: c(0x0D, 0x11, 0x1A, 1.0),
+    field: c(0x10, 0x17, 0x24, 0.62),
     text: c(0xE8, 0xED, 0xF5, 1.0),
     text_dim: c(0xA4, 0xAF, 0xBF, 1.0),
     text_faint: c(0x6F, 0x7B, 0x8D, 1.0),
@@ -117,18 +117,18 @@ pub const DARK: Palette = Palette {
 };
 
 pub const LIGHT: Palette = Palette {
-    base: c(0xFF, 0xFF, 0xFF, 1.0),
-    chrome: c(0xFF, 0xFF, 0xFF, 1.0),
-    sidebar: c(0xFF, 0xFF, 0xFF, 1.0),
-    surface: c(0xFF, 0xFF, 0xFF, 1.0),
-    panel_top: c(0xFF, 0xFF, 0xFF, 1.0),
-    panel_bottom: c(0xFF, 0xFF, 0xFF, 1.0),
-    sheen: c(0xFF, 0xFF, 0xFF, 0.0),
+    base: c(0xEC, 0xF1, 0xF9, 0.80),
+    chrome: c(0xFF, 0xFF, 0xFF, 0.60),
+    sidebar: c(0xFF, 0xFF, 0xFF, 0.34),
+    surface: c(0xFF, 0xFF, 0xFF, 0.68),
+    panel_top: c(0xFF, 0xFF, 0xFF, 0.86),
+    panel_bottom: c(0xF6, 0xF9, 0xFF, 0.58),
+    sheen: c(0xFF, 0xFF, 0xFF, 0.94),
     surface_hi: c(0xEF, 0xF4, 0xFE, 1.0),
     row_hover: c(0xF4, 0xF7, 0xFD, 1.0),
-    hairline: c(0xE3, 0xE8, 0xF0, 1.0),
+    hairline: c(0x8E, 0xA1, 0xBD, 0.24),
     hairline_bright: c(0x0F, 0x17, 0x2A, 0.12),
-    field: c(0xFF, 0xFF, 0xFF, 1.0),
+    field: c(0xFF, 0xFF, 0xFF, 0.64),
     text: c(0x0F, 0x17, 0x2A, 1.0),
     text_dim: c(0x5A, 0x65, 0x75, 1.0),
     text_faint: c(0x8B, 0x95, 0xA5, 1.0),
@@ -204,6 +204,40 @@ pub fn select(theme: &str, system_is_dark: bool) -> Palette {
         // "System" and anything unrecognised follow Windows.
         _ => if system_is_dark { DARK } else { LIGHT },
     }
+}
+
+/// Preserve the chosen hue while deriving readable foreground and control colours.
+pub fn customize(mut p:Palette,light:&str,dark:&str,is_dark:bool)->Palette{
+    let hex=if is_dark{dark}else{light};
+    let value=if hex.len()==7&&hex.starts_with('#'){u32::from_str_radix(&hex[1..],16).ok()}else{None};
+    let Some(v)=value else{return p};
+    if v==if is_dark{0x6EA8FF}else{0x2563EB}{return p;}
+    let raw=c((v>>16)&255,(v>>8)&255,v&255,1.0);
+    let mix=|a:Rgba,b:Rgba,t:f32|Rgba{r:a.r+(b.r-a.r)*t,g:a.g+(b.g-a.g)*t,b:a.b+(b.b-a.b)*t,a:1.0};
+    let lum=|v:Rgba|{let ch=|x:f32|if x<=0.04045{x/12.92}else{((x+0.055)/1.055).powf(2.4)};0.2126*ch(v.r)+0.7152*ch(v.g)+0.0722*ch(v.b)};
+    let ratio=|a:Rgba,b:Rgba|{let x=lum(a);let y=lum(b);(x.max(y)+0.05)/(x.min(y)+0.05)};
+    let white=c(255,255,255,1.0);let black=c(0,0,0,1.0);
+    let mut accent=raw;
+    let safe=if is_dark{white}else{black};
+    for _ in 0..32{if ratio(accent,p.base)>=4.5{break}accent=mix(accent,safe,0.08);}
+    p.accent=accent;
+    p.accent_deep=mix(accent,black,0.16);
+    p.on_accent=if ratio(white,accent)>=ratio(black,accent){white}else{black};
+    if ratio(p.on_accent,p.accent_deep)<4.5{p.accent_deep=accent;}
+    p.glow=Rgba{a:0.14,..raw};p.accent_dim=Rgba{a:0.14,..accent};
+    p.green_soft=Rgba{a:0.12,..accent};p.mint=Rgba{a:0.10,..accent};
+    p
+}
+
+/// The smoke harness covers adversarial picker colours in both appearances.
+pub fn accent_regression()->bool{
+    let lum=|v:Rgba|{let ch=|x:f32|if x<=0.04045{x/12.92}else{((x+0.055)/1.055).powf(2.4)};0.2126*ch(v.r)+0.7152*ch(v.g)+0.0722*ch(v.b)};
+    let ratio=|a:Rgba,b:Rgba|{let x=lum(a);let y=lum(b);(x.max(y)+0.05)/(x.min(y)+0.05)};
+    for dark in [false,true]{for hex in ["#000000","#FFFFFF","#FFFF00","#FF0000","#00FF00","#0000FF","#777777","#FF00FF"]{
+        let p=customize(if dark{DARK}else{LIGHT},hex,hex,dark);
+        if ratio(p.accent,p.base)<4.5||ratio(p.on_accent,p.accent)<4.5||ratio(p.on_accent,p.accent_deep)<4.5{return false}
+    }}
+    to_hex(customize(LIGHT,"#2563EB","#6EA8FF",false).accent_deep)==to_hex(LIGHT.accent_deep)
 }
 
 /// Make `palette` current for the frame being built.
