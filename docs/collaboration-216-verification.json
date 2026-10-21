@@ -1,5 +1,5 @@
 {
-  "unitAndDocTestsPassed": 348,
+  "unitAndDocTestsPassed": 349,
   "startupDefault": true,
   "sourceBaseline": "Published DotIsle-2.1.6mini-Source.zip",
   "coverRadiusFactor": 0.5,
@@ -2617,5 +2617,6 @@
         ]
       }
     ]
-  }
+  },
+  "otaUnchangedLockedAssetRegressionPassed": true
 }
