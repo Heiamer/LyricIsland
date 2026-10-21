@@ -3,12 +3,15 @@ use super::*;
 use lyric_core::music_layout::{music_geometry,music_height,MusicLayout,Rect};
 
 fn positioned(r:Rect)->Div{div().absolute().left(px(r.x as f32)).top(px(r.y as f32)).w(px(r.w as f32)).h(px(r.h as f32))}
-fn ink_label(r:Rect,text:String,size:f32,color:Rgba,center:f64,highlight:Option<(Rgba,f64)>)->AnyElement{
+/// `align` is the shared anchor: 0 leading, 0.5 centred, 1 trailing. It is the same
+/// number the island renderer multiplies its free space by, so the preview cannot
+/// drift from what the card actually draws.
+fn ink_label(r:Rect,text:String,size:f32,color:Rgba,align:f64,highlight:Option<(Rgba,f64)>)->AnyElement{
     let line=canvas(|_,_,_|{},move |bounds,_,window,cx|{
         let mut font=t::display_font();if size==16.{font.weight=FontWeight::SEMIBOLD;}
         let run=TextRun{len:text.len(),font,color:color.into(),background_color:None,underline:None,strikethrough:None};
         let shaped=window.text_system().shape_line(text.clone().into(),px(size),&[run.clone()],None);
-        let x=bounds.origin.x+(bounds.size.width-shaped.width).max(px(0.))*center as f32;
+        let x=bounds.origin.x+(bounds.size.width-shaped.width).max(px(0.))*align.clamp(0.,1.)as f32;
         let origin=point(x,bounds.origin.y);
         window.with_content_mask(Some(ContentMask{bounds}),|window|{
             let _=shaped.paint(origin,px(r.h as f32),TextAlign::Left,None,window,cx);
@@ -22,7 +25,7 @@ fn ink_label(r:Rect,text:String,size:f32,color:Rgba,center:f64,highlight:Option<
     positioned(r).child(line).into_any_element()
 }
 fn size_fn(w:Pixels,h:Pixels)->Size<Pixels>{size(w,h)}
-fn label(r:Rect,text:String,size:f32,color:Rgba,center:f64)->AnyElement{ink_label(r,text,size,color,center,None)}
+fn label(r:Rect,text:String,size:f32,color:Rgba,align:f64)->AnyElement{ink_label(r,text,size,color,align,None)}
 fn clock(s:f64)->String{let n=s.max(0.)as u64;format!("{}:{:02}",n/60,n%60)}
 
 pub fn live(state:&Value)->AnyElement{
@@ -44,18 +47,18 @@ pub fn live(state:&Value)->AnyElement{
             let g=music_geometry(width,MusicLayout::SideBySide,mix as f64,1.,font);
             let h=music_height(mix as f64,font);
             let mut card=div().relative().w(px(width as f32)).h(px(h as f32)).rounded(px(radius)).overflow_hidden().font(t::display_font())
-                .bg(linear_gradient(145.,linear_color_stop(background,0.),linear_color_stop(rgb(0x0c0f14),1.)))
-                .border_1().border_color(if material=="LiquidGlass"{rgba(0xffffff66)}else{rgba(0xffffff28)})
+                .bg(linear_gradient(145.,linear_color_stop(if material=="Glass"{background.opacity(0.88)}else{background},0.),linear_color_stop(if material=="Glass"{rgba(0x0c0f14e0)}else{rgba(0x0c0f14ff)},1.)))
+                .border_1().border_color(if material=="Glass"{rgba(0xffffff66)}else{rgba(0xffffff28)})
                 .shadow(vec![BoxShadow::new(px(0.),px(8.),rgba(0x00000026).into()).blur_radius(px(24.)).spread_radius(px(-6.))]);
-            if material=="LiquidGlass"{
+            if material=="Glass"{
                 card=card.shadow(vec![BoxShadow::new(px(0.),px(1.),rgba(0xffffff55).into()).inset(),BoxShadow::new(px(0.),px(8.),rgba(0x00000026).into()).blur_radius(px(24.))]);
             }
             let cover=data["coverPath"].as_str().filter(|s|!s.is_empty()).map(PathBuf::from).unwrap_or_else(||std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("Assets/LyricIsland-v2.png"))).unwrap_or_default());
-            card=card.child(positioned(g.cover).rounded(px(10.)).overflow_hidden().child(img(cover).w_full().h_full().object_fit(ObjectFit::Cover)))
+            card=card.child(positioned(g.cover).rounded(px(lyric_core::music_layout::cover_corner_radius(radius as f64,g.cover.w,g.cover.h)as f32)).overflow_hidden().child(img(cover).w_full().h_full().object_fit(ObjectFit::Cover)))
                 .child(label(g.title,title.clone(),16.,text_color,0.))
                 .child(label(g.artist,artist.clone(),10.,text_color.opacity(0.72),0.))
-                .child(ink_label(g.lyric,data["lyric"].as_str().unwrap_or("打开播放器，开始一首音乐").to_owned(),font as f32+2.,text_color,g.centered,Some((lyric_color,data["highlight"].as_f64().unwrap_or(0.)))))
-                .child(label(g.secondary,data["secondary"].as_str().unwrap_or("等待歌词").to_owned(),10.5,text_color.opacity(0.72),g.centered))
+                .child(ink_label(g.lyric,data["lyric"].as_str().unwrap_or("打开播放器，开始一首音乐").to_owned(),font as f32+2.,text_color,g.align,Some((lyric_color,data["highlight"].as_f64().unwrap_or(0.)))))
+                .child(label(g.secondary,data["secondary"].as_str().unwrap_or("等待歌词").to_owned(),10.5,text_color.opacity(0.72),g.align))
                 .child(positioned(g.status_dot).rounded_full().bg(accent))
                 .child(label(g.status_text,if title=="暂无播放"{"等待播放"}else if playing{"正在播放"}else{"已暂停"}.to_owned(),9.,text_color.opacity(0.72),0.))
                 .child(positioned(g.track).rounded_full().bg(rgba(0xffffff20)))
@@ -74,21 +77,4 @@ pub fn live(state:&Value)->AnyElement{
         }))
         .child(div().text_size(px(11.)).text_color(t::text_dim()).child("实时布局预览 · 跟随当前播放内容"))
         .into_any_element()
-}
-
-pub fn thumbnail(bounds:Bounds<Pixels>,window:&mut Window,layout:u8){
-    let mix=match layout{0=>1.,2=>2.,_=>0.};
-    let g=music_geometry(400.,MusicLayout::SideBySide,mix,1.,12.5);
-    let w=f32::from(bounds.size.width);let h=f32::from(bounds.size.height);let s=(w/400.).min(h/g.height as f32);
-    let ox=bounds.origin.x+px((w-400.*s)/2.);let oy=bounds.origin.y+px((h-g.height as f32*s)/2.);
-    let mut paint=|r:Rect,rad:f32,c:Rgba|window.paint_quad(quad(Bounds::new(point(ox+px(r.x as f32*s),oy+px(r.y as f32*s)),size(px(r.w as f32*s),px(r.h as f32*s))),px(rad*s),c,px(0.),transparent_black(),BorderStyle::Solid));
-    paint(Rect::new(0.,0.,400.,g.height),30.,rgb(0x222829).into());
-    paint(g.cover,10.,rgb(0x64747b).into());
-    for(r,fraction,height,color)in[(g.title,0.73,10.,0xe0e5e8),(g.artist,0.42,6.,0x8f9ca0),(g.lyric,0.91,9.,0xd8eee7),(g.secondary,0.67,6.,0x8f9ca0)]{
-        let width=r.w*fraction;paint(Rect::new(r.x+(r.w-width)*g.centered,r.y+(r.h-height)/2.,width,height),3.,rgb(color).into());
-    }
-    paint(g.status_dot,2.,rgb(0xa9e6cd).into());paint(Rect::new(g.status_text.x,g.status_text.y+6.,38.,5.),2.,rgb(0x8f9ca0).into());
-    paint(g.track,1.5,rgb(0x586367).into());paint(Rect::new(g.track.x,g.track.y,g.track.w*0.35,g.track.h),1.5,rgb(0xb1e8d1).into());
-    for r in [g.elapsed,g.total]{paint(Rect::new(r.x,r.y+5.,26.,4.),2.,rgb(0x8f9ca0).into());}
-    for(id,r)in g.buttons{let d=if id==4{18.}else{9.};paint(Rect::new(r.x+(r.w-d)/2.,r.y+(r.h-d)/2.,d,d),if id==4{9.}else{2.},rgb(0xc9cdcb).into());}
 }

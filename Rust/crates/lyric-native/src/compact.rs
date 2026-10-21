@@ -1,5 +1,21 @@
 //! Compact lyric policy and an interruptible, critically damped resize spring.
 use serde_json::Value;
+/// Geometry follows settled content; text can continue to update on every snapshot.
+/// Growth needs a short confirmation, while contraction must outlast a dropped frame,
+/// late translation or a short-lived rewind at a lyric boundary.
+#[derive(Default)]
+pub struct Stability{candidate:Option<(String,f64,f64)>,since:f64}
+impl Stability{
+ pub fn cancel(&mut self){self.candidate=None;}
+ pub fn ready(&mut self,key:&str,size:(f64,f64),current:(f64,f64),now:f64,force:bool)->bool{
+  if force||((size.0-current.0).abs()<0.05&&(size.1-current.1).abs()<0.05){self.candidate=None;return true}
+  if !self.candidate.as_ref().is_some_and(|(seen,w,h)|seen==key&&(*w-size.0).abs()<0.05&&(*h-size.1).abs()<0.05){self.candidate=Some((key.into(),size.0,size.1));self.since=now;}
+  let shrinking=size.0<current.0-0.05||size.1<current.1-0.05;
+  now-self.since>=if shrinking{0.60}else{0.16}
+ }
+}
+pub fn mini_font_size(font:f64)->f64{(font*0.80).clamp(9.,11.)}
+
 pub fn secondary<'a>(snapshot:&'a Value,translation:bool,chinese_next:bool)->&'a str{
  let f=&snapshot["frame"];let original=f["currentLine"].as_str().unwrap_or("");
  if translation{if let Some(t)=f["currentTranslation"].as_str().filter(|t|!t.trim().is_empty()&&t.trim()!=original.trim()){return t}}
@@ -21,6 +37,7 @@ impl Resize{
  /// Whether either axis still has somewhere to go. At rest both values are
  /// snapped exactly onto their targets, so the redraw loop can stop asking for
  /// the motion settings on every idle frame.
+ pub fn target_mini(&mut self,width:f64,height:f64,animate:bool){self.target(width,32.,animate);self.height_target=height.clamp(14.,24.);if !animate{self.height=self.height_target;}}
  pub fn moving(&self)->bool{self.width!=self.width_target||self.height!=self.height_target}
  /// Advance both axes and report whether anything visible changed.
  pub fn tick(&mut self,dt:f64,expand_ms:f64)->bool{let dt=dt.clamp(0.,0.1);let omega=resize_omega(expand_ms);
@@ -33,7 +50,12 @@ impl Resize{
 }
 fn advance(value:&mut f64,velocity:&mut f64,target:f64,omega:f64,dt:f64)->bool{
  if (*value-target).abs()<0.05&&velocity.abs()<0.5{let changed=*value!=target;*value=target;*velocity=0.;return changed}
- let d=*value-target;let b=*velocity+omega*d;let e=(-omega*dt).exp();*value=target+(d+b*dt)*e;*velocity=(*velocity-omega*b*dt)*e;true
+ let previous=*value;let d=previous-target;let b=*velocity+omega*d;let e=(-omega*dt).exp();
+ let next=target+(d+b*dt)*e;
+ // A reversed target may still carry velocity in the old direction. Bound the new
+ // step to the path between the live position and target so it never kicks away.
+ *value=next.clamp(previous.min(target),previous.max(target));
+ *velocity=if *value!=next{0.}else{(*velocity-omega*b*dt)*e};true
 }
 /// Natural frequency for the capsule resize.
 ///
@@ -61,4 +83,33 @@ pub fn capsule_height(font_size:f64,line_spacing:f64,scale:f64,double:bool)->f64
  #[test]fn resize_height_leads_the_width(){assert!(resize_omega(250.)>resize_omega(1200.));let mut r=Resize::new(260.,40.);r.target(480.,60.,true);for _ in 0..12{r.tick(1./60.,360.);}let width=(r.width-260.)/220.;let height=(r.height-40.)/20.;assert!(height>width,"height {height} should lead width {width}");}
  #[test]fn resize_settles_inside_the_longest_lyric_pause(){let mut r=Resize::new(140.,40.);r.target(460.,51.,true);let mut elapsed=0.;while elapsed<1.2&&((r.width-r.width_target).abs()>=0.05||(r.height-r.height_target).abs()>=0.05){r.tick(1./120.,1200.);elapsed+=1./120.;}assert!(elapsed<0.95,"resize still moving after {elapsed}s");}
  #[test]fn capsule_grows_only_when_two_lines_need_the_room(){assert_eq!(capsule_height(12.5,1.448,1.,false),40.);assert_eq!(capsule_height(12.5,1.448,1.,true),40.);assert_eq!(capsule_height(17.,1.448,1.,false),40.);assert!(capsule_height(17.,1.448,1.,true)>=45.);assert!((capsule_height(17.,1.448,2.,true)-capsule_height(17.,1.448,1.,true)).abs()<=1.);}
+}
+
+#[cfg(test)]mod mini_resize_tests{use super::*;#[test]fn mini_resize_can_settle_at_half_height_without_changing_classic_minimum(){let mut r=Resize::new(260.,40.);r.target_mini(260.,20.,true);for _ in 0..240{r.tick(1./120.,480.);}assert_eq!(r.height,20.);r.target(260.,10.,false);assert_eq!(r.height,32.);r.target_mini(260.,20.,false);assert_eq!(r.height,20.);}}
+
+#[cfg(test)]mod stability_tests{
+ use super::*;
+ #[test]fn alternating_short_and_long_snapshots_never_repeatedly_contract(){
+  let mut gate=Stability::default();let current=(420.,40.);let mut commits=0;
+  for i in 0..600{let now=i as f64/120.;let short=(now/0.25)as usize%2==0;let size=if short{(160.,40.)}else{current};
+   if gate.ready(if short{"short"}else{"long"},size,current,now,false)&&size!=current{commits+=1;}
+  }assert_eq!(commits,0);
+  assert!(!gate.ready("real-short",(160.,40.),current,6.,false));
+  assert!(gate.ready("real-short",(160.,40.),current,6.61,false));
+ }
+ #[test]fn growth_is_prompt_but_a_late_translation_does_not_trigger_two_resizes(){
+  let mut gate=Stability::default();let current=(200.,40.);
+  assert!(!gate.ready("long",(420.,40.),current,0.,false));assert!(gate.ready("long",(420.,40.),current,0.17,false));
+  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.3,false));
+  assert!(gate.ready("long",(420.,40.),(420.,40.),0.5,false));
+  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.6,false));
+ }
+ #[test]fn manual_changes_and_initial_layout_do_not_wait_for_lyrics(){
+  let mut gate=Stability::default();assert!(gate.ready("manual",(260.,14.),(420.,40.),0.,true));
+ }
+ #[test]fn reversing_a_resize_never_moves_away_from_the_new_target(){
+  let mut r=Resize::new(140.,40.);r.target(460.,40.,true);for _ in 0..8{r.tick(1./120.,480.);}
+  r.target(140.,40.,true);let mut last=r.width;for _ in 0..240{r.tick(1./120.,480.);assert!(r.width<=last&&r.width>=140.);last=r.width;}assert_eq!(r.width,140.);
+  r.target(460.,40.,true);for _ in 0..240{let before=r.width;r.tick(1./120.,480.);assert!(r.width>=before&&r.width<=460.);}assert_eq!(r.width,460.);
+ }
 }

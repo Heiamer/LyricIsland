@@ -140,14 +140,20 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     // A layout type, never a raw boolean pair.
     if key=="SystemStateHintPlacement"{if !["Island","Bottom"].contains(&text){return Err("提示位置无效".into())}return request("update",json!({"key":key,"value":text}));}
     if key == "MusicExpandedLayout" {
-        if !["Separated", "SideBySide", "LyricFocus"].contains(&text) {
+        if !["Separated", "SideBySide", "LyricFocus", "LyricRight"].contains(&text) {
             return Err("布局选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
     }
     // The material picker is a segmented control: it sends a bare label, not a JSON literal.
-    if key == "IslandMaterial" {
-        if !["Classic", "Acrylic", "LiquidGlass"].contains(&text) {
+    if key=="IslandSizeMode"{let mode=match text{"Classic"=>"Classic","Mini"=>"Mini",_=>if text.parse::<f64>().map_err(|_|"尺寸选项无效")?>=0.5{"Mini"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
+    if key=="ClassicCapsuleMaterial"{let mode=match text{"Classic"=>"Classic","Glass"=>"Glass",_=>if text.parse::<f64>().map_err(|_|"材质选项无效")?>=0.5{"Glass"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
+    if key == "MiniMaterial" {
+        if !["Classic", "Glass"].contains(&text) {return Err("Mini 材质选项无效。".into());}
+        return request("update",json!({"key":key,"value":text}));
+    }
+    if key == "IslandMaterial" || key == "MiniExpandedMaterial" {
+        if !["Classic", "Acrylic", "Glass"].contains(&text) {
             return Err("材质选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
@@ -269,34 +275,26 @@ pub fn material_selection_smoke() -> Result<Value, String> {
         return Err("材质自检只能使用独立测试管道".into());
     }
     let initial = request("state", Value::Null)?;
-    let original = initial["settings"]["IslandMaterial"].as_str().unwrap_or("Acrylic").to_owned();
     let outcome = (|| -> Result<Value, String> {
-        for kind in ["Classic", "Acrylic", "LiquidGlass"] {
-            let reply = change("IslandMaterial", kind, &initial)?;
-            if reply["success"] != true {
-                return Err(format!("{kind}: {}", reply["message"]));
+        for key in ["IslandMaterial","MiniExpandedMaterial"]{
+            let original=initial["settings"][key].as_str().unwrap_or("Acrylic");
+            let run=(|| -> Result<(),String>{
+                for kind in ["Classic","Acrylic","Glass"]{
+                    let reply=change(key,kind,&initial)?;
+                    if reply["success"]!=true||request("state",Value::Null)?["settings"][key]!=kind{return Err(format!("{key}: {kind} 未保存"));}
+                }
+                for invalid in ["","acrylic","glass","LiquidGlass","\"Acrylic\"","true"]{
+                    if change(key,invalid,&initial).is_ok(){return Err(format!("{key} 接受了无效取值：{invalid}"));}
+                }
+                if request("state",Value::Null)?["settings"][key]!="Glass"{return Err("无效输入覆盖了材质".into());}
+                Ok(())
+            })();
+            match request("update",json!({"key":key,"value":original})){
+                Ok(reply)if reply["success"]==true=>{},other=>return Err(format!("恢复 {key} 失败：{other:?}")),
             }
-            if request("state", Value::Null)?["settings"]["IslandMaterial"] != kind {
-                return Err(format!("{kind} 未保存"));
-            }
+            run?;
         }
-        for invalid in ["", "acrylic", "Glass", "\"Acrylic\"", "true"] {
-            if change("IslandMaterial", invalid, &initial).is_ok() {
-                return Err(format!("材质接受了无效取值：{invalid}"));
-            }
-        }
-        if request("state", Value::Null)?["settings"]["IslandMaterial"] != "LiquidGlass" {
-            return Err("无效输入覆盖了材质".into());
-        }
-        Ok(json!({"success": true}))
+        Ok(json!({"success":true}))
     })();
-    // Restore even when one check failed, so the test fixture keeps its starting material.
-    match request("update", json!({"key": "IslandMaterial", "value": original})) {
-        Ok(reply) if reply["success"] == true => {},
-        other => return Err(format!("恢复 IslandMaterial 失败：{other:?}")),
-    }
-    if request("state", Value::Null)?["settings"]["IslandMaterial"].as_str() != Some(original.as_str()) {
-        return Err("材质自检未恢复原配置".into());
-    }
     outcome
 }

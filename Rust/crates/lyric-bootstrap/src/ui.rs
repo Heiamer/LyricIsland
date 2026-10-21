@@ -148,7 +148,7 @@ unsafe fn create_control(
 fn register_wizard_class() {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
-        let background = CreateSolidBrush(rgb(247, 248, 246));
+        let background = CreateSolidBrush(rgb(247, 249, 253));
         let class_name = wide("DotIsleSetupWizard");
         let instance = windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None).unwrap().0);
         let class = WNDCLASSW {
@@ -288,7 +288,7 @@ unsafe extern "system" fn wizard_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
         }
         WM_CREATE => {
             let state = state(hwnd);
-            state.bg = CreateSolidBrush(rgb(247, 248, 246));
+            state.bg = CreateSolidBrush(rgb(247, 249, 253));
             state.body = font("Microsoft YaHei UI", 10, false, state.dpi);
             state.title = if state.uninstall { font("Microsoft YaHei UI", 18, true, state.dpi) } else { font("Microsoft YaHei UI", 19, true, state.dpi) };
             if state.uninstall { layout_uninstall(hwnd); } else { layout_install(hwnd); }
@@ -325,7 +325,7 @@ unsafe extern "system" fn wizard_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             let hdc = HDC(lparam.0 as *mut core::ffi::c_void);
             let control = HWND(wparam.0 as *mut core::ffi::c_void);
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, if control == state.status || control == state.detail { rgb(100, 110, 106) } else { rgb(28, 34, 32) });
+            SetTextColor(hdc, if control == state.status || control == state.detail { rgb(90, 101, 117) } else { rgb(15, 23, 42) });
             LRESULT(state.bg.0 as isize)
         }
         WM_DRAWITEM => {
@@ -333,7 +333,7 @@ unsafe extern "system" fn wizard_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
             if item.CtlID == ID_PRIMARY {
                 let disabled = item.itemState.0 & ODS_DISABLED.0 != 0;
-                let brush = CreateSolidBrush(if disabled { rgb(186, 194, 190) } else { rgb(20, 130, 103) });
+                let brush = CreateSolidBrush(if disabled { rgb(186, 194, 190) } else { rgb(37, 99, 235) });
                 FillRect(item.hDC, &item.rcItem, brush);
                 let _ = DeleteObject(HGDIOBJ(brush.0));
                 SetBkMode(item.hDC, TRANSPARENT);
@@ -490,14 +490,14 @@ unsafe fn draw_overlay(hwnd: HWND) {
     let ring_top = scale(35, dpi);
     let ring_size = scale(54, dpi);
     let width = scale(4, dpi).max(1);
-    let track = CreatePen(PS_SOLID, width, rgb(48, 65, 55));
+    let track = CreatePen(PS_SOLID, width, rgb(42, 56, 81));
     let old_pen = windows::Win32::Graphics::Gdi::SelectObject(hdc, HGDIOBJ(track.0));
     let old_brush = windows::Win32::Graphics::Gdi::SelectObject(hdc, GetStockObject(NULL_BRUSH));
     let _ = Ellipse(hdc, ring_left, ring_top, ring_left + ring_size, ring_top + ring_size);
     windows::Win32::Graphics::Gdi::SelectObject(hdc, old_brush);
     windows::Win32::Graphics::Gdi::SelectObject(hdc, old_pen);
     let _ = DeleteObject(HGDIOBJ(track.0));
-    let accent = CreatePen(PS_SOLID, width, rgb(141, 214, 173));
+    let accent = CreatePen(PS_SOLID, width, rgb(110, 168, 255));
     let old_pen = windows::Win32::Graphics::Gdi::SelectObject(hdc, HGDIOBJ(accent.0));
     let centre = ring_left + ring_size / 2;
     let radius = ring_size / 2 - width / 2;

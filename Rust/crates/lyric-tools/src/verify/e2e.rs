@@ -50,6 +50,8 @@ fn check_defaults(runtime: &Runtime) -> Result<Value> {
         "DefaultsOnboardingVersion": 1,
         "CoverBackground": true,
         "IslandMaterial": "Acrylic",
+        "MiniExpandedMaterial": "Acrylic",
+        "MiniMaterial": "Glass",
         "AutoStart": true,
         "NotificationClickOpenApp": true,
         "MusicClickOpenApp": false,
@@ -124,7 +126,32 @@ fn check_settings_updates(runtime: &Runtime, runtime_directory: &Path) -> Result
     process::call(runtime.pipe(),"resetMotion",None)?;
     let reset=settings(runtime)?;
     check(reset["Motion"]==original["Motion"]&&reset["Animation"]==true&&reset["IslandFluidMotion"]==true&&reset["SettingsLightAccentColor"]=="#9B4BC7"&&reset["SettingsDarkAccentColor"]=="#E5B86A","动效还原不完整或改变主题色")?;
-    for value in ["Classic","Acrylic","LiquidGlass","Acrylic"]{update(runtime,"IslandMaterial",json!(value))?;check(settings(runtime)?["IslandMaterial"]==value,"展开卡片材质切换未保存")?;}
+    let classic=state(runtime)?;let classic_w=classic["islandGeometry"]["card"]["w"].as_f64().unwrap();let classic_h=classic["islandGeometry"]["card"]["h"].as_f64().ok_or_else(||ToolError("missing card geometry".into()))?;let stored_layout=classic["settings"]["MusicExpandedLayout"].clone();
+    update(runtime,"IslandSizeMode",json!("Mini"))?;sleep(1.4);let mini=state(runtime)?;
+    for material in ["Classic","Glass"]{
+        update(runtime,"MiniMaterial",json!(material))?;check(settings(runtime)?["MiniMaterial"]==material,"Mini 材质未保存")?;
+        process::call(runtime.pipe(),"expand",None)?;sleep(0.2);
+        for _ in 0..24{process::call(runtime.pipe(),"testPointerClick",None)?;sleep(0.065);let clicked=state(runtime)?;check(clicked["lastError"].is_null(),format!("Mini 点击出现渲染错误：{}",clicked["lastError"]))?;}
+    }
+    let strip_material=settings(runtime)?["MiniMaterial"].clone();
+    let classic_material=settings(runtime)?["IslandMaterial"].clone();
+    for value in ["Classic","Acrylic","Glass"]{
+        update(runtime,"MiniExpandedMaterial",json!(value))?;
+        process::call(runtime.pipe(),"expand",None)?;sleep(0.35);
+        let current=state(runtime)?;
+        check(current["settings"]["MiniExpandedMaterial"]==value,"Mini 展开卡片材质未保存")?;
+        check(current["settings"]["MiniMaterial"]==strip_material&&current["settings"]["IslandMaterial"]==classic_material,"Mini 卡片材质影响收起或经典材质")?;
+        check(current["lastError"].is_null(),format!("Mini {value} 渲染失败"))?;
+    }
+    update(runtime,"MiniAutoContrast",json!(false))?;sleep(0.4);let fixed_ink=state(runtime)?;
+    check(fixed_ink["miniContrast"]["enabled"]==false&&fixed_ink["miniContrast"]["foreground"]=="#F4F6F8","关闭自动文字对比未恢复浅色文字")?;
+    update(runtime,"MiniAutoContrast",json!(true))?;check(settings(runtime)?["MiniAutoContrast"]==true,"自动文字对比未保存")?;
+    check(rejected(runtime,"update",Some(json!({"key":"MiniMaterial","value":"Acrylic"})))?,"Mini 收起细条应只提供经典与玻璃")?;
+    check(mini["compactHeight"].as_f64().is_some_and(|h|h<=14.1)&&mini["islandGeometry"]["satellite"]==false&&mini["islandGeometry"]["horizontalGestures"]==true,"Mini 尺寸或交互未生效")?;
+    check(mini["islandGeometry"]["card"]["h"].as_f64().is_some_and(|h|(h-(classic_h*0.5+10.)).abs()<0.3&&(mini["islandGeometry"]["card"]["w"].as_f64().unwrap()-classic_w*1.05).abs()<0.3),"Mini 紧凑卡片尺寸不正确")?;
+    check(rejected(runtime,"update",Some(json!({"key":"IslandSizeMode","value":true})))?,"Mini 模式应拒绝开关值")?;
+    update(runtime,"IslandSizeMode",json!("Classic"))?;sleep(1.0);check(settings(runtime)?["MusicExpandedLayout"]==stored_layout,"Mini 覆盖了经典布局选择")?;
+    for value in ["Classic","Acrylic","Glass","Acrylic"]{update(runtime,"IslandMaterial",json!(value))?;check(settings(runtime)?["IslandMaterial"]==value,"展开卡片材质切换未保存")?;}
     check(rejected(runtime,"update",Some(json!({"key":"IslandMaterial","value":"acrylic"})))?,"材质应拒绝未知取值")?;
     process::call(runtime.pipe(), "update", Some(json!({"key": "AutoCompactWidth", "value": true})))?;
     check(settings(runtime)?["AutoCompactWidth"] == true, "自适应宽度未生效")?;
@@ -160,12 +187,14 @@ fn check_adaptive_width(runtime: &Runtime) -> Result<Value> {
     update(runtime, "AutoCompactWidth", json!(true))?;
     let current = settle(runtime)?;
     let adaptive = current["compactWidth"].as_f64().unwrap_or(0.0);
-    check((140.0..stored).contains(&adaptive), format!("自适应宽度应收缩到 [{}, {stored})：{adaptive}", 140.0))?;
+    // This fixture has no allowed player or lyric. Empty frames deliberately retain
+    // the committed width; real lyric resizing is covered by the stability regression.
+    check((adaptive - stored).abs() < 1e-9, format!("空歌词应保留已保存宽度 {stored}：{adaptive}"))?;
 
     update(runtime, "AutoCompactWidth", json!(false))?;
     let current = settle(runtime)?;
     check(current["compactWidth"].as_f64().is_some_and(|width| (width - stored).abs() < 1e-9), "关闭自适应后未恢复保存宽度")?;
-    Ok(json!({"stored": stored, "adaptive": true}))
+    Ok(json!({"stored": stored, "adaptive": true, "emptyFramePreservesWidth": true}))
 }
 
 fn check_tools(runtime: &mut Runtime) -> Result<Value> {
@@ -178,7 +207,8 @@ fn check_tools(runtime: &mut Runtime) -> Result<Value> {
     update(runtime, "AutoCompactWidth", json!(true))?;
     sleep(1.0);
     let width = state(runtime)?["compactWidth"].as_f64().unwrap_or(1e9);
-    check(width <= 180.1, format!("自适应宽度未遵守上限：{width}"))?;
+    check((width - settings(runtime)?["CompactWidth"].as_f64().unwrap_or(0.)).abs() < 1e-9,
+        format!("调整自适应上限时空歌词不应引发收缩：{width}"))?;
     update(runtime, "AutoCompactWidth", json!(false))?;
 
     let mut ids = Vec::new();
@@ -247,7 +277,7 @@ fn check_tools(runtime: &mut Runtime) -> Result<Value> {
         "concurrentTimers": true,
         "pauseResetResume": true,
         "cycleWithSwipeDisabled": true,
-        "adaptiveMaximum": true,
+        "emptyFramePreservesWidthWithMaximum": true,
         "pastelColor": true,
         "pausedSessionRestore": true,
         "devicePreview": true,
@@ -334,10 +364,14 @@ fn check_persistence(runtime: &mut Runtime, data: &Path) -> Result<Runtime> {
     process::call(runtime.pipe(), "todoSave", Some(json!({"title": "交稿", "content": "", "date": today, "time": "20:00", "daily": false})))?;
     let directory = runtime.directory().to_path_buf();
     let run_ms = runtime.run_ms();
+    let materials=settings(runtime)?;
     runtime.stop();
     let mut restarted = Runtime::new(directory, data.to_path_buf(), run_ms);
     restarted.start()?;
     let persisted=settings(&restarted)?;
+    for key in ["IslandMaterial","MiniExpandedMaterial","MiniMaterial","ClassicCapsuleMaterial"]{
+        check(persisted[key]==materials[key],format!("{key} 重启后未保留"))?;
+    }
     check(persisted["SettingsLightAccentColor"]=="#9B4BC7"&&persisted["SettingsDarkAccentColor"]=="#E5B86A","两套主题色重启后未保留")?;
     let listed = process::call(restarted.pipe(), "todos", None)?;
     check(listed["todos"].as_array().is_some_and(|todos| todos.len() == 1 && todos[0]["title"] == "交稿"), format!("待办未持久化：{listed}"))?;
@@ -385,7 +419,7 @@ pub fn run(args: &[String]) -> Result<()> {
     report.insert("version".into(), json!(version));
     report.insert("runtime".into(), json!(runtime_directory.to_string_lossy()));
     report.insert("testOverrides".into(), json!({"AllowedSources": ["LyricIsland.Verify13"], "OnlineSongInfo": false}));
-    let mut runtime = Runtime::new(&runtime_directory, &data, 60_000);
+    let mut runtime = Runtime::new(&runtime_directory, &data, 180_000);
 
     let outcome = (|| -> Result<()> {
         std::fs::write(data.join("settings.json"), "{\"AllowedSources\":[\"LyricIsland.Verify13\"],\"OnlineSongInfo\":false}")?;

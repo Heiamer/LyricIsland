@@ -205,6 +205,12 @@ pub fn apply(stage: &Path, target: &Path, backup: &Path, fail_after: usize, afte
             let destination = target.join(relative.replace('/', "\\"));
             let old = backup.join(relative.replace('/', "\\"));
             if destination.is_file() {
+                // Windows may retain font mappings after the app exits. Identical
+                // assets need no write, so leave them untouched during an update.
+                if std::fs::metadata(&input)?.len() == std::fs::metadata(&destination)?.len()
+                    && lyric_archive::sha256_file(&input)? == lyric_archive::sha256_file(&destination)? {
+                    continue;
+                }
                 if let Some(parent) = old.parent() { std::fs::create_dir_all(parent)?; }
                 std::fs::copy(&destination, &old)?;
                 existed.insert(relative.clone());
@@ -326,7 +332,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let result = (|| -> Result<()> {
         if !matches!(args.len(), 6 | 8 | 10) { return Err(Error("更新参数无效".into())); }
         let version = args[0].clone();
-        if !Regex::new(r"^\d+\.\d+(\.\d+)?$").unwrap().is_match(&version) { return Err(Error("版本号无效".into())); }
+        if !Regex::new(r"^\d+\.\d+(\.\d+)?(?:-?mini)?$").unwrap().is_match(&version) { return Err(Error("版本号无效".into())); }
         let target_path = paths::full_path(&args[1])?;
         let data_path = paths::full_path(&args[2])?;
         let pid: i32 = args[3].parse().map_err(|_| Error("更新参数无效".into()))?;
@@ -407,4 +413,26 @@ fn report_failure(args: &[String], error: &Error) -> Result<()> {
     let _ = state.lock().map(|mut value| value.phase = "failed".into());
     reporter.report("failed", 0, None, &error.to_string(), true)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod update_file_tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn unchanged_locked_assets_are_preserved_while_changed_files_are_updated() {
+        let root = paths::temp_unique("DotIsle.LockedAssetTest");
+        let stage = root.join("stage");let target = root.join("target");let backup = root.join("backup");
+        std::fs::create_dir_all(&stage).unwrap();std::fs::create_dir_all(&target).unwrap();
+        for directory in [&stage, &target] { std::fs::write(directory.join("font.ttf"), b"same font bytes").unwrap(); }
+        std::fs::write(stage.join("app.bin"), b"new").unwrap();std::fs::write(target.join("app.bin"), b"old").unwrap();
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(1).open(target.join("font.ttf")).unwrap();
+        assert!(std::fs::copy(stage.join("font.ttf"), target.join("font.ttf")).is_err());
+        apply(&stage, &target, &backup, 0, None).unwrap();
+        assert_eq!(std::fs::read(target.join("app.bin")).unwrap(), b"new");
+        assert_eq!(std::fs::read(backup.join("app.bin")).unwrap(), b"old");
+        assert!(!backup.join("font.ttf").exists());
+        drop(locked);std::fs::remove_dir_all(root).unwrap();
+    }
 }

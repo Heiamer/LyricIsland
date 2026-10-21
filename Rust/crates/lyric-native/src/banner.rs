@@ -11,6 +11,9 @@ pub struct Banner {pub notice:Option<Notice>,motion:[Spring;6],pub open:bool,dea
 impl Default for Banner {fn default()->Self{Self{notice:None,motion:[Spring::default();6],open:false,deadline:0.,changed:0.,compact:false}}}
 impl Banner {
     pub fn visible(&self)->bool{self.notice.is_some()}
+    /// Whether the hold has run out. The shell asks this so a queued message can take
+    /// over the open surface instead of closing it and opening it again.
+    pub fn due(&self,now:f64)->bool{self.open&&now>=self.deadline-0.08}
     pub fn presentation(&self,now:f64)->(Rect,f64,f64){let a=self.motion.map(|s|s.sample(now).0);(Rect::new(a[0],a[1],a[2],a[3]),a[4],a[5].clamp(0.,1.))}
     pub fn show(&mut self,notice:Notice,base:Rect,radius:f64,host_width:f64,height:f64,now:f64,animate:bool){
         if self.notice.is_none(){for (s,v) in self.motion.iter_mut().zip([base.x,base.y,base.w,base.h,radius,0.]){s.snap(v,now);}}

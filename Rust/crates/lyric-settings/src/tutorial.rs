@@ -3,15 +3,15 @@ use crate::*;
 
 fn steps(state: &Value) -> Vec<(u8, &'static str, &'static str)> {
     let mut s = Vec::new();
-    if flag(state, "ClickAnywhereExpand", true) {
+    if setting_str(state,"IslandSizeMode","Classic")=="Mini"||flag(state, "ClickAnywhereExpand", true) {
         s.push((0, "轻点展开，再点收起", "点击胶囊空白处展开，点击卡片外收起。按钮与进度条保留各自的操作。"));
-    } else if flag(state, "HoverExpand", false) {
+    } else if setting_str(state,"IslandSizeMode","Classic")!="Mini"&&flag(state, "HoverExpand", false) {
         s.push((0, "悬停展开", "将鼠标移到胶囊上展开，移开后收起。"));
     }
     if flag(state, "SwipeActivities", true) {
         s.push((1, "左右拖动，切换活动", "按住空白处向左或向右拖动，在音乐、计时器与待办之间切换。有多个活动时可用。"));
     }
-    if flag(state, "Floating", false) {
+    if setting_str(state,"IslandSizeMode","Classic")!="Mini"&&flag(state, "Floating", false) {
         s.push((2, "拖动把手，调整位置", "使用卡片左下角的移动按钮，再拖到你喜欢的位置。"));
     }
     if flag(state, "SwipeUpHide", true) {
@@ -63,7 +63,7 @@ pub fn overlay(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>)
             if event.keystroke.key == "escape" { finish(view, cx); cx.stop_propagation(); }
         }))
         .child(div().w(px(480.)).max_w_full().p(px(24.)).rounded(px(22.)).border_1()
-            .border_color(t::hairline()).bg(t::surface()).flex().flex_col().gap(px(16.))
+            .border_color(t::hairline()).bg(Rgba{a:1.0,..t::surface()}).text_color(t::text()).flex().flex_col().gap(px(16.))
             .child(div().flex().justify_between().items_center()
                 .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("认识你的灵动岛 · {} / {}", index + 1, list.len())))
                 .child(small_button("tutorial-skip".into(), "跳过", cx.listener(|v, _, _, cx| finish(v, cx)))))
