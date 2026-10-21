@@ -187,12 +187,14 @@ fn check_adaptive_width(runtime: &Runtime) -> Result<Value> {
     update(runtime, "AutoCompactWidth", json!(true))?;
     let current = settle(runtime)?;
     let adaptive = current["compactWidth"].as_f64().unwrap_or(0.0);
-    check((140.0..stored).contains(&adaptive), format!("自适应宽度应收缩到 [{}, {stored})：{adaptive}", 140.0))?;
+    // This fixture has no allowed player or lyric. Empty frames deliberately retain
+    // the committed width; real lyric resizing is covered by the stability regression.
+    check((adaptive - stored).abs() < 1e-9, format!("空歌词应保留已保存宽度 {stored}：{adaptive}"))?;
 
     update(runtime, "AutoCompactWidth", json!(false))?;
     let current = settle(runtime)?;
     check(current["compactWidth"].as_f64().is_some_and(|width| (width - stored).abs() < 1e-9), "关闭自适应后未恢复保存宽度")?;
-    Ok(json!({"stored": stored, "adaptive": true}))
+    Ok(json!({"stored": stored, "adaptive": true, "emptyFramePreservesWidth": true}))
 }
 
 fn check_tools(runtime: &mut Runtime) -> Result<Value> {
@@ -205,7 +207,8 @@ fn check_tools(runtime: &mut Runtime) -> Result<Value> {
     update(runtime, "AutoCompactWidth", json!(true))?;
     sleep(1.0);
     let width = state(runtime)?["compactWidth"].as_f64().unwrap_or(1e9);
-    check(width <= 180.1, format!("自适应宽度未遵守上限：{width}"))?;
+    check((width - settings(runtime)?["CompactWidth"].as_f64().unwrap_or(0.)).abs() < 1e-9,
+        format!("调整自适应上限时空歌词不应引发收缩：{width}"))?;
     update(runtime, "AutoCompactWidth", json!(false))?;
 
     let mut ids = Vec::new();
