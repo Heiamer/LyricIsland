@@ -1,4 +1,4 @@
-pub use lyric_core::music_layout::{Rect,MusicLayout,music_geometry,music_height};
+pub use lyric_core::music_layout::{Rect,MusicLayout,music_geometry,music_height,cover_corner_radius};
 #[derive(Clone,Copy)] pub struct Layout{pub capsule:Rect,pub card:Rect,pub host:Rect}
 impl Layout {
     /// The host reserves the taller A layout so switching never resizes the window.
@@ -55,7 +55,7 @@ pub fn mini_hit(w:f64,h:f64,panel:Option<&crate::activities::Panel>,x:f64,y:f64)
   for(_,r)in g.buttons{assert!((r.y+r.h/2.-center).abs()<0.01);assert!(r.y+r.h<=g.height-12.);assert!(!r.contains(g.track.x+1.,g.track.y));}
   assert_eq!(g.height,music_height(mix,font));
   if mix==0.{assert!(g.lyric.x>=g.cover.x+g.cover.w+20.);assert_eq!(g.title.x,g.lyric.x);}
-  if mix==1.{assert!(g.lyric.y>=g.cover.y+g.cover.h+18.);assert_eq!((g.title.y+g.artist.y+g.artist.h)/2.,g.cover.y+g.cover.h/2.);assert_eq!(g.artist.y-g.title.y-g.title.h,3.);assert_eq!(g.status_text.y,g.title.y);assert!(g.title.x+g.title.w+12.<=g.status_dot.x);}
+  if mix==1.{assert!(g.lyric.y>=g.cover.y+g.cover.h+8.);assert_eq!((g.title.y+g.artist.y+g.artist.h)/2.,g.cover.y+g.cover.h/2.);assert_eq!(g.artist.y-g.title.y-g.title.h,3.);assert_eq!(g.status_text.y,g.title.y);assert!(g.title.x+g.title.w+12.<=g.status_dot.x);}
  }}}}
 }
 #[test]fn switching_layouts_uses_the_same_live_geometry_in_both_directions(){for mix in [0.,0.2,0.5,0.8,1.]{let a=music_geometry(400.,MusicLayout::Separated,mix,1.5,12.5);let b=music_geometry(400.,MusicLayout::SideBySide,mix,1.5,12.5);assert_eq!(a.lyric,b.lyric);assert_eq!(a.cover,b.cover);assert_eq!(a.buttons,b.buttons);}}

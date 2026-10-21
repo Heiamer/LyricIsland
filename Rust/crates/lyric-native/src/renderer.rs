@@ -14,14 +14,25 @@ fn point(x:f64,y:f64)->Vector2{Vector2{X:x as f32,Y:y as f32}}
 fn identity()->Matrix3x2{Matrix3x2{M11:1.,M12:0.,M21:0.,M22:1.,M31:0.,M32:0.}}
 fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:x as f32,M32:y as f32,..Default::default()}}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum Material{Classic,Acrylic,LiquidGlass}
+pub enum Material{Classic,Acrylic,Glass}
 impl Material{
-    /// Unknown values fall back to acrylic so an upgraded config never loses the glass layer.
-    pub fn from_setting(value:&str)->Self{match value{"Classic"=>Self::Classic,"LiquidGlass"=>Self::LiquidGlass,_=>Self::Acrylic}}
+    /// Expanded cards keep separate preferences for each size, independent of the strip.
+    pub fn expanded(settings:&serde_json::Value,mini:bool)->Self{
+        Self::from_setting(settings[if mini{"MiniExpandedMaterial"}else{"IslandMaterial"}].as_str().unwrap_or("Acrylic"))
+    }
+    pub fn from_setting(value:&str)->Self{match value{"Classic"=>Self::Classic,"Glass"=>Self::Glass,_=>Self::Acrylic}}
+}
+#[derive(Clone,PartialEq)]
+pub struct MaterialTheme{
+    pub material:Material,pub cover_background:bool,pub palette:crate::cover_color::CoverPalette,
+    pub pixels:Option<(Vec<u8>,u32,u32)>,
+}
+impl MaterialTheme{
+    pub fn new(material:Material,cover_background:bool)->Self{Self{material,cover_background,palette:Default::default(),pixels:None}}
 }
 #[derive(Clone,Copy)]
 pub struct Scene<'a>{
-    pub mini:bool,pub classic_glass:bool,pub mini_ink:u32,pub mini_outline:u32,
+    pub mini:bool,pub mini_glass:bool,pub classic_glass:bool,pub mini_ink:u32,pub mini_outline:u32,
     pub tool_theme:crate::theme_accent::Accent,
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
     pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
@@ -40,9 +51,9 @@ pub struct Scene<'a>{
     pub outgoing_opacity:f64,pub outgoing_y:f64,
 }
 pub struct Renderer{
-    glass:crate::native_glass::Glass,glass_bitmap:Option<ID2D1Bitmap1>,hwnd:HWND,reading_glass:bool,reading_dark:bool,backdrop:Option<(crate::expanded_backdrop::Request,ID2D1Bitmap1)>,
+    reading_glass:bool,
+    preview_pixels:Option<(Vec<u8>,u32,u32)>,
     surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
-    cover_pixels:Option<crate::liquid_glass::Cover>,lens:Option<(u32,u32,u32,bool,ID2D1Bitmap1)>,
     cover_palette:crate::cover_color::CoverPalette,shadow_shape:Option<(Rect,f64)>,
     notification_icon:Option<ID2D1Bitmap1>,device_bitmaps:HashMap<String,ID2D1Bitmap1>,
     factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
@@ -112,14 +123,69 @@ impl Renderer{
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
         dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{glass:Default::default(),glass_bitmap:None,hwnd,reading_glass:false,reading_dark:false,backdrop:None,cover_pixels:None,lens:None,factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
+        Ok(Self{preview_pixels:None,reading_glass:false,factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
+    }
+    pub fn material_theme(&self,material:Material,cover_background:bool)->MaterialTheme{
+        MaterialTheme{material,cover_background,palette:self.cover_palette,pixels:self.preview_pixels.clone()}
+    }
+    pub unsafe fn set_material_theme(&mut self,theme:&MaterialTheme)->Result<()>{
+        self.cover_palette=theme.palette;self.poster_cover=None;
+        self.cover=if let Some((pixels,width,height))=&theme.pixels{
+            let props=D2D1_BITMAP_PROPERTIES1{pixelFormat:D2D1_PIXEL_FORMAT{format:DXGI_FORMAT_B8G8R8A8_UNORM,alphaMode:D2D1_ALPHA_MODE_PREMULTIPLIED},dpiX:96.,dpiY:96.,..Default::default()};
+            Some(self.dc.CreateBitmap(D2D_SIZE_U{width:*width,height:*height},Some(pixels.as_ptr().cast()),width*4,&props)?)
+        }else{None};Ok(())
+    }
+    /// The same painter is used by cards, queued notifications and both system-hint placements.
+    unsafe fn material_surface(&mut self,shape:Rect,radius:f64,surface:crate::surface::Surface)->Result<()>{
+        let paint=surface.paint(self.cover_palette);let(top,bottom)=(paint.top,paint.bottom);
+        if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
+            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(top)},D2D1_GRADIENT_STOP{position:1.,color:color(bottom)}];
+            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
+            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
+            self.surface_brush=Some((top,bottom,shape,brush));
+        }
+        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);
+        // Blur only artwork. The frosted reading plane and a restrained tint keep the pane
+        // dense enough to read while its cover-derived colour remains visible.
+        if paint.frost>0.001{
+            self.clip(shape,radius,paint.frost as f32)?;
+            if surface.cover_background{if let Some(cover)=&self.cover{
+                if self.poster_cover.as_ref()!=Some(cover){self.poster_blur.SetInput(0,cover,true);self.poster_cover=Some(cover.clone());}
+                let output=self.poster_blur.GetOutput()?;let bounds=self.dc.GetImageLocalBounds(&output)?;
+                let width=(bounds.right-bounds.left)as f64;let height=(bounds.bottom-bounds.top)as f64;
+                let scale=(shape.w/width.max(1.)).max(shape.h/height.max(1.));
+                self.dc.SetTransform(&matrix(scale,shape.x+(shape.w-width*scale)/2.-bounds.left as f64*scale,shape.y+(shape.h-height*scale)/2.-bounds.top as f64*scale));
+                self.dc.DrawImage(&output,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);self.dc.SetTransform(&identity());
+            }}
+            let scrim=if surface.material==Material::Acrylic{0xc9000000}else{0x55000000};
+            self.fill(shape,radius,scrim|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));self.dc.PopLayer();
+        }
+        let edge=(((34.+68.*paint.reflection)as u32)<<24)|0x00ffffff;
+        self.brush.SetColor(&color(edge));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
+        if paint.reflection>0.001{
+            if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
+                let stops=[
+                    D2D1_GRADIENT_STOP{position:0.,color:color(0x36ffffff)},
+                    D2D1_GRADIENT_STOP{position:0.36,color:color(0x0effffff)},
+                    D2D1_GRADIENT_STOP{position:0.42,color:color(0x02ffffff)},
+                    D2D1_GRADIENT_STOP{position:1.,color:color(0x00ffffff)}];
+                let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
+                let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x+shape.w*0.12,shape.y+shape.h)},None,&collection)?;
+                self.highlight_brush=Some((shape,brush));
+            }
+            self.clip(shape,radius,paint.reflection as f32)?;
+            self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.highlight_brush.as_ref().unwrap().1);
+            let inset=Rect::new(shape.x+1.5,shape.y+1.5,(shape.w-3.).max(1.),(shape.h-3.).max(1.));
+            self.brush.SetColor(&color(0x38000000));self.dc.DrawRoundedRectangle(&rounded(inset,(radius-1.5).max(1.)),&self.brush,0.7,None);
+            self.dc.PopLayer();
+        }Ok(())
     }
     pub fn preview_palette(&self)->(u32,u32){(self.cover_palette.background,self.cover_palette.accent)}
     pub fn preview_art(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
-        if let Some(c)=&self.cover_pixels{
-            let mut pixels=c.pixels.clone();for p in pixels.chunks_exact_mut(4){p.swap(0,2);}
+        if let Some((pixels,width,height))=&self.preview_pixels{
+            let mut pixels=pixels.clone();for p in pixels.chunks_exact_mut(4){p.swap(0,2);}
             if let Some(parent)=path.parent(){std::fs::create_dir_all(parent)?;}
-            image::save_buffer_with_format(path,&pixels,c.width,c.height,image::ColorType::Rgba8,image::ImageFormat::Png)?;
+            image::save_buffer_with_format(path,&pixels,*width,*height,image::ColorType::Rgba8,image::ImageFormat::Png)?;
         }Ok(())
     }
     pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{self.load_cover(bytes,true)}
@@ -129,7 +195,7 @@ impl Renderer{
         let phase=(self.flip_from+(1.-self.flip_from)*self.cover_changed.elapsed().as_secs_f64()/0.28).clamp(0.,1.);
         if phase>=0.5||self.previous_cover.is_none(){self.previous_cover=self.cover.clone();self.flip_from=1.-phase;}else{self.flip_from=phase;}
         self.cover_changed=std::time::Instant::now();
-        self.cover=None;self.cover_palette=Default::default();if theme{self.cover_pixels=None;self.lens=None;}if let Some(bytes)=bytes{
+        self.cover=None;self.cover_palette=Default::default();if theme{self.preview_pixels=None;}if let Some(bytes)=bytes{
             let factory:IWICImagingFactory=CoCreateInstance(&CLSID_WICImagingFactory,None,CLSCTX_INPROC_SERVER)?;
             let stream=factory.CreateStream()?;stream.InitializeFromMemory(bytes)?;
             let decoder=factory.CreateDecoderFromStream(&stream,std::ptr::null(),WICDecodeMetadataCacheOnLoad)?;let frame=decoder.GetFrame(0)?;
@@ -141,37 +207,13 @@ impl Renderer{
             let scaler=factory.CreateBitmapScaler()?;scaler.Initialize(&frame,scaled_width,scaled_height,WICBitmapInterpolationModeFant)?;
             let converter=factory.CreateFormatConverter()?;converter.Initialize(&scaler,&GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,None,0.,WICBitmapPaletteTypeCustom)?;
             let mut pixels=vec![0u8;scaled_width as usize*scaled_height as usize*4];converter.CopyPixels(std::ptr::null(),scaled_width*4,&mut pixels)?;
-            if theme{self.cover_palette=crate::cover_color::palette(&pixels);self.cover_pixels=Some(crate::liquid_glass::Cover{pixels,width:scaled_width,height:scaled_height});}
+            if theme{self.cover_palette=crate::cover_color::palette(&pixels);self.preview_pixels=Some((pixels,scaled_width,scaled_height));}
             self.cover=Some(self.dc.CreateBitmapFromWicBitmap(&converter,None)?);
             // Restart the flip clock after decode + palette so their cost never eats the animation's first frames.
             self.cover_changed=std::time::Instant::now();
         }Ok(())
     }
-    pub fn glass_status(&self)->serde_json::Value{serde_json::json!({"frames":self.glass.frames,"available":self.glass.available,"captureExcluded":self.glass.available,"error":self.glass.error})}
-    pub unsafe fn set_expanded_backdrop(&mut self,frame:crate::expanded_backdrop::Frame)->Result<()>{
-        let q=frame.request;let w=(q.bounds[2]-q.bounds[0])as u32;let h=(q.bounds[3]-q.bounds[1])as u32;
-        self.reading_dark=false;let bitmap=self.glass.fixture(&self._device,&self.dc,&frame.pixels,w,h,self.dpi,q.radius,q.tint,q.tint==0x10141c)?;self.backdrop=Some((q,bitmap));Ok(())
-    }
-    unsafe fn expanded_glass(&mut self,_s:&Scene<'_>,shape:Rect,radius:f64,opacity:f32,_compact:bool)->Result<()>{
-        self.clip(shape,radius,opacity)?;
-        if let Some(b)=self.glass_bitmap.as_ref().or_else(||self.backdrop.as_ref().map(|(_,b)|b)){self.dc.DrawBitmap(b,Some(&rect(shape)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
-        self.dc.PopLayer();Ok(())
-    }
     fn contrast_outline(c:u32)->u32{let l=((c>>16)&255)*3+((c>>8)&255)*6+(c&255);if l>1280{0x88000000}else{0x88ffffff}}
-    unsafe fn liquid_lens(&mut self,s:&Scene<'_>,shape:Rect,radius:f64,opacity:f32)->Result<()>{
-        // Cache in final card space: morphing stretches one texture and never resamples per frame.
-        let w=s.layout.card.w.round().clamp(1.,768.)as u32;let h=s.layout.card.h.round().clamp(1.,768.)as u32;
-        let r=s.radius.round().clamp(1.,128.)as u32;
-        if !self.lens.as_ref().is_some_and(|v|v.0==w&&v.1==h&&v.2==r&&v.3==s.cover_background){
-            let pixels=crate::liquid_glass::texture(w,h,r as f64,if s.cover_background{self.cover_pixels.as_ref()}else{None},if s.cover_background{self.cover_palette.background}else{0x1b1f25});
-            let props=D2D1_BITMAP_PROPERTIES1{pixelFormat:D2D1_PIXEL_FORMAT{format:DXGI_FORMAT_B8G8R8A8_UNORM,alphaMode:D2D1_ALPHA_MODE_PREMULTIPLIED},dpiX:96.,dpiY:96.,..Default::default()};
-            let bitmap=self.dc.CreateBitmap(D2D_SIZE_U{width:w,height:h},Some(pixels.as_ptr()as *const _),w*4,&props)?;
-            self.lens=Some((w,h,r,s.cover_background,bitmap));
-        }
-        self.clip(shape,radius,opacity)?;
-        self.dc.DrawBitmap(&self.lens.as_ref().unwrap().4,Some(&rect(shape)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);
-        self.dc.PopLayer();Ok(())
-    }
     unsafe fn fill(&self,r:Rect,radius:f64,c:u32){self.brush.SetColor(&color(c));self.dc.FillRoundedRectangle(&rounded(r,radius),&self.brush);}
     unsafe fn line(&self,a:(f64,f64),b:(f64,f64),c:u32,width:f32){if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width+1.2,None);}self.brush.SetColor(&color(c));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width,None);}
     unsafe fn clip(&self,r:Rect,radius:f64,opacity:f32)->Result<()>{
@@ -207,7 +249,6 @@ impl Renderer{
         result.unwrap_or(self.body_baseline/self.body_line_spacing)
     }
     unsafe fn text_family(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32,family:&str,system:bool,alignment:DWRITE_TEXT_ALIGNMENT,line_height:Option<f64>)->Result<()>{
-        let c=if self.reading_glass&&self.reading_dark&&(c&255)>128&&((c>>8)&255)>128&&((c>>16)&255)>128{(c&0xff000000)|0x17202c}else{c};
         if text.is_empty()||r.w<=0.{return Ok(())}let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,r.w,r.h,size,weight,family,alignment.0,line_height);
         if !self.layouts.contains_key(&key){
             if self.layouts.len()>192{self.layouts.clear()}
@@ -252,7 +293,10 @@ impl Renderer{
         let mut rows=vec![];for (key,geometry) in &self.icons{let r=geometry.GetBounds(None)?;rows.push(serde_json::json!({"glyph":key.split('|').next(),"top":r.top,"bottom":r.bottom,"centerY":(r.top+r.bottom)/2.,"height":r.bottom-r.top}));}Ok(serde_json::json!(rows))
     }
     unsafe fn cover_with_opacity(&mut self,x:f64,y:f64,size:f64,opacity:f32,demo:bool)->Result<()>{
-        let r=Rect::new(x,y,size,size);self.clip(r,size/6.,1.)?;self.fill(r,0.,if demo{0xff26324a}else if size>24.{0xff244b42}else{0xff242a31});
+        self.cover_with_radius(x,y,size,size/6.,opacity,demo)
+    }
+    unsafe fn cover_with_radius(&mut self,x:f64,y:f64,size:f64,radius:f64,opacity:f32,demo:bool)->Result<()>{
+        let r=Rect::new(x,y,size,size);self.clip(r,radius,1.)?;self.fill(r,0.,if demo{0xff26324a}else if size>24.{0xff244b42}else{0xff242a31});
         if let Some(b)=&self.cover {let s=b.GetSize();let edge=s.width.min(s.height);let source=D2D_RECT_F{left:(s.width-edge)/2.,top:(s.height-edge)/2.,right:(s.width+edge)/2.,bottom:(s.height+edge)/2.};self.dc.DrawBitmap(b,Some(&rect(r)),opacity,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
         else if demo{
             let center=point(x+size*0.5,y+size*0.5);let disc=D2D1_ELLIPSE{point:center,radiusX:(size*0.36)as f32,radiusY:(size*0.36)as f32};
@@ -266,14 +310,15 @@ impl Renderer{
         self.dc.PopLayer();Ok(())
     }
     unsafe fn flipping_cover(&mut self,r:Rect,s:&Scene<'_>)->Result<()>{
+        let radius=crate::layout::cover_corner_radius(s.radius,r.w,r.h);
         let t=if s.animate{(self.flip_from+(1.-self.flip_from)*s.cover_age_ms/280.).clamp(0.,1.)}else{1.};
-        if t>=1.||self.previous_cover.is_none(){return self.cover_with_opacity(r.x,r.y,r.w,s.cover_opacity as f32,s.demo)}
+        if t>=1.||self.previous_cover.is_none(){return self.cover_with_radius(r.x,r.y,r.w,radius,s.cover_opacity as f32,s.demo)}
         let sx=(std::f64::consts::PI*t).cos().abs().max(0.018);let sy=1.-0.06*(std::f64::consts::PI*t).sin();
         let draw=Rect::new(r.x+r.w*(1.-sx)/2.,r.y+r.h*(1.-sy)/2.,r.w*sx,r.h*sy);
         let bitmap=if t<0.5{self.previous_cover.clone()}else{self.cover.clone()};
-        self.clip(draw,6.*sx.min(sy),s.cover_opacity as f32)?;self.fill(draw,6.*sx,0xff1b2026);
+        self.clip(draw,radius*sx.min(sy),s.cover_opacity as f32)?;self.fill(draw,radius*sx.min(sy),0xff1b2026);
         if let Some(bitmap)=bitmap{let size=bitmap.GetSize();let edge=size.width.min(size.height);let source=D2D_RECT_F{left:(size.width-edge)/2.,top:(size.height-edge)/2.,right:(size.width+edge)/2.,bottom:(size.height+edge)/2.};self.dc.DrawBitmap(&bitmap,Some(&rect(draw)),1.,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
-        self.fill(draw,6.*sx,(((1.-sx)*60.)as u32)<<24);self.dc.PopLayer();Ok(())
+        self.fill(draw,radius*sx.min(sy),(((1.-sx)*60.)as u32)<<24);self.dc.PopLayer();Ok(())
     }
     unsafe fn button(&mut self,id:i32,x:f64,y:f64,size:f64,scene:&Scene<'_>){
         let disabled=(id==2&&!scene.floating)||(id==9&&!scene.favorite_enabled)||([3,4,5].contains(&id)&&!scene.has_track);
@@ -374,11 +419,6 @@ impl Renderer{
         let (base_shape,base_radius)=s.layout.morph_shape(s.frame.card_reveal,s.radius,s.fluid_motion);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
-        let black_capsule=!s.mini&&s.classic_glass&&p<=0.05&&s.notification.is_none()&&s.osd.is_none();
-        let live_glass=(s.material==Material::LiquidGlass&&p>0.05||black_capsule)&&s.notification.is_none()&&s.osd.is_none()&&s.opacity>0.01;
-        if present&&live_glass{self.dc.SetTarget(None);self.glass_bitmap=self.glass.render(&self._device,&self.dc,self.hwnd,shape,radius,self.dpi,if black_capsule{0x10141c}else if s.cover_background{self.cover_palette.background}else{0x151b24},black_capsule,!s.mini,s.time_ms);self.reading_dark=false;}
-        else if present{self.glass.stop();self.glass_bitmap=None;}
-
         if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
             if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,0.));self.compact_view(&neighbor)?;}
             if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width+s.swipe_offset,0.));self.compact_view(&old)?;}
@@ -392,70 +432,13 @@ impl Renderer{
         // One opacity layer for pause/show fades. Geometry remains fixed.
         self.clip(Rect::new(0.,0.,s.layout.host.w,s.layout.host.h),0.,s.opacity)?;
         self.shadow_fx.SetInput(0,&self.shadow,true);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&(22_f32/3.).to_ne_bytes())?;
-        let shadow_color=[0_f32,0.,0.,if s.mini&&p<0.01{0.04}else{0.22}];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
+        let shadow_color=[0_f32,0.,0.,if s.mini&&p<0.01&&s.notification_mix.max(s.osd_mix)<0.01{0.04}else{0.22}];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
         self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
-        let clear=s.material==Material::LiquidGlass&&s.notification.is_none()&&s.osd.is_none();
-        // Only the reading surface gains density as it expands. A collapsed Mini
-        // leaves the browser tab strip visible through its low-opacity meniscus.
-        let black_capsule=!s.mini&&s.classic_glass&&p<=0.05&&s.notification.is_none()&&s.osd.is_none();
-        let expanded_clear=clear&&p>0.05;let optical_mix=if clear{blend(p,0.05,0.85)}else{0.};
-        let glass_ready=self.glass_bitmap.is_some()||self.backdrop.is_some();
-        let alpha=if expanded_clear&&!glass_ready{0xf5000000}else if black_capsule&&!glass_ready{0xfa000000}else if clear{(((if s.mini{22.+174.*p.clamp(0.,1.)}else{245.-49.*p.clamp(0.,1.)})*(1.-optical_mix)+8.*optical_mix)as u32)<<24}else if black_capsule{0x60000000}else if s.transparent{0xf5000000}else{0xff000000};
-        let top=alpha|crate::cover_color::mix(0x1b1f25,self.cover_palette.background,if s.cover_background{p*music_alpha}else{0.});
-        let bottom=alpha|crate::cover_color::mix(0x0c0f14,self.cover_palette.background,if s.cover_background{p*music_alpha*0.65}else{0.});
-        if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
-            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(top)},D2D1_GRADIENT_STOP{position:1.,color:color(bottom)}];
-            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
-            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
-            self.surface_brush=Some((top,bottom,shape,brush));
-        }
-        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);
-        // Frost the cover, never the text. This is a self-contained poster acrylic,
-        // not desktop capture; the classic material and compact capsule stay intact.
-        let glass=if clear&&s.mini{1.}else if s.material!=Material::Classic&&s.notification.is_none()&&s.osd.is_none(){blend(p,if s.material==Material::LiquidGlass{0.11}else{0.16},0.92)}else{0.};
-        if glass>0.001&&s.material==Material::Acrylic{
-            self.clip(shape,radius,glass as f32)?;
-            if s.cover_background{
-                if let Some(cover)=&self.cover{
-                    
-                    if self.poster_cover.as_ref()!=Some(cover){self.poster_blur.SetInput(0,cover,true);self.poster_cover=Some(cover.clone());}
-                    // Effect bounds, unlike bitmap DIPs, stay correct across render-target DPI.
-                    let output=self.poster_blur.GetOutput()?;let bounds=self.dc.GetImageLocalBounds(&output)?;
-                    let width=(bounds.right-bounds.left)as f64;let height=(bounds.bottom-bounds.top)as f64;
-                    let scale=(shape.w/width.max(1.)).max(shape.h/height.max(1.));
-                    self.dc.SetTransform(&matrix(scale,shape.x+(shape.w-width*scale)/2.-bounds.left as f64*scale,shape.y+(shape.h-height*scale)/2.-bounds.top as f64*scale));
-                    self.dc.DrawImage(&output,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                    self.dc.SetTransform(&identity());
-                }
-            }
-            // An opaque dark scrim bounds the brightest possible cover for legibility. Liquid
-            // glass keeps a little more of the poster, but never enough to threaten white text.
-            let scrim=if s.material==Material::LiquidGlass{0xbc000000}else{0xc9000000};
-            self.fill(shape,radius,scrim|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));
-            self.dc.PopLayer();
-        }
-        if expanded_clear{self.expanded_glass(s,shape,radius,optical_mix as f32,false)?;}
-        if black_capsule{self.expanded_glass(s,shape,radius,1.,true)?;}
-        if clear&&!expanded_clear&&!black_capsule&&glass>0.001{self.liquid_lens(s,shape,radius,(glass*(if s.mini{0.025+0.255*p.clamp(0.,1.)}else{0.28}))as f32)?;}
-        if !expanded_clear&&!black_capsule{
-        let edge=if clear&&s.mini&&p<0.01{0x28ffffff}else if s.material==Material::LiquidGlass{0x5affffff}else if glass>0.001{0x42ffffff}else{0x22ffffff};
-        self.brush.SetColor(&color(edge));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
-        if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
-            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(0x44ffffff)},D2D1_GRADIENT_STOP{position:0.32,color:color(0x00ffffff)}];
-            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
-            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
-            self.highlight_brush=Some((shape,brush));
-        }
-        self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.highlight_brush.as_ref().unwrap().1,1.,None);
-        if s.material==Material::LiquidGlass&&glass>0.001{
-            // A bright outer meniscus and a darker inset give the bevel optical thickness.
-            self.clip(shape,radius,glass as f32)?;
-            self.brush.SetColor(&color(if s.mini&&p<0.01{0x28ffffff}else{0x55ffffff}));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.25,None);
-            let inset=Rect::new(shape.x+2.,shape.y+2.,(shape.w-4.).max(1.),(shape.h-4.).max(1.));
-            self.brush.SetColor(&color(if s.mini&&p<0.01{0x14000000}else{0x48000000}));self.dc.DrawRoundedRectangle(&rounded(inset,(radius-2.).max(1.)),&self.brush,0.8,None);
-            self.dc.PopLayer();
-        }
-        }
+        self.material_surface(shape,radius,crate::surface::Surface{
+            material:s.material,reveal:p,overlay:s.notification_mix.max(s.osd_mix),
+            compact_glass:if s.mini{s.mini_glass}else{s.classic_glass},mini:s.mini,
+            transparent:s.transparent,cover_background:s.cover_background,
+        })?;
         let content_scale=(base_shape.w/s.layout.card.w).min(base_shape.h/s.layout.card.h);
         let tx=base_shape.x+(base_shape.w-s.layout.card.w*content_scale)/2.;let ty=base_shape.y+(base_shape.h-s.layout.card.h*content_scale)/2.;
         let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;
@@ -523,11 +506,10 @@ include!("tool_renderer.rs");
 include!("mini_renderer.rs");
 
 impl Renderer{
- pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,present:bool)->Result<()>{
+ pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,surface:crate::surface::Surface,present:bool)->Result<()>{
   self.dc.SetTarget(&self.screen);self.dc.SetTransform(&identity());self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));
   let r=Rect::new(16.,12.+offset,240.,44.);self.clip(Rect::new(0.,0.,272.,80.),0.,opacity as f32)?;
-  self.fill(Rect::new(r.x,r.y+2.,r.w,r.h),22.,0x25000000);self.fill(r,22.,0xff1a1d22);
-  self.brush.SetColor(&color(0x28ffffff));self.dc.DrawRoundedRectangle(&rounded(r,22.),&self.brush,0.7,None);
+  self.fill(Rect::new(r.x,r.y+2.,r.w,r.h),22.,0x25000000);self.material_surface(r,22.,surface)?;
   self.osd_content(n,r)?;self.dc.PopLayer();self.dc.EndDraw(None,None)?;
   if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;self._composition.Commit()?;}Ok(())
  }

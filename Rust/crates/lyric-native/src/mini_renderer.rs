@@ -6,9 +6,9 @@ impl Renderer{
         let dot=3.2+breath*1.2;let accent=if s.panel.is_some(){s.tool_theme.fill}else{s.progress_color};
         self.fill(Rect::new(c.x+11.-dot/2.,c.y+(c.h-dot)/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(accent&0xffffff));
         let label=s.panel.map(|p|format!("{}  {}",p.title,p.value)).unwrap_or_else(||s.lyric.to_owned());
-        let font=(s.font_size*0.80).clamp(9.,11.);let area=Rect::new(c.x+22.,c.y,c.w-44.,c.h);
+        let font=crate::compact::mini_font_size(s.font_size);let area=Rect::new(c.x+22.,c.y,c.w-44.,c.h);
         // Symmetric gutters keep the words on the capsule centre, independently of the dot.
-        if s.material==Material::LiquidGlass{for(dx,dy)in[(-0.65,0.),(0.65,0.),(0.,-0.65),(0.,0.65)]{self.text_family(&label,Rect::new(area.x+dx,area.y+dy,area.w,area.h),font,500,s.mini_outline,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(-1.))?;}}
+        if s.mini_glass{for(dx,dy)in[(-0.65,0.),(0.65,0.),(0.,-0.65),(0.,0.65)]{self.text_family(&label,Rect::new(area.x+dx,area.y+dy,area.w,area.h),font,500,s.mini_outline,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(-1.))?;}}
         self.text_family(&label,area,font,500,s.mini_ink,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(-1.))?;Ok(())
     }
     unsafe fn mini_expanded(&mut self,s:&Scene<'_>)->Result<()>{

@@ -47,14 +47,14 @@ pub fn live(state:&Value)->AnyElement{
             let g=music_geometry(width,MusicLayout::SideBySide,mix as f64,1.,font);
             let h=music_height(mix as f64,font);
             let mut card=div().relative().w(px(width as f32)).h(px(h as f32)).rounded(px(radius)).overflow_hidden().font(t::display_font())
-                .bg(linear_gradient(145.,linear_color_stop(background,0.),linear_color_stop(rgb(0x0c0f14),1.)))
-                .border_1().border_color(if material=="LiquidGlass"{rgba(0xffffff66)}else{rgba(0xffffff28)})
+                .bg(linear_gradient(145.,linear_color_stop(if material=="Glass"{background.opacity(0.88)}else{background},0.),linear_color_stop(if material=="Glass"{rgba(0x0c0f14e0)}else{rgba(0x0c0f14ff)},1.)))
+                .border_1().border_color(if material=="Glass"{rgba(0xffffff66)}else{rgba(0xffffff28)})
                 .shadow(vec![BoxShadow::new(px(0.),px(8.),rgba(0x00000026).into()).blur_radius(px(24.)).spread_radius(px(-6.))]);
-            if material=="LiquidGlass"{
+            if material=="Glass"{
                 card=card.shadow(vec![BoxShadow::new(px(0.),px(1.),rgba(0xffffff55).into()).inset(),BoxShadow::new(px(0.),px(8.),rgba(0x00000026).into()).blur_radius(px(24.))]);
             }
             let cover=data["coverPath"].as_str().filter(|s|!s.is_empty()).map(PathBuf::from).unwrap_or_else(||std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("Assets/LyricIsland-v2.png"))).unwrap_or_default());
-            card=card.child(positioned(g.cover).rounded(px(10.)).overflow_hidden().child(img(cover).w_full().h_full().object_fit(ObjectFit::Cover)))
+            card=card.child(positioned(g.cover).rounded(px(lyric_core::music_layout::cover_corner_radius(radius as f64,g.cover.w,g.cover.h)as f32)).overflow_hidden().child(img(cover).w_full().h_full().object_fit(ObjectFit::Cover)))
                 .child(label(g.title,title.clone(),16.,text_color,0.))
                 .child(label(g.artist,artist.clone(),10.,text_color.opacity(0.72),0.))
                 .child(ink_label(g.lyric,data["lyric"].as_str().unwrap_or("打开播放器，开始一首音乐").to_owned(),font as f32+2.,text_color,g.align,Some((lyric_color,data["highlight"].as_f64().unwrap_or(0.)))))

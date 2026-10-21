@@ -35,7 +35,7 @@ impl Renderer{
         }Ok(())
     }
     unsafe fn compact_view(&mut self,s:&Scene<'_>)->Result<()>{if s.mini{return self.mini_compact(s)}if let Some(p)=s.panel{self.tool_compact(s,p)}else{self.compact_content(s)}}
-    unsafe fn expanded_view(&mut self,s:&Scene<'_>)->Result<()>{self.reading_glass=s.material==Material::LiquidGlass;let result=if s.mini{self.mini_expanded(s)}else if let Some(p)=s.panel{self.tool_expanded(s,p)}else{self.expanded_content(s)};self.reading_glass=false;result}
+    unsafe fn expanded_view(&mut self,s:&Scene<'_>)->Result<()>{self.reading_glass=s.material==Material::Glass;let result=if s.mini{self.mini_expanded(s)}else if let Some(p)=s.panel{self.tool_expanded(s,p)}else{self.expanded_content(s)};self.reading_glass=false;result}
     unsafe fn satellite(&mut self,s:&Scene<'_>)->Result<()>{let r=s.layout.satellite();self.fill(r,r.h/2.,0xff101419);self.brush.SetColor(&color(0x38ffffff));self.dc.DrawRoundedRectangle(&rounded(r,r.h/2.),&self.brush,1.,None);let cx=r.x+r.w/2.;let cy=r.y+r.h/2.;let c=0xffbac9d8;
         match s.auxiliary_kind{1=>{self.brush.SetColor(&color(c));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(cx,cy),radiusX:8.,radiusY:8.},&self.brush,1.4,None);self.line((cx,cy),(cx,cy-5.),c,1.4);self.line((cx,cy),(cx+4.,cy+2.),c,1.4);},2=>{self.line((cx-6.,cy),(cx-1.,cy+5.),c,1.8);self.line((cx-1.,cy+5.),(cx+7.,cy-5.),c,1.8);},_=>{for (i,h) in [8.,14.,10.].iter().enumerate(){self.fill(Rect::new(cx-6.+i as f64*5.,cy-h/2.,2.,*h),1.,c);}}}
         Ok(())
