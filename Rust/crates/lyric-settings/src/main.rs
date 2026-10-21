@@ -24,7 +24,9 @@ mod theme;
 mod value;
 mod quick_ui;
 mod rules_ui;
+pub const DISPLAY_VERSION:&str="2.1.6mini";
 mod tutorial;
+mod mini_mode;
 mod row_edges;
 mod music_preview;
 mod frame_probe;
@@ -227,7 +229,7 @@ struct SettingsApp {
     /// prepaint because pointer events only carry a window position.
     pad_bounds: Rc<Cell<Bounds<Pixels>>>,
     hue_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// Keyboard focus for the two music-layout options, so Left/Right/Space work after a click.
+    /// Keyboard focus for the music-layout blocks, so Left/Right/Space work after a click.
     music_focus: FocusHandle,
     /// Scroll state of the content column. One scroll handle per route, so switching routes always
     /// starts where that route was left. The drawer keeps its own offset as well.
@@ -652,8 +654,8 @@ fn raised(radius: f32) -> Div {
         .border_1().border_color(t::hairline())
         .bg(linear_gradient(
             180.0,
-            linear_color_stop(t::panel_top(), 0.0),
-            linear_color_stop(t::panel_bottom(), 1.0),
+            linear_color_stop(t::surface(), 0.0),
+            linear_color_stop(t::surface(), 1.0),
         ))
         .shadow(vec![
             BoxShadow::new(px(0.0), px(1.0), t::sheen().into()).blur_radius(px(0.0)).inset(),
@@ -786,9 +788,9 @@ fn tab_row(id_prefix: &'static str, labels: &[&'static str], selected: usize, cx
                 move |_, phase| {
                     let lift = motion::alpha(phase);
                     div().id(id.clone()).px(px(15.0)).py(px(7.0)).rounded(px(10.0))
-                        .bg(motion::blend_color(phase, t::field(), t::surface()))
+                        .bg(motion::blend_color(phase, transparent_black().into(), t::accent()))
                         .text_size(px(12.5))
-                        .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
+                        .text_color(motion::blend_color(phase, t::text_dim(), t::on_accent()))
                         .font_weight(if lift > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                         .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(lift).into()).blur_radius(px(2.0))])
                         .cursor_pointer().active(|style| style.opacity(0.72)).child(text.to_owned())
@@ -1147,14 +1149,16 @@ fn settings_titlebar()->AnyElement {
         .child(div().flex().items_center().gap(px(2.0))
             .child(div().w(px(11.0)).h(px(4.5)).rounded(px(2.25)).bg(t::on_accent()))
             .child(div().w(px(4.0)).h(px(4.0)).rounded(px(2.0)).bg(t::yellow_line())));
-    div().flex().w_full().h(px(52.)).flex_shrink_0().bg(t::chrome()).border_b_1().border_color(t::hairline())
+    // The bar centres its children vertically: the version chip used to stretch to the full
+    // 52 px height, which left its label pinned to the top of the pill.
+    div().flex().items_center().w_full().h(px(52.)).flex_shrink_0().bg(t::chrome()).border_b_1().border_color(t::hairline())
         .child(div().id("window-brand-drag").window_control_area(WindowControlArea::Drag).flex_1().min_w_0().h_full().pl(px(22.)).flex().items_center().gap(px(11.))
             .child(brand)
             .child(div().flex().items_center().gap(px(8.)).text_size(px(13.5))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(t::text()).child("点屿"))
                 .child(div().px(px(6.0)).py(px(1.5)).rounded(px(5.0)).bg(t::surface_hi()).text_size(px(9.5)).text_color(t::text_dim()).child("控制中心"))))
         .child(div().mr(px(6.0)).px(px(7.0)).py(px(3.0)).rounded(px(6.0)).bg(t::field()).border_1().border_color(t::hairline())
-            .font(t::mono_font()).text_size(px(9.5)).text_color(t::text_faint()).child(format!("v{}", env!("CARGO_PKG_VERSION"))))
+            .font(t::mono_font()).text_size(px(9.5)).text_color(t::text_faint()).child(format!("v{}", DISPLAY_VERSION)))
         .child(controls).into_any_element()
 }
 
@@ -1275,45 +1279,49 @@ fn page_halo(epoch: u32) -> AnyElement {
     }).into_any_element()
 }
 
-/// 音乐卡片: one radio group, because the two layouts are alternatives rather than features that
-/// can be combined. Thumbnails are canvas schematics: the SVG mask pipeline would tint the whole
-/// drawing, and the handoff's two-tone card cannot survive that.
+/// 音乐卡片: one radio group, because the four layouts are alternatives rather than features
+/// that can be combined. The choices are plain blocks, not miniatures: a hand-drawn thumbnail
+/// can only ever approximate the card, and the live preview above already shows the real thing.
 fn music_layout_row(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
     let selected=setting_str(state,"MusicExpandedLayout","SideBySide");
     let focus=view.music_focus.clone();
-    let options=div().flex().flex_row().gap(px(12.))
-        .child(music_layout_option("Separated","舒展","歌词独立成行，长句更从容。",selected=="Separated",0,view,cx))
-        .child(music_layout_option("SideBySide","紧凑","封面与歌词并排，整体更紧凑。",selected=="SideBySide",1,view,cx))
-        .child(music_layout_option("LyricFocus","歌词聚焦","歌词居中呈现，封面与信息收于顶部。",selected=="LyricFocus",2,view,cx))
+    let options=div().flex().flex_col().gap(px(8.))
+        .child(div().flex().flex_row().gap(px(8.))
+            .child(music_layout_option("SideBySide","紧凑","封面与歌词并排，整体更紧凑。",selected=="SideBySide",view,cx))
+            .child(music_layout_option("Separated","舒展","歌词独立成行，长句更从容。",selected=="Separated",view,cx)))
+        .child(div().flex().flex_row().gap(px(8.))
+            .child(music_layout_option("LyricFocus","歌词聚焦","歌词居中呈现，封面与信息收于顶部。",selected=="LyricFocus",view,cx))
+            .child(music_layout_option("LyricRight","右韵","歌词靠右对齐，左侧留白，节奏更轻。",selected=="LyricRight",view,cx)))
         .track_focus(&focus)
         .on_key_down(cx.listener(move |view,event:&KeyDownEvent,window,cx|{
             let current=setting_str(&view.state(),"MusicExpandedLayout","SideBySide").to_owned();
-            let values=["Separated","SideBySide","LyricFocus"];let index=values.iter().position(|value|*value==current).unwrap_or(0);let next=match event.keystroke.key.as_str(){"left"=>values[(index+2)%3],"right"|"space"=>values[(index+1)%3],_=>return};
+            let values=["SideBySide","Separated","LyricFocus","LyricRight"];let count=values.len();
+            let index=values.iter().position(|value|*value==current).unwrap_or(0);let next=match event.keystroke.key.as_str(){"left"=>values[(index+count-1)%count],"right"|"space"=>values[(index+1)%count],_=>return};
             if next!=current{let _=send(&view.shared,"MusicExpandedLayout",next,cx);}
             window.focus(&view.music_focus,cx);cx.notify();
         }));
-    let label=match selected{"Separated"=>"舒展","LyricFocus"=>"歌词聚焦",_=>"紧凑"};
+    let label=match selected{"Separated"=>"舒展","LyricFocus"=>"歌词聚焦","LyricRight"=>"右韵",_=>"紧凑"};
     let footer=div().flex().items_center().gap_2().pt(px(2.))
         .child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(t::accent()))
         .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("当前选择：{label}")));
-    card("row-music-layout","展开卡片布局","预览跟随当前歌曲、歌词与配色；选择布局可查看连续变换。")
+    card("row-music-layout","展开卡片布局","预览跟随当前歌曲、歌词与配色；点选方块切换布局，上方即为真实排版。")
         .flex_col().items_stretch().gap_3().child(music_preview::live(state)).child(options).child(footer).into_any_element()
 }
 
-fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, layout: u8, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
+fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {
     let shared=Rc::clone(&view.shared);
     let radio=div().w(px(18.)).h(px(18.)).rounded(px(9.)).border_1()
         .border_color(if selected{t::accent()}else{t::hairline_bright()})
         .flex().items_center().justify_center()
         .child(if selected{div().w(px(10.)).h(px(10.)).rounded(px(5.)).bg(t::accent()).into_any_element()}else{div().into_any_element()});
-    let mut tile=div().id(SharedString::from(format!("music-layout-{value}"))).flex_1().min_w_0().flex().flex_col().gap_2().p(px(10.)).rounded(px(14.))
+    let mut tile=div().id(SharedString::from(format!("music-layout-{value}"))).flex_1().min_w_0().flex().flex_col().gap_1().p(px(12.)).rounded(px(12.))
         .border_1().border_color(if selected{t::accent()}else{t::hairline()})
         .bg(if selected{t::row_hover()}else{t::base()})
-        .cursor_pointer().child(canvas(|_,_,_|{},move |bounds,_,window,_|paint_music_thumb(bounds,window,layout)).w_full().h(px(150.)))
+        .cursor_pointer()
         .child(div().flex().items_center().justify_between().gap_2()
             .child(div().min_w_0().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(t::text()).child(title.to_owned()))
             .child(radio))
-        .child(div().text_size(px(12.)).text_color(t::text_dim()).child(detail.to_owned()))
+        .child(div().text_size(px(11.5)).text_color(t::text_dim()).child(detail.to_owned()))
         .on_click(cx.listener(move |view,_,window,cx|{
             let _=send(&shared,"MusicExpandedLayout",value,cx);
             window.focus(&view.music_focus,cx);cx.notify();
@@ -1322,15 +1330,15 @@ fn music_layout_option(value: &'static str, title: &'static str, detail: &'stati
     tile.into_any_element()
 }
 
-fn paint_music_thumb(bounds:Bounds<Pixels>,window:&mut Window,layout:u8){music_preview::thumbnail(bounds,window,layout);}
-
 /// 灵动岛 owns the capsule itself: when it appears, how it looks, what feeds it, and the way into
 /// the tool pages. Music and lyric preferences live here because only the capsule renders them.
 fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> Vec<AnyElement> {
     let mut sections: Vec<AnyElement> = Vec::new();
     sections.push(section_group("音乐卡片", None, vec![
-        segmented_row("island-material","IslandMaterial","展开卡片材质","经典保留纯色平面；亚克力使用磨砂与细噪点；液态玻璃使用透镜折射、柔和散射与反光边缘；封面色彩仍由莫奈取色。默认亚克力。",&[("Classic","经典"),("Acrylic","亚克力"),("LiquidGlass","液态玻璃")],setting_str(state,"IslandMaterial","Acrylic"),cx),
-        music_layout_row(state, view, cx)
+        mini_mode::material(state,cx),
+        mini_mode::row(state,view,cx),
+        mini_mode::capsule_material(state,view,cx),
+        mini_mode::layout(state,view,cx)
     ], cx));
     sections.push(section_group("系统状态提示", None, vec![
         toggle_row("SystemStateHintsEnabled","系统状态提示","统一提醒大写锁定、小键盘锁定、麦克风静音和触控板状态。",flag(state,"SystemStateHintsEnabled",true),view,cx),
@@ -1370,7 +1378,8 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
         }
     }
     sections.push(section_group("配色", None, palette, cx));
-    sections.push(section_group("交互", None, vec![
+    let mini=setting_str(state,"IslandSizeMode","Classic")=="Mini";
+    let mut interaction=vec![
         button_row("gesture-tutorial","手势教程","跟着动画了解展开、切换与隐藏。","查看教程",cx,|v,cx|{v.tutorial_epoch+=1;v.tutorial_recovery=0;v.tutorial_step=Some(0);cx.notify();}),
         toggle_row("HoverExpand", "悬停展开", "鼠标经过时展开当前组件。", flag(state, "HoverExpand", false), view, cx),
         toggle_row("ClickAnywhereExpand", "点击任意区域展开", "展开当前选中的组件。", flag(state, "ClickAnywhereExpand", true), view, cx),
@@ -1378,7 +1387,9 @@ fn island_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
         toggle_row("SwipeActivities", "左右滑动胶囊切换", "按住收起胶囊或展开卡片左右拖动切换组件。", flag(state, "SwipeActivities", true), view, cx),
         toggle_row("Floating", "自由悬浮", "允许移动灵动岛位置。", flag(state, "Floating", false), view, cx),
         toggle_row("MusicClickOpenApp", "点击封面或歌名打开播放器", "仅影响音乐卡片。", flag(state, "MusicClickOpenApp", false), view, cx),
-    ], cx));
+    ];
+    if mini{interaction=vec![toggle_row("SwipeActivities","横向滑动切换","在细条或卡片空白处左右滑动切换组件。",flag(state,"SwipeActivities",true),view,cx),button_row("gesture-tutorial-mini","手势教程","Mini 点击展开，左右滑动切换组件，上滑隐藏。","查看教程",cx,|v,cx|{v.tutorial_epoch+=1;v.tutorial_step=Some(0);cx.notify();}),toggle_row("SwipeUpHide","上拖隐藏","拖动细条或卡片空白处向上隐藏；托盘菜单可找回。",flag(state,"SwipeUpHide",true),view,cx)];}
+    sections.push(section_group("交互",None,interaction,cx));
     let position = state["position"].as_f64().unwrap_or(0.);
     sections.push(section_group("歌词与同步", None, vec![
         info_row("当前来源", text(state, "lyricSource", "等待获取"), text(state, "timeline", "等待播放器"), view, cx),
@@ -1507,7 +1518,7 @@ fn about_page_rows(state: &Value, view: &SettingsApp, cx: &mut Context<SettingsA
     let _ = state;
     vec![
         section_group("版本", None, vec![
-            info_row(&format!("DotIsle · 点屿 {}", env!("CARGO_PKG_VERSION")), "原生胶囊 · GPUI 控制中心 · Rust 后台", "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。", view, cx),
+            info_row(&format!("DotIsle · 点屿 {}", DISPLAY_VERSION), "原生胶囊 · GPUI 控制中心 · Rust 后台", "内置完整 Noto Sans SC 与 Noto Sans JP，均采用 SIL OFL 1.1 许可。", view, cx),
             toggle_row("AutoCheckUpdatesEnabled","自动检查更新","默认开启，只检查并在灵动岛提醒；下载和安装由你确认。",flag(state,"AutoCheckUpdatesEnabled",true),view,cx),
             info_row("更新状态",state["softwareUpdate"]["phase"].as_str().unwrap_or("idle"),state["softwareUpdate"]["message"].as_str().unwrap_or("发现新版时将在灵动岛提醒。"),view,cx),
             action_row("checkUpdate", "在线更新", "同时请求国内源和 GitHub，检查最新正式版本。", "检查更新", view, cx),
@@ -1945,7 +1956,7 @@ fn button_row(
                 .py_2()
                 .rounded(px(8.0))
                 .cursor_pointer()
-                .bg(t::surface_hi())
+                .bg(t::field())
                 .border_1()
                 .border_color(t::hairline())
                 .text_size(px(12.0))
@@ -2090,9 +2101,9 @@ fn segmented_row(
                         .py(px(6.0))
                         .rounded(px(8.0))
                         .cursor_pointer()
-                        .bg(motion::blend_color(phase, t::field(), t::surface()))
+                        .bg(motion::blend_color(phase, transparent_black().into(), t::accent()))
                         .text_size(px(12.5))
-                        .text_color(motion::blend_color(phase, t::text_dim(), t::text()))
+                        .text_color(motion::blend_color(phase, t::text_dim(), t::on_accent()))
                         .font_weight(if lift > 0.5 { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                         .shadow(vec![BoxShadow::new(px(0.0), px(1.0), t::shadow().opacity(lift).into()).blur_radius(px(2.0))])
                         .active(|style| style.opacity(0.72))
@@ -2370,7 +2381,6 @@ fn action_row(
 ) -> AnyElement {
     let shared = Rc::clone(&view.shared);
     card(SharedString::from(format!("action-{command}")), title, detail)
-        .bg(t::surface())
         .child(
             div()
                 .id(SharedString::from(format!("run-{command}")))
@@ -2378,7 +2388,7 @@ fn action_row(
                 .py_2()
                 .rounded(px(8.0))
                 .cursor_pointer()
-                .bg(t::surface_hi())
+                .bg(t::field())
                 .border_1()
                 .border_color(t::hairline())
                 .text_size(px(12.0))
@@ -2522,7 +2532,7 @@ fn row_wash(row: Stateful<Div>, liveness: f32, interactive: bool) -> Stateful<Di
     let press = if interactive { motion::sink(liveness) } else { 0.0 };
     row.relative().rounded_t(px(if row_edges::current().0 { PANEL_RADIUS } else { 0. }))
         .rounded_b(px(if row_edges::current().1 { PANEL_RADIUS } else { 0. }))
-        .bg(motion::mix(press, motion::mix(wash, t::surface(), t::row_hover()), t::surface_hi()))
+        .bg(motion::mix(press, t::row_hover().opacity(wash), t::surface_hi()))
         .child(accent_bar(liveness))
 }
 
@@ -3681,7 +3691,7 @@ fn run_smoke(cx: &mut App, window: WindowHandle<SettingsApp>, directory: PathBuf
         };
         let connected = pipe::request("state", Value::Null).is_ok_and(|value| value["success"] == json!(true));
         let report = json!({
-            "success": t::accent_regression()&&connected&&sound_selection["success"]==true&&material_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with(env!("CARGO_PKG_VERSION"))&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"accentContrastRegression":t::accent_regression(),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"materialSelection":material_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
+            "success": t::accent_regression()&&connected&&sound_selection["success"]==true&&material_selection["success"]==true&&picker_regression.unwrap_or(true)&&whitelist_regression&&settings_tabs_regression&&todo_regression&&shared_nav_regression&&drawer_walk&&scroll_regression&&feature_regression&&clock_regression&&tutorial::regression()&&row_edges::regression()&&changelog::entries().first().is_some_and(|entry|entry.title.ends_with(DISPLAY_VERSION)&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"changelogSummaryRegression":changelog::entries().first().is_some_and(|entry|entry.title.ends_with(DISPLAY_VERSION)&&entry.body.lines().count()<=5&&entry.body.chars().count()<300),"accentContrastRegression":t::accent_regression(),"rowEdgesRegression":row_edges::regression(),"tutorialRegression":tutorial::regression(),"digitalClockRegression":clock_regression,"soundSelection":sound_selection,"materialSelection":material_selection,"whitelistExpandCollapse":whitelist_regression,"pickerRegression":picker_regression,"settingsTabs":settings_tabs_regression,"todoRegression":todo_regression,"sharedSettingsNav":shared_nav_regression,"drawerWalk":drawer_walk,"scrollPerPage":scroll_regression,"featureRegression":feature_regression,
             "pages": Route::ALL.len(),
             "settings": "GPUI",
             "ipc": "Rust",

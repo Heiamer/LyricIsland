@@ -100,3 +100,9 @@ https://github.com/Aiving/material-colors · 0.4.2 · MIT OR Apache-2.0。它是
 ## Inno Setup（安装向导）
 
 安装器由 Inno Setup 6.7.3 编译，许可见 licenses/Inno-Setup-License.txt。
+
+## liquidDX11 折射与模糊着色器
+
+来源：https://github.com/VMonoShiki/ImGui ，`examples/example_win32_directx11/src/glass/shaders.h`。
+
+MIT License，Copyright (c) 2026 poncipp (https://github.com/Pondot)。移植并修改为点屿 Direct3D 11 / Direct2D 渲染器使用；仅采用折射与模糊 HLSL，不包含上游字体或 ImGui。许可全文见 `licenses/liquidDX11-MIT.txt`。

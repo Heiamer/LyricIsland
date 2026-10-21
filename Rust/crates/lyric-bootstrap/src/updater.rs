@@ -326,7 +326,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let result = (|| -> Result<()> {
         if !matches!(args.len(), 6 | 8 | 10) { return Err(Error("更新参数无效".into())); }
         let version = args[0].clone();
-        if !Regex::new(r"^\d+\.\d+(\.\d+)?$").unwrap().is_match(&version) { return Err(Error("版本号无效".into())); }
+        if !Regex::new(r"^\d+\.\d+(\.\d+)?(?:-?mini)?$").unwrap().is_match(&version) { return Err(Error("版本号无效".into())); }
         let target_path = paths::full_path(&args[1])?;
         let data_path = paths::full_path(&args[2])?;
         let pid: i32 = args[3].parse().map_err(|_| Error("更新参数无效".into()))?;

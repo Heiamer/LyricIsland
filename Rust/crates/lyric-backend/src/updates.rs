@@ -2,10 +2,11 @@
 use serde_json::{json,Value};
 use std::time::Duration;
 pub const RELEASES:&str="https://github.com/Heiamer/LyricIsland/releases/latest";
-fn version(input:&str)->Option<[u32;3]>{
-    let parts=input.strip_prefix('v').unwrap_or(input).split('.').collect::<Vec<_>>();
+fn version(input:&str)->Option<[u32;4]>{
+    let input=input.strip_prefix('v').unwrap_or(input);let mini=input.ends_with("mini");let input=if mini{input.strip_suffix("mini").unwrap().trim_end_matches('-')}else{input};
+    let parts=input.split('.').collect::<Vec<_>>();
     if !(2..=3).contains(&parts.len()){return None}
-    let mut out=[0;3];for (i,p) in parts.iter().enumerate(){if p.is_empty()||!p.bytes().all(|c|c.is_ascii_digit()){return None}out[i]=p.parse().ok()?;}Some(out)
+    let mut out=[0;4];out[3]=if mini{1}else{0};for (i,p) in parts.iter().enumerate(){if p.is_empty()||!p.bytes().all(|c|c.is_ascii_digit()){return None}out[i]=p.parse().ok()?;}Some(out)
 }
 pub fn describe(release:&Value,current:&str)->Result<Value,String>{
     if release["draft"]==true||release["prerelease"]==true{return Err("未找到正式更新".into())}
@@ -23,7 +24,7 @@ fn check_github()->Result<Value,String>{let ctx=crate::http::RequestContext::new
 /// immediately; a no-update response waits for the other source before declaring up to date.
 pub fn check()->Result<Value,String>{let config=sources();let repo=config["giteeRepository"].as_str().unwrap_or("").to_owned();let (tx,rx)=std::sync::mpsc::channel();let mut count=1;if !repo.is_empty(){let tx=tx.clone();count+=1;std::thread::spawn(move||{let _=tx.send(("Gitee 国内源",check_gitee(&repo)));});}let github_tx=tx.clone();std::thread::spawn(move||{let _=github_tx.send(("GitHub",check_github()));});drop(tx);let mut available=None;let mut errors=vec![];for _ in 0..count{match rx.recv_timeout(Duration::from_secs(22)){Ok((source,Ok(mut result)))=>{let message=result["message"].as_str().unwrap_or("").to_owned();result["message"]=json!(format!("{message} · {source}"));if result["newer"]==true{return Ok(result)}available=Some(result);},Ok((source,Err(e)))=>errors.push(format!("{source}：{e}")),Err(_)=>{errors.push("其他更新源请求超时".into());break}}}available.ok_or_else(||format!("检查更新失败。{}。请检查网络或系统代理。",errors.join("；")))}
 fn page_release(html:&str)->Result<Value,String>{
-    let pattern=regex::Regex::new(r#"<meta\s+property="og:url"\s+content="(?:https://github\.com)?/Heiamer/LyricIsland/releases/tag/(v?[0-9]+\.[0-9]+(?:\.[0-9]+)?)""#).unwrap();
+    let pattern=regex::Regex::new(r#"<meta\s+property="og:url"\s+content="(?:https://github\.com)?/Heiamer/LyricIsland/releases/tag/(v?[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-?mini)?)""#).unwrap();
     let tag=pattern.captures(html).and_then(|c|c.get(1)).ok_or("GitHub 页面未提供正式版本号，请稍后重试。")?.as_str();
     Ok(json!({"tag_name":tag}))
 }
@@ -61,4 +62,8 @@ pub fn launch_candidate(release:&Value,base:&std::path::Path,data:&std::path::Pa
  let temp=std::env::temp_dir().join(format!("DotIsle.UpdateHelper.{}",job.replace(['{','}','-'],"")));std::fs::create_dir_all(&temp).map_err(|e|e.to_string())?;
  let helper=temp.join("LyricIsland.Updater.exe");std::fs::copy(base.join("LyricIsland.Updater.exe"),&helper).map_err(|e|e.to_string())?;
  std::process::Command::new(helper).arg(version).arg(base).arg(data).arg(pid.to_string()).arg("0").arg(pipe).arg(release["manifestUrl"].as_str().unwrap_or("")).arg(release["zipUrl"].as_str().unwrap_or("")).arg(job).arg(nonce).spawn().map_err(|e|e.to_string())?;Ok(())
+}
+
+#[cfg(test)]mod mini_version_tests{use super::*;
+#[test]fn mini_version_orders_between_base_and_next_patch(){assert!(version("2.1.5mini")>version("2.1.5"));assert_eq!(version("v2.1.5mini"),version("2.1.5-mini"));assert!(version("2.1.6")>version("2.1.5mini"));assert!(version("2.1.5mini/evil").is_none());assert!(version("2.1.5-beta").is_none());}
 }

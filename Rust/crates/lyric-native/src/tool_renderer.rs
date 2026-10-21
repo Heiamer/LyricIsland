@@ -1,7 +1,7 @@
 impl Renderer{
     unsafe fn tool_compact(&mut self,s:&Scene<'_>,p:&crate::activities::Panel)->Result<()>{
         if p.kind==3{return self.update_compact(s,p)}
-        let c=s.layout.capsule;let cy=c.y+c.h/2.;let accent=p.accent;self.brush.SetColor(&color(accent));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(c.x+22.,cy),radiusX:10.,radiusY:10.},&self.brush,1.6,None);
+        let c=s.layout.capsule;let cy=c.y+c.h/2.;let accent=s.tool_theme.fill;self.brush.SetColor(&color(accent));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(c.x+22.,cy),radiusX:10.,radiusY:10.},&self.brush,1.6,None);
         if p.kind==1{self.line((c.x+22.,cy),(c.x+22.,cy-6.),accent,1.5);self.line((c.x+22.,cy),(c.x+27.,cy+2.),accent,1.5);}else{self.line((c.x+17.,cy),(c.x+21.,cy+4.),accent,1.6);self.line((c.x+21.,cy+4.),(c.x+28.,cy-4.),accent,1.6);}
         self.text_family(&p.value,Rect::new(c.x+42.,cy-17.,c.w-72.,19.),14.,600,0xfff4f6f8,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(19.))?;
         self.text_family(&p.title,Rect::new(c.x+42.,cy+3.,c.w-72.,13.),9.,400,accent,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(13.))?;
@@ -30,12 +30,12 @@ impl Renderer{
              if id==30{self.fill(r,12.,if pressed{s.tool_theme.pressed}else if hovered{s.tool_theme.hover}else{s.tool_theme.fill});}
              else{self.fill(r,10.,if pressed{0x22ffffff}else if hovered{0x14ffffff}else{0x08ffffff});}
              let label=if id==30{detail.primary.as_str()}else if id==31{"重置"}else{"设置"};
-             self.text_family(label,Rect::new(r.x,r.y+7.,r.w,18.),11.,if id==30{600}else{500},if id==30{s.tool_theme.ink}else{0xffbec7d1},"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(18.))?;
+             let glass=self.reading_glass;if id==30{self.reading_glass=false;}let result=self.text_family(label,Rect::new(r.x,r.y+7.,r.w,18.),11.,if id==30{600}else{500},if id==30{s.tool_theme.ink}else{0xffbec7d1},"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,Some(18.));self.reading_glass=glass;result?;
             }
         }Ok(())
     }
-    unsafe fn compact_view(&mut self,s:&Scene<'_>)->Result<()>{if let Some(p)=s.panel{self.tool_compact(s,p)}else{self.compact_content(s)}}
-    unsafe fn expanded_view(&mut self,s:&Scene<'_>)->Result<()>{if let Some(p)=s.panel{self.tool_expanded(s,p)}else{self.expanded_content(s)}}
+    unsafe fn compact_view(&mut self,s:&Scene<'_>)->Result<()>{if s.mini{return self.mini_compact(s)}if let Some(p)=s.panel{self.tool_compact(s,p)}else{self.compact_content(s)}}
+    unsafe fn expanded_view(&mut self,s:&Scene<'_>)->Result<()>{self.reading_glass=s.material==Material::LiquidGlass;let result=if s.mini{self.mini_expanded(s)}else if let Some(p)=s.panel{self.tool_expanded(s,p)}else{self.expanded_content(s)};self.reading_glass=false;result}
     unsafe fn satellite(&mut self,s:&Scene<'_>)->Result<()>{let r=s.layout.satellite();self.fill(r,r.h/2.,0xff101419);self.brush.SetColor(&color(0x38ffffff));self.dc.DrawRoundedRectangle(&rounded(r,r.h/2.),&self.brush,1.,None);let cx=r.x+r.w/2.;let cy=r.y+r.h/2.;let c=0xffbac9d8;
         match s.auxiliary_kind{1=>{self.brush.SetColor(&color(c));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(cx,cy),radiusX:8.,radiusY:8.},&self.brush,1.4,None);self.line((cx,cy),(cx,cy-5.),c,1.4);self.line((cx,cy),(cx+4.,cy+2.),c,1.4);},2=>{self.line((cx-6.,cy),(cx-1.,cy+5.),c,1.8);self.line((cx-1.,cy+5.),(cx+7.,cy-5.),c,1.8);},_=>{for (i,h) in [8.,14.,10.].iter().enumerate(){self.fill(Rect::new(cx-6.+i as f64*5.,cy-h/2.,2.,*h),1.,c);}}}
         Ok(())
@@ -127,7 +127,7 @@ impl Renderer{unsafe fn device_icon(&mut self,r:Rect,kind:&str)->Result<()>{
 
 impl Renderer{
  unsafe fn update_ring(&mut self,x:f64,y:f64,radius:f64,progress:f64,time:f64,animate:bool,accent:u32)->Result<()>{
-  self.brush.SetColor(&color(0xff304339));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(x,y),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);
+  self.brush.SetColor(&color(0xff2a3851));self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(x,y),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);
   let fraction=if progress<0.{0.22}else{progress.clamp(0.,1.)};let start=if progress<0.&&animate{time/1200.*std::f64::consts::TAU}else{-std::f64::consts::FRAC_PI_2};
   self.brush.SetColor(&color(accent));
   if fraction>=0.9999{self.dc.DrawEllipse(&D2D1_ELLIPSE{point:point(x,y),radiusX:radius as f32,radiusY:radius as f32},&self.brush,3.,None);}else if fraction>0.{let end=start+fraction*std::f64::consts::TAU;let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;sink.BeginFigure(point(x+radius*start.cos(),y+radius*start.sin()),D2D1_FIGURE_BEGIN_HOLLOW);sink.AddArc(&D2D1_ARC_SEGMENT{point:point(x+radius*end.cos(),y+radius*end.sin()),size:D2D_SIZE_F{width:radius as f32,height:radius as f32},rotationAngle:0.,sweepDirection:D2D1_SWEEP_DIRECTION_CLOCKWISE,arcSize:if fraction>0.5{D2D1_ARC_SIZE_LARGE}else{D2D1_ARC_SIZE_SMALL}});sink.EndFigure(D2D1_FIGURE_END_OPEN);sink.Close()?;self.dc.DrawGeometry(&path,&self.brush,3.,None);}Ok(())

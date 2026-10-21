@@ -21,6 +21,7 @@ impl Resize{
  /// Whether either axis still has somewhere to go. At rest both values are
  /// snapped exactly onto their targets, so the redraw loop can stop asking for
  /// the motion settings on every idle frame.
+ pub fn target_mini(&mut self,width:f64,height:f64,animate:bool){self.target(width,32.,animate);self.height_target=height.clamp(14.,24.);if !animate{self.height=self.height_target;}}
  pub fn moving(&self)->bool{self.width!=self.width_target||self.height!=self.height_target}
  /// Advance both axes and report whether anything visible changed.
  pub fn tick(&mut self,dt:f64,expand_ms:f64)->bool{let dt=dt.clamp(0.,0.1);let omega=resize_omega(expand_ms);
@@ -62,3 +63,5 @@ pub fn capsule_height(font_size:f64,line_spacing:f64,scale:f64,double:bool)->f64
  #[test]fn resize_settles_inside_the_longest_lyric_pause(){let mut r=Resize::new(140.,40.);r.target(460.,51.,true);let mut elapsed=0.;while elapsed<1.2&&((r.width-r.width_target).abs()>=0.05||(r.height-r.height_target).abs()>=0.05){r.tick(1./120.,1200.);elapsed+=1./120.;}assert!(elapsed<0.95,"resize still moving after {elapsed}s");}
  #[test]fn capsule_grows_only_when_two_lines_need_the_room(){assert_eq!(capsule_height(12.5,1.448,1.,false),40.);assert_eq!(capsule_height(12.5,1.448,1.,true),40.);assert_eq!(capsule_height(17.,1.448,1.,false),40.);assert!(capsule_height(17.,1.448,1.,true)>=45.);assert!((capsule_height(17.,1.448,2.,true)-capsule_height(17.,1.448,1.,true)).abs()<=1.);}
 }
+
+#[cfg(test)]mod mini_resize_tests{use super::*;#[test]fn mini_resize_can_settle_at_half_height_without_changing_classic_minimum(){let mut r=Resize::new(260.,40.);r.target_mini(260.,20.,true);for _ in 0..240{r.tick(1./120.,480.);}assert_eq!(r.height,20.);r.target(260.,10.,false);assert_eq!(r.height,32.);r.target_mini(260.,20.,false);assert_eq!(r.height,20.);}}

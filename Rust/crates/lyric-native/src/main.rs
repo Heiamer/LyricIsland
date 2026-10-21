@@ -3,7 +3,8 @@
 // budget is not enough for it once the 1.3 keys are included.
 #![recursion_limit = "256"]
 mod bottom_osd;mod frame_pacing;mod update_activity;mod activation;mod notification_store;mod cover_color;
-mod liquid_glass;
+mod liquid_glass;mod mini_contrast;mod expanded_backdrop;mod native_glass;
+pub const DISPLAY_VERSION:&str="2.1.6mini";
 mod theme_accent;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
 mod devices;mod osd;mod timers;mod activities;
 mod gestures;mod compact;mod sound;mod todos;mod history;mod quick_reminder;mod app_rules;mod foreground;mod diagnostics;
@@ -38,9 +39,13 @@ fn hotkey_code(name:&str)->Option<(HOT_KEY_MODIFIERS,u32)>{
 fn awake_ms()->u64{let mut value=0u64;unsafe{let _=QueryUnbiasedInterruptTime(&mut value);}(value/10_000)as u64}
 static REQUESTS:OnceLock<Mutex<Vec<Pending>>>=OnceLock::new();static WINDOW:OnceLock<isize>=OnceLock::new();
 fn inside_round_rect(r:Rect,radius:f64,x:f64,y:f64)->bool{
-    if !r.contains(x,y){return false}let radius=radius.min(r.w/2.).min(r.h/2.).max(0.);
-    let cx=x.clamp(r.x+radius,r.x+r.w-radius);let cy=y.clamp(r.y+radius,r.y+r.h-radius);
-    (x-cx).powi(2)+(y-cy).powi(2)<=radius*radius
+    if ![r.x,r.y,r.w,r.h,radius,x,y].iter().all(|v|v.is_finite())||!r.contains(x,y){return false}
+    let radius=radius.min(r.w/2.).min(r.h/2.).max(0.);
+    // Work in local coordinates. At half-height, separately rounded absolute
+    // clamp endpoints can reverse by one ULP during a morph and panic in f64::clamp.
+    let dx=(((x-r.x)-r.w/2.).abs()-(r.w/2.-radius).max(0.)).max(0.);
+    let dy=(((y-r.y)-r.h/2.).abs()-(r.h/2.-radius).max(0.)).max(0.);
+    dx*dx+dy*dy<=radius*radius
 }
 /// "Appear when needed, retract once handled": decide whether the island must be
 /// present from what is asking for attention right now. A feature merely being
@@ -74,8 +79,13 @@ struct App {
     quick:Vec<QuickPreview>,quick_commits:Vec<(String,String)>,pending_action:Option<String>,templates:timers::Templates,
     rules:app_rules::Store,foreground:foreground::Watcher,usage_date:String,last_awake:u64,last_rules_checkpoint:Instant,
     lock_generation:u64,session_locked:bool,focus_resume:Option<FocusResume>,
-    bottom_osd:bottom_osd::Overlay,
+    mini_contrast:mini_contrast::Adaptive,bottom_osd:bottom_osd::Overlay,
     music_mix:f64,music_from:f64,music_start:Instant,
+    /// Last app notification that was queued, so a store that reports the same
+    /// message twice cannot make the banner open, close and open again.
+    last_notice:Option<(String,f64)>,
+    /// When the collapsed lyric last changed. Width retargets wait for it to settle.
+    compact_settle:Instant,
 }
 impl App {
     fn new(base:PathBuf,data:PathBuf,demo:bool)->Self{
@@ -99,7 +109,7 @@ impl App {
         let music_mix=layout::MusicLayout::from_setting(settings["MusicExpandedLayout"].as_str().unwrap_or("")).position();
         let mut layout=Layout::new(settings["CompactWidth"].as_f64().unwrap_or(260.));layout.card.h=layout::music_height(music_mix,settings["FontSize"].as_f64().unwrap_or(12.5));
         let updates=update_activity::Hub::new(&data);
-        Self{bottom_osd:bottom_osd::Overlay::new(),updates,update_return:"music".into(),update_until:None,banner:banner::Banner::default(),osd_banner:banner::Banner::default(),osd:osd::Hub::default(),pending_osd:0,notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout,settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_size,compact_key:String::new(),last_compact:now,todos,todo_now,last_schedule:now,history,last_history_prune:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,hide_drag:None,dismiss_offset:activities::Spring::default(),last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,manual_until:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.,music_mix,music_from:music_mix,music_start:now,quick:vec![],quick_commits:vec![],pending_action:None,templates,rules,foreground,usage_date,last_awake:awake_ms(),last_rules_checkpoint:now,lock_generation:0,session_locked:false,focus_resume:None}
+        Self{mini_contrast:Default::default(),bottom_osd:bottom_osd::Overlay::new(),updates,update_return:"music".into(),update_until:None,banner:banner::Banner::default(),osd_banner:banner::Banner::default(),osd:osd::Hub::default(),pending_osd:0,notification_preview:false,banner_todo:None,notification_listener,notification_state:json!({"access":"disabled","message":"通知提醒已关闭","apps":[]}),hwnd:HWND::default(),visual_hwnd:HWND::default(),input_region:None,dragging:None,renderer:None,base,data,layout,settings,backend,_server:None,snapshot,cover_version:0,demo,frame:Frame::hidden(options),transition:None,transition_start:now,sampled_ms:0.,expanded:false,held:false,hover:0,pressed:0,seeking:false,seek_fraction:0.,command_busy:Arc::new(std::sync::atomic::AtomicBool::new(false)),start:now,last_poll:now-Duration::from_secs(1),lyric:"打开播放器，开始一首音乐".into(),previous_lyric:String::new(),compact_secondary:String::new(),previous_compact_secondary:String::new(),lyric_start:now-Duration::from_secs(2),compact_size,compact_key:String::new(),last_compact:now,todos,todo_now,last_schedule:now,history,last_history_prune:now,queue:std::collections::VecDeque::new(),pending_page:None,devices:devices::Hub::default(),timers,selected:"music".into(),components:vec!["music".into()],panel:None,previous_panel:None,drag_panel:None,drag_target:String::new(),slide_outgoing:false,switching:false,slide:activities::Spring::default(),slide_direction:1.,swipe:None,hide_drag:None,dismiss_offset:activities::Spring::default(),last_timer:now,timer_fraction:0,last_checkpoint:now,cursor_inside:false,leave_at:None,last_left:false,user_hidden:false,display_wanted:demo,missing_since:None,manual_until:None,opacity:if demo{1.}else{0.},fade_from:0.,fade_to:if demo{1.}else{0.},fade_start:now,hide_at:None,dirty:true,settings_process:None,renderer_generation:0,render_frames:0,error:None,transparent:false,activity:motion::Activity::new(),cover_start:now-Duration::from_secs(1),progress:progress::PlaybackProgress::default(),outgoing_opacity:1.,outgoing_y:0.,music_mix,music_from:music_mix,music_start:now,last_notice:None,compact_settle:now,quick:vec![],quick_commits:vec![],pending_action:None,templates,rules,foreground,usage_date,last_awake:awake_ms(),last_rules_checkpoint:now,lock_generation:0,session_locked:false,focus_resume:None}
     }
     fn refresh_components(&mut self){
         let mut components=vec![];if self.updates.selectable(){components.push("update".into());}if self.demo||self.snapshot["track"].is_object(){components.push("music".to_string());}
@@ -145,6 +155,8 @@ impl App {
     fn apply_startup(&mut self)->std::result::Result<(),String>{
         shell::set_startup(self.flag("AutoStart",true),&self.startup_target().to_string_lossy(),&self.data.join("settings.json"),&self.settings,None)
     }
+    fn mini(&self)->bool{self.settings["IslandSizeMode"].as_str()==Some("Mini")}
+    fn card_height(&self)->f64{let h=if self.selected=="update"{264.}else if self.panel.is_some(){200.}else{layout::music_height(self.music_mix,self.settings["FontSize"].as_f64().unwrap_or(12.5))};if self.mini(){h*0.5+10.}else{h}}
     fn music_target(&self)->f64{layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")).position()}
     /// Height is part of the shared geometry, so the window keeps the taller host
     /// and only the card itself grows while the two layouts cross-fade.
@@ -157,7 +169,7 @@ impl App {
     fn shape(&self)->(Rect,f64){self.layout.morph_shape(self.frame.card_reveal,self.options().radius,self.flag("IslandFluidMotion",true))}
     fn options(&self)->Options{serde_json::from_value(self.settings["Motion"].clone()).unwrap_or_default()}
     unsafe fn position(&mut self)->Result<()> {
-        let base=self.compact_base();self.layout=Layout::new(base);self.layout.card.h=layout::music_height(self.music_mix,self.settings["FontSize"].as_f64().unwrap_or(12.5));self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
+        let base=self.compact_base();self.layout=Layout::new(base);if self.mini(){self.layout.card.w*=1.05;}self.layout.card.h=self.card_height();if (self.compact_size.height_target<30.)!=self.mini(){self.compact_size=compact::Resize::new(base,if self.mini(){14.}else{40.});}self.layout.capsule.h=self.compact_size.height;self.layout.reserve_compact(self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).max(base)+64.);self.compact_key=String::new();
         let monitor=MonitorFromWindow(self.hwnd,MONITOR_DEFAULTTONEAREST);let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>()as u32,..Default::default()};let _=GetMonitorInfoW(monitor,&mut info);
         let dpi=GetDpiForWindow(self.hwnd).max(96)as f64;let scale=dpi/96.;let work=info.rcWork;let width=(self.layout.host.w*scale).ceil()as i32;let height=(self.layout.host.h*scale).ceil()as i32;
         let floating=self.flag("Floating",false);let center=if floating{self.settings["CenterX"].as_f64().unwrap_or(0.5)}else{0.5};
@@ -299,7 +311,7 @@ impl App {
     fn save(&mut self)->std::result::Result<(),String>{if self.demo{return Ok(())}io::save_settings(&self.data.join("settings.json"),&self.settings)}
     /// The collapsed second line: the translation when one exists, otherwise the
     /// next line for Chinese lyrics. Never invents an empty second row.
-    fn compact_secondary_for(&self)->String{compact::secondary(&self.snapshot,self.flag("CompactTranslation",true),self.flag("ChineseTwoLine",false)).to_string()}
+    fn compact_secondary_for(&self)->String{if self.mini(){return String::new()}compact::secondary(&self.snapshot,self.flag("CompactTranslation",true),self.flag("ChineseTwoLine",false)).to_string()}
     fn compact_base(&self)->f64{self.settings["CompactWidth"].as_f64().unwrap_or(260.).clamp(140.,480.)}
     /// Size the collapsed capsule for the current lyric. The host surface stays
     /// reserved at the widest allowed width, so the window and the expanded card
@@ -307,7 +319,7 @@ impl App {
     unsafe fn update_compact_layout(&mut self)->Result<()>{
         let base=self.compact_base();let font=self.settings["FontSize"].as_f64().unwrap_or(12.5);let double=!self.compact_secondary.is_empty();
         let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;
-        let height=self.renderer.as_ref().map(|r|r.compact_height(font,double,scale)).unwrap_or(40.);
+        let height=if self.mini(){14.}else{self.renderer.as_ref().map(|r|r.compact_height(font,double,scale)).unwrap_or(40.)};
         let auto=self.flag("AutoCompactWidth",false);
         let target=if self.selected!="music"{260.}else if auto{
             let secondary_size=(font*0.78).clamp(9.,11.5);let mut widest=0.;
@@ -316,7 +328,7 @@ impl App {
                 if double{widest=widest.max(r.measure_line(&self.compact_secondary,secondary_size)?);}
             }
             // Cover, activity bars and their gaps consume 76 layout units.
-            (widest+76.).clamp(140.,self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).clamp(140.,480.))
+            (widest+if self.mini(){52.}else{76.}).clamp(140.,self.settings["AutoCompactMaxWidth"].as_f64().unwrap_or(420.).clamp(140.,480.))
         }else{base};
         // Land the edges on the physical pixel grid so the final capsule is crisp.
         // Round up, never down: a hair narrower than the measured line would make
@@ -326,13 +338,21 @@ impl App {
         let mut target=round_up(target);
         if auto&&target<self.compact_size.width_target&&self.compact_size.width_target-target<1.0{target=self.compact_size.width_target;}
         let height=round_up(height);
-        self.compact_size.target(target,height,self.flag("Animation",true));
+        if self.mini(){self.compact_size.target_mini(target,height,self.flag("Animation",true));}else{self.compact_size.target(target,height,self.flag("Animation",true));}
         self.layout.set_compact(self.compact_size.width,self.compact_size.height);Ok(())
     }
     /// Queue a banner. Reminders are never dropped silently: when the queue is
     /// full an older notification gives way, and a notification is refused
     /// rather than evicting a pending reminder.
     fn enqueue(&mut self,q:Queued){
+        if q.todo.is_none(){
+            let signature=format!("{}|{}|{}",q.notice.app_id,q.notice.title,q.notice.body);
+            let now=self.start.elapsed().as_secs_f64();
+            let showing=self.banner.notice.as_ref().map(|n|format!("{}|{}|{}",n.app_id,n.title,n.body));
+            if showing.as_deref()==Some(signature.as_str()){return}
+            if self.last_notice.as_ref().is_some_and(|(seen,at)|*seen==signature&&now-*at<6.){return}
+            self.last_notice=Some((signature,now));
+        }
         let limit=if q.todo.is_some(){32}else{8};
         while self.queue.len()>=limit{match self.queue.iter().position(|e|e.todo.is_none()){Some(i)=>{self.queue.remove(i);},None=>{if q.todo.is_none(){return}break}}}
         self.queue.push_back(q);
@@ -352,11 +372,11 @@ impl App {
         let version=self.snapshot["coverVersion"].as_u64().unwrap_or(0);
         if version!=self.cover_version{self.cover_start=Instant::now();self.cover_version=version;let cover=self.snapshot["cover"].as_str().and_then(|s|base64::engine::general_purpose::STANDARD.decode(s).ok());if let Some(r)=&mut self.renderer{if let Err(e)=unsafe{r.set_cover(cover.as_deref())}{self.error=Some(e.to_string());}else if cover.is_some(){let cache=self.data.join("Cache/MusicPreview");let _=std::fs::create_dir_all(&cache);let _=r.preview_art(&cache.join(format!("cover-{version}.png")));if let Ok(entries)=std::fs::read_dir(&cache){for entry in entries.flatten(){let path=entry.path();if path.file_stem().and_then(|v|v.to_str()).and_then(|v|v.strip_prefix("cover-")).and_then(|v|v.parse::<u64>().ok()).is_some_and(|v|v.saturating_add(2)<version){let _=std::fs::remove_file(path);}}}}}}
         let lyric=self.snapshot["frame"]["currentLine"].as_str().filter(|s|!s.is_empty()).unwrap_or("打开播放器，开始一首音乐").to_string();
-        if lyric!=self.lyric{let t=(self.lyric_start.elapsed().as_secs_f64()/0.18).min(1.);self.outgoing_opacity=t;self.outgoing_y=4.*(1.-t).powi(3);self.previous_lyric=std::mem::replace(&mut self.lyric,lyric);self.lyric_start=Instant::now();}
+        if lyric!=self.lyric{self.compact_settle=Instant::now();let t=(self.lyric_start.elapsed().as_secs_f64()/0.18).min(1.);self.outgoing_opacity=t;self.outgoing_y=4.*(1.-t).powi(3);self.previous_lyric=std::mem::replace(&mut self.lyric,lyric);self.lyric_start=Instant::now();}
         // A translation can arrive a beat after its line, so the second row is
         // tracked independently of the first.
         let compact_secondary=self.compact_secondary_for();
-        if compact_secondary!=self.compact_secondary{self.previous_compact_secondary=std::mem::replace(&mut self.compact_secondary,compact_secondary);self.dirty=true;}
+        if compact_secondary!=self.compact_secondary{self.compact_settle=Instant::now();self.previous_compact_secondary=std::mem::replace(&mut self.compact_secondary,compact_secondary);self.dirty=true;}
         let playing=self.snapshot["isPlaying"]==true;
         if playing!=self.activity.playing{self.activity.retarget(playing,self.start.elapsed().as_secs_f64()*1000.,self.flag("Animation",true));}
         let duration=self.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);
@@ -379,9 +399,13 @@ impl App {
     fn hit(&self,x:f64,y:f64)->i32{
         if self.opacity<0.01{return -1}
         if self.banner.visible(){let (r,radius,_)=self.banner.presentation(self.start.elapsed().as_secs_f64());if !inside_round_rect(r,radius,x,y){return -1}return if Rect::new(r.x+r.w-32.,r.y+6.,26.,26.).contains(x,y){11}else{12}}
-        if !self.expanded&&self.components.len()>1&&self.layout.satellite().contains(x,y){return 20}
+        if !self.mini()&&!self.expanded&&self.components.len()>1&&self.layout.satellite().contains(x,y){return 20}
         let (shape,radius)=self.shape();
         if !inside_round_rect(shape,radius,x,y){return -1}
+        if self.mini(){
+            if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let ty=shape.y+(shape.h-self.layout.card.h*scale)/2.;let x=(x-tx)/scale;let y=(y-ty)/scale-self.frame.content_offset_y;return layout::mini_hit(self.layout.card.w,self.layout.card.h,self.panel.as_ref(),x,y)}
+            return 0
+        }
         if self.selected!="music"{
             if self.expanded&&self.frame.card_reveal>0.7{let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let x=(x-shape.x)/scale;let y=(y-shape.y)/scale-self.frame.content_offset_y;let w=self.layout.card.w;if self.selected=="update"{if Rect::new(24.,190.,w-48.,42.).contains(x,y){return 50}if Rect::new(w-48.,14.,30.,30.).contains(x,y){return 51}}else if self.selected=="todos"{for(i,r)in layout::todo_rows(w,self.panel.as_ref().map(|p|p.tasks.len()).unwrap_or(0)).enumerate(){if r.contains(x,y){return 40+i as i32;}}if layout::todo_footer(w).contains(x,y){return 7}}else{for(id,rect)in layout::timer_buttons(w){if rect.contains(x,y){return id}}}}
             return 0
@@ -402,7 +426,7 @@ impl App {
         // animated contour. No alpha readback or cursor polling is required.
         let (r,radius)=if self.banner.visible(){let (r,radius,_)=self.banner.presentation(self.start.elapsed().as_secs_f64());(r,radius)}else{self.shape()};
         let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;
-        let satellite=if !self.expanded&&!self.banner.visible()&&self.components.len()>1{self.layout.satellite()}else{Rect::default()};
+        let satellite=if !self.mini()&&!self.expanded&&!self.banner.visible()&&self.components.len()>1{self.layout.satellite()}else{Rect::default()};
         let key=if self.opacity<0.01{[0;10]}else{[(r.x*scale).floor()as i32,(r.y*scale).floor()as i32,((r.x+r.w)*scale).ceil()as i32,((r.y+r.h)*scale).ceil()as i32,(radius*2.*scale).round()as i32,(radius*2.*scale).round()as i32,(satellite.x*scale)as i32,(satellite.y*scale)as i32,((satellite.x+satellite.w)*scale)as i32,((satellite.y+satellite.h)*scale)as i32]};
         if self.input_region==Some(key){return Ok(())}
         let region=if key[4]>0{CreateRoundRectRgn(key[0],key[1],key[2],key[3],key[4],key[5])}else{CreateRectRgn(key[0],key[1],key[2],key[3])};
@@ -423,7 +447,7 @@ impl App {
                 else if self.flag("NotificationClickOpenApp",true){if let Some(n)=&self.banner.notice{if let Err(e)=activation::open(&n.app_id){self.error=Some(e);}}}
             }
             let (base,radius)=self.shape();self.banner.dismiss(base,radius,self.start.elapsed().as_secs_f64(),self.flag("Animation",true));},
-        0=>{if self.expanded{self.held=false;self.retarget(false)}else if self.flag("ClickAnywhereExpand",false){self.held=true;self.retarget(true)}},
+        0=>{if self.expanded{self.held=false;self.retarget(false)}else if self.mini()||self.flag("ClickAnywhereExpand",false){self.held=true;self.retarget(true)}},
         1|13=>{if self.flag("MusicClickOpenApp",false){if let Err(e)=activation::open(self.snapshot["sourceId"].as_str().unwrap_or("")){self.error=Some(e);}}else if id==1{self.held=!self.held;self.retarget(self.held)}},2=>{if self.flag("Floating",false){let mut cursor=POINT::default();let mut bounds=RECT::default();let _=GetCursorPos(&mut cursor);let _=GetWindowRect(self.hwnd,&mut bounds);self.dragging=Some((cursor,bounds));SetCapture(self.hwnd);}},
         3=>self.command("previous",0.),4=>{if self.demo{self.snapshot["isPlaying"]=json!(self.snapshot["isPlaying"]!=true)}else{self.command("toggle",0.)}},5=>self.command("next",0.),
         6=>{self.settings["Translation"]=json!(!self.flag("Translation",true));let _=self.save();},7=>{if self.selected=="todos"{self.show_settings_page("todos")}else if self.selected.starts_with("timer:"){self.show_settings_page("timers")}else{self.show_settings()}},
@@ -432,6 +456,9 @@ impl App {
     }
     fn update_seek(&mut self,x:f64){let (shape,_)=self.shape();let scale=(shape.w/self.layout.card.w).min(shape.h/self.layout.card.h);let tx=shape.x+(shape.w-self.layout.card.w*scale)/2.;let g=layout::music_geometry(self.layout.card.w,layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),self.music_mix,unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},self.settings["FontSize"].as_f64().unwrap_or(12.5));self.seek_fraction=((x-tx-g.track.x*scale)/(g.track.w*scale)).clamp(0.,1.);self.dirty=true;}
     fn progress_value(&self)->f64{self.progress.fraction(self.start.elapsed().as_secs_f64())}
+    /// The banner surface as it is being drawn, so a probe can prove the card does not
+    /// grow and shrink on its own while a message is on screen.
+    fn notification_geometry(&self)->Value{let(r,radius,mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());json!({"open":self.banner.open,"x":r.x,"y":r.y,"w":r.w,"h":r.h,"radius":radius,"mix":mix})}
     fn music_preview(&self)->Value{
         let s=self.scene();let (background,accent)=self.renderer.as_ref().map(|r|r.preview_palette()).unwrap_or((0x1b1f25,0xa9e6cd));
         let cover=self.data.join("Cache/MusicPreview").join(format!("cover-{}.png",self.cover_version));
@@ -445,7 +472,7 @@ impl App {
         let col=|k:&str,default:u32|self.settings[k].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).map(|v|0xff000000|v).unwrap_or(default);
         let (notice_rect,notice_radius,notice_mix)=self.banner.presentation(self.start.elapsed().as_secs_f64());
         let (osd_rect,osd_radius,osd_mix)=self.osd_banner.presentation(self.start.elapsed().as_secs_f64());
-        Scene{tool_theme:theme_accent::resolve(&self.settings),material:crate::renderer::Material::from_setting(self.settings["IslandMaterial"].as_str().unwrap_or("Acrylic")),fluid_motion:self.flag("IslandFluidMotion",true),drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe_offset(),lyric_cover_color:self.flag("LyricColorFromCover",true),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,osd:if self.banner.visible(){None}else{self.osd_banner.notice.as_ref()},osd_rect,osd_radius,osd_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),music_layout:layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),music_mix:self.music_mix,text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:activity.0,activity_opacity:activity.1,cover_opacity:1.,cover_age_ms:self.cover_start.elapsed().as_secs_f64()*1000.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
+        Scene{mini:self.mini(),classic_glass:self.settings["ClassicCapsuleMaterial"]=="LiquidGlass",mini_ink:self.mini_contrast.ink(),mini_outline:self.mini_contrast.outline(),tool_theme:theme_accent::resolve(&self.settings),material:crate::renderer::Material::from_setting(if self.mini(){self.settings["MiniMaterial"].as_str().unwrap_or("LiquidGlass")}else{self.settings["IslandMaterial"].as_str().unwrap_or("Acrylic")}),fluid_motion:self.flag("IslandFluidMotion",true),drag_panel:self.drag_panel.as_ref(),drag_active:self.swipe.is_some_and(|s|s.active),switch_outgoing:self.slide_outgoing,switch_direction:self.slide_direction,auxiliary_kind:self.components.iter().position(|c|c==&self.selected).and_then(|i|self.components.get((i+1)%self.components.len())).map(|s|if s=="todos"{2}else if s.starts_with("timer:"){1}else{0}).unwrap_or(0),panel:self.panel.as_ref(),previous_panel:self.previous_panel.as_ref(),component_count:self.components.len(),switching:self.switching,switch_offset:self.slide.value,swipe_offset:self.swipe_offset(),lyric_cover_color:self.flag("LyricColorFromCover",true),cover_background:self.flag("CoverBackground",true),demo:self.demo,animate:self.flag("Animation",true),notification:self.banner.notice.as_ref(),notification_rect:notice_rect,notification_radius:notice_radius,notification_mix:notice_mix,osd:if self.banner.visible(){None}else{self.osd_banner.notice.as_ref()},osd_rect,osd_radius,osd_mix,layout:self.layout,frame:self.frame,radius:self.options().radius,resizing:self.transition.is_some(),time_ms:self.start.elapsed().as_secs_f64()*1000.,lyric:&self.lyric,previous_lyric:&self.previous_lyric,compact_secondary:&self.compact_secondary,previous_compact_secondary:&self.previous_compact_secondary,lyric_age_ms:if self.flag("Animation",true){self.lyric_start.elapsed().as_secs_f64()*1000.}else{1000.},secondary:if self.flag("Translation",true){f["currentTranslation"].as_str().filter(|s|!s.is_empty()).or_else(||f["nextLine"].as_str()).unwrap_or("等待歌词")}else{f["nextLine"].as_str().unwrap_or("等待歌词")},title:track["title"].as_str().unwrap_or("暂无播放"),artist:track["artist"].as_str().unwrap_or("打开播放器，开始一首音乐"),playing:self.snapshot["isPlaying"]==true,highlight:if self.flag("WordHighlight",true){f["wordScanProgress"].as_f64().unwrap_or(0.).clamp(0.,1.)}else{0.},progress:if self.seeking{self.seek_fraction}else{self.progress_value()},elapsed:if self.seeking{self.seek_fraction*duration}else{elapsed},duration,font_size:self.settings["FontSize"].as_f64().unwrap_or(12.5),music_layout:layout::MusicLayout::from_setting(self.settings["MusicExpandedLayout"].as_str().unwrap_or("")),music_mix:self.music_mix,text_color:col("ExpandedTextColor",0xfff4f6f8),component_color:col("ExpandedComponentColor",0xffb1e8d1),progress_color:col("LyricProgressColor",0xffa9e6cd),hover:self.hover,pressed:self.pressed,opacity:self.opacity as f32,transparent:self.transparent,floating:!self.mini()&&self.flag("Floating",false),favorite_enabled:track["sourceApp"].as_str().is_some_and(|s|s.eq_ignore_ascii_case("Netease")),has_track:track.is_object(),layout_scale:unsafe{GetDpiForWindow(self.hwnd).max(96)as f64/96.},activity_scales:activity.0,activity_opacity:activity.1,cover_opacity:1.,cover_age_ms:self.cover_start.elapsed().as_secs_f64()*1000.,outgoing_opacity:self.outgoing_opacity,outgoing_y:self.outgoing_y}
     }
     unsafe fn draw(&mut self)->Result<()>{// Take the renderer to split immutable scene data from mutable graphics state.
         if let Some(mut r)=self.renderer.take(){let result=r.render(&self.scene(),true);self.renderer=Some(r);result?;self.render_frames+=1;}self.dirty=false;Ok(())
@@ -502,6 +529,11 @@ impl App {
     }
     unsafe fn tick(&mut self)->Result<()> {
         self.bottom_osd.tick()?;
+        let liquid=if self.mini(){self.settings["MiniMaterial"]=="LiquidGlass"}else{self.settings["IslandMaterial"]=="LiquidGlass"};
+        let black_capsule=!self.mini()&&self.settings["ClassicCapsuleMaterial"]=="LiquidGlass"&&self.frame.card_reveal<=0.05;
+        if (liquid&&self.frame.card_reveal>0.05||black_capsule)&&self.opacity>0.01&&!self.banner.visible()&&!self.osd_banner.visible(){self.dirty=true;}
+
+
         if self.updates.tick(self.flag("AutoCheckUpdatesEnabled",true),self.demo){self.dirty=true;}
         if self.updates.reminder{self.updates.reminder=false;if !self.flag("PauseNotifications",false){if self.selected!="update"{self.update_return=self.selected.clone();}self.refresh_components();self.select_component("update",1);self.update_until=Some(Instant::now()+Duration::from_secs(8));self.user_hidden=false;self.fade(1.);}}
         if self.update_until.is_some_and(|until|Instant::now()>until)&&!self.updates.busy()&&!self.held{self.update_until=None;let previous=self.update_return.clone();self.select_component(&previous,-1);self.manual_until=None;}
@@ -509,6 +541,10 @@ impl App {
         for event in self.devices.poll(&gates){let notice=event.notice();self.enqueue(Queued{notice:notice.clone(),todo:Some(format!("device:{}",event.key)),chime:true});self.record_history("device",&notice,None);}
         if self.flag("SystemStateHintsEnabled",true)&&!self.flag("PauseNotifications",false){for hint in self.osd.poll(true,true){self.show_osd(hint,false);}}else{self.osd.poll(false,false);}
         let now=Instant::now();let dt=now.duration_since(self.last_timer);self.last_timer=now;
+        let adaptive=self.mini()&&self.settings["MiniMaterial"].as_str()==Some("LiquidGlass")&&self.flag("MiniAutoContrast",true);
+        if !adaptive{self.mini_contrast.reset();}else if self.frame.card_reveal<0.05&&self.opacity>0.8&&!self.banner.visible()&&!self.osd_banner.visible(){self.mini_contrast.refresh(self.hwnd,self.layout.capsule);}
+        if self.mini_contrast.tick(dt.as_secs_f64(),self.flag("Animation",true)){self.dirty=true;}
+
         let before=self.dismiss_offset.value;
         if self.hide_drag.is_none(){if self.user_hidden&&self.opacity>0.001&&before<0.{self.dismiss_offset.set((before-dt.as_secs_f64()*180.).max(-150.));}else{self.dismiss_offset.tick(dt.as_secs_f64());}}
         if (before-self.dismiss_offset.value).abs()>0.01||self.hide_drag.is_some_and(|d|d.active){let mut rect=RECT::default();GetWindowRect(self.hwnd,&mut rect)?;let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;SetWindowPos(self.visual_hwnd,None,rect.left,rect.top+(self.dismiss_offset.value*scale).round()as i32,0,0,SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOSIZE)?;self.dirty=true;}
@@ -539,7 +575,7 @@ impl App {
         if let Some(t)=self.transition{self.sampled_ms=self.transition_start.elapsed().as_secs_f64()*1000.;self.frame=t.sample(self.sampled_ms);self.dirty=true;if self.sampled_ms>=t.duration_ms{self.transition=None;self.frame=t.end;}}
         let target=self.music_target();
         if (self.music_mix-target).abs()>0.0001{let t=if self.flag("Animation",true){(self.music_start.elapsed().as_secs_f64()/0.23).min(1.)}else{1.};let e=t*t*(3.-2.*t);self.music_mix=self.music_from+(target-self.music_from)*e;if t>=1.{self.music_mix=target;}self.dirty=true;}
-        let target_height=if self.selected=="update"{264.}else if self.panel.is_some(){200.}else{layout::music_height(self.music_mix,self.settings["FontSize"].as_f64().unwrap_or(12.5))};
+        let target_height=self.card_height();
         if (self.layout.card.h-target_height).abs()>0.01{let weight=if self.flag("Animation",true){1.-(-dt.as_secs_f64()*26.).exp()}else{1.};self.layout.card.h+=(target_height-self.layout.card.h)*weight;if (self.layout.card.h-target_height).abs()<0.1{self.layout.card.h=target_height;}self.dirty=true;}
         if !self.banner.visible()&&self.hide_at.is_some_and(|t|Instant::now()>=t){self.hide_at=None;self.fade(0.);}
         if (self.opacity-self.fade_to).abs()>0.00001{let t=if self.flag("Animation",true){(self.fade_start.elapsed().as_secs_f64()/0.2).min(1.)}else{1.};
@@ -551,12 +587,18 @@ impl App {
         let mut pt=POINT::default();let _=GetCursorPos(&mut pt);let mut local=pt;let _=ScreenToClient(self.hwnd,&mut local);let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;let x=local.x as f64/scale;let y=local.y as f64/scale;
         let hit=self.hit(x,y);let inside=hit>=0;
         if inside{if let Some(t)=self.manual_until.as_mut(){*t=Instant::now()+Duration::from_secs(6);}}
-        if !self.banner.visible()&&inside&&!self.cursor_inside{self.leave_at=None;if self.flag("HoverExpand",false){self.retarget(true)}}
+        if !self.banner.visible()&&inside&&!self.cursor_inside{self.leave_at=None;if !self.mini()&&self.flag("HoverExpand",false){self.retarget(true)}}
         if !inside&&self.cursor_inside&&!self.held{self.leave_at=Some(Instant::now());}
         if self.swipe.is_none()&&!self.banner.visible()&&self.leave_at.is_some_and(|t|t.elapsed()>=Duration::from_millis(1200)){self.leave_at=None;if !self.held{self.retarget(false)}}
         self.cursor_inside=inside;if self.hover!=hit{self.hover=hit;self.dirty=true;}
         let left=GetAsyncKeyState(VK_LBUTTON.0 as i32)<0;if !self.banner.visible()&&left&&!self.last_left&&!inside&&self.expanded{self.held=false;self.retarget(false)}self.last_left=left;
         if self.opacity>0.001&&(self.snapshot["isPlaying"]==true&&self.flag("Animation",true)||self.lyric_start.elapsed()<Duration::from_millis(220)||(self.expanded&&self.flag("Animation",true)&&self.cover_start.elapsed()<Duration::from_millis(300))){self.dirty=true;}
+        // A message waiting in the queue takes over the surface it already has. Closing
+        // first would morph the card back to the capsule and out again, which reads as the
+        // island growing and shrinking on its own.
+        if self.banner.visible()&&!self.queue.is_empty()&&!self.user_hidden&&!self.flag("PauseNotifications",false)&&self.banner.due(self.start.elapsed().as_secs_f64()){
+            if let Some(q)=self.queue.pop_front(){self.show_notice(q.notice,false,q.todo,q.chime);}
+        }
         if self.banner.visible(){
             let (r,rad)=self.shape();
             self.banner.tick(r,rad,self.start.elapsed().as_secs_f64(),inside,self.flag("Animation",true));self.dirty=true;
@@ -566,7 +608,10 @@ impl App {
         // Collapsed capsule: retarget only when an input actually changed, then
         // advance the spring. Measurement is cached inside the renderer.
         let compact_key=format!("{}|{}|{}|{}|{}|{}|{}|{}",self.selected,self.lyric,self.compact_secondary,self.settings["FontSize"],self.settings["CompactWidth"],self.flag("AutoCompactWidth",false),self.settings["AutoCompactMaxWidth"],self.flag("Animation",true));
-        if compact_key!=self.compact_key{self.compact_key=compact_key;if let Err(e)=self.update_compact_layout(){self.error=Some(e.to_string());}}
+        // A lyric that flickers (a player that drops its session for a moment, a store that
+        // reports the same line twice) must not resize the capsule twice. Wait for the key
+        // to hold still before measuring it again.
+        if compact_key!=self.compact_key&&self.compact_settle.elapsed()>=Duration::from_millis(140){self.compact_key=compact_key;if let Err(e)=self.update_compact_layout(){self.error=Some(e.to_string());}}
         let dt=self.last_compact.elapsed().as_secs_f64();self.last_compact=Instant::now();
         if self.compact_size.moving()&&self.compact_size.tick(dt,self.options().duration){self.layout.set_compact(self.compact_size.width,self.compact_size.height);self.dirty=true;}
         // Reminders are checked once a second, not per rendered frame.
@@ -583,8 +628,9 @@ impl App {
     unsafe fn request(&mut self,r:Value)->Value {
         if r["version"]!=1{return json!({"success":false,"message":"请求版本无效"})}let command=r["command"].as_str().unwrap_or("");
         match command {
-            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":env!("CARGO_PKG_VERSION"),"settings":self.settings,"softwareUpdate":self.updates.state,"dataDirectory":self.data.to_string_lossy(),"musicPreview":self.music_preview(),"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"osdVisible":self.osd_banner.visible()||self.bottom_osd.visible(),"bottomOsdVisible":self.bottom_osd.visible(),"systemState":self.osd.status(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"compactWidth":self.compact_size.width,"compactHeight":self.compact_size.height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components,"notificationHistory":self.history.list(),"historyError":self.history.error,"quickHotkey":self.settings["QuickReminderHotkey"],"pendingAction":self.pending_action,"sessionLocked":self.session_locked,"focusResume":self.focus_resume.as_ref().map(|r|json!({"generation":r.generation,"ids":r.ids,"prompted":r.prompted})),"templates":self.templates.list(),"workflowTemplateError":self.templates.error,"appRules":self.rules.list(&self.todo_now.date),"appRuleError":self.rules.error,"foreground":{"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable},"lockWatch":true})},
-            "updateTestPrepare" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{self.updates.nonce="integration-test-nonce".into();self.updates.job="integration-test-job".into();self.updates.action.clear();self.updates.release=json!({"newer":true,"version":env!("CARGO_PKG_VERSION")});self.updates.state=json!({"phase":"downloading","seq":0});self.refresh_components();json!({"success":true,"nonce":self.updates.nonce,"jobId":self.updates.job})},
+            "testPointerClick" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{let (shape,_)=self.shape();let scale=GetDpiForWindow(self.hwnd).max(96)as f64/96.;let x=((shape.x+shape.w*0.5)*scale).round()as u16;let y=((shape.y+shape.h*0.25)*scale).round()as u16;let pos=LPARAM(((y as u32)<<16|x as u32)as isize);let down=PostMessageW(Some(self.hwnd),WM_LBUTTONDOWN,WPARAM(1),pos);let up=PostMessageW(Some(self.hwnd),WM_LBUTTONUP,WPARAM(0),pos);json!({"success":down.is_ok()&&up.is_ok()})},
+            "state"=>{self.todo_now=todos::Now::local();let t=&self.snapshot["track"];json!({"success":true,"version":DISPLAY_VERSION,"settings":self.settings,"softwareUpdate":self.updates.state,"dataDirectory":self.data.to_string_lossy(),"musicPreview":self.music_preview(),"title":t["title"],"artist":t["artist"],"player":t["sourceApp"],"position":self.snapshot["positionSeconds"],"duration":t["durationSeconds"],"timeline":self.snapshot["clockStatus"],"lyricSource":self.snapshot["lyricSource"],"isPlaying":self.snapshot["isPlaying"],"canSeek":self.snapshot["canSeek"],"expanded":self.expanded,"islandVisible":self.opacity>0.001,"processId":std::process::id(),"rendererGeneration":self.renderer_generation,"renderFrames":self.render_frames,"renderer":"Direct2D/DirectWrite/DirectComposition","lastError":self.error,"notificationState":self.notification_state,"notificationVisible":self.banner.visible(),"notificationGeometry":self.notification_geometry(),"osdVisible":self.osd_banner.visible()||self.bottom_osd.visible(),"bottomOsdVisible":self.bottom_osd.visible(),"systemState":self.osd.status(),"todos":self.todos.list(&self.todo_now),"todoError":self.todos.error,"today":self.todo_now.date,"now":self.todo_now.time,"pendingPage":self.pending_page,"islandGeometry":{"mini":self.mini(),"capsule":self.layout.capsule,"card":self.layout.card,"satellite":!self.mini()&&self.components.len()>1,"horizontalGestures":self.flag("SwipeActivities",true)},"expandedGlass":self.renderer.as_ref().map(|r|r.glass_status()).unwrap_or_default(),"miniContrast":{"enabled":self.mini()&&self.flag("MiniAutoContrast",true)&&self.settings["MiniMaterial"]=="LiquidGlass","sampledLuminance":self.mini_contrast.sampled,"darkText":self.mini_contrast.dark,"foreground":format!("#{:06X}",self.mini_contrast.ink()&0xffffff)},"compactWidth":self.compact_size.width,"compactHeight":self.compact_size.height,"compactSecondary":self.compact_secondary,"timers":self.timers.list(),"timerError":self.timers.error,"activeComponent":self.selected,"components":self.components,"notificationHistory":self.history.list(),"historyError":self.history.error,"quickHotkey":self.settings["QuickReminderHotkey"],"pendingAction":self.pending_action,"sessionLocked":self.session_locked,"focusResume":self.focus_resume.as_ref().map(|r|json!({"generation":r.generation,"ids":r.ids,"prompted":r.prompted})),"templates":self.templates.list(),"workflowTemplateError":self.templates.error,"appRules":self.rules.list(&self.todo_now.date),"appRuleError":self.rules.error,"foreground":{"path":self.foreground.path,"name":self.foreground.name,"unreadable":self.foreground.unreadable},"lockWatch":true})},
+            "updateTestPrepare" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{self.updates.nonce="integration-test-nonce".into();self.updates.job="integration-test-job".into();self.updates.action.clear();self.updates.release=json!({"newer":true,"version":DISPLAY_VERSION});self.updates.state=json!({"phase":"downloading","seq":0});self.refresh_components();json!({"success":true,"nonce":self.updates.nonce,"jobId":self.updates.job})},
             "showUpdate"=>{self.refresh_components();if self.updates.selectable(){self.select_component("update",1);self.held=true;self.retarget(true);self.user_hidden=false;self.fade(1.);json!({"success":true})}else{json!({"success":false,"message":"当前没有更新任务，请先检查更新。"})}},
             "openInstaller"=>{match std::process::Command::new(self.base.join("DotIsle.Setup.exe")).arg(format!("/MIGRATEDATA={}",self.data.display())).spawn(){Ok(_)=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e.to_string()})}},
             "checkUpdate"=>{self.updates.check(true);json!({"success":true,"message":"正在检查双源更新…"})},
@@ -655,7 +701,7 @@ impl App {
                 }
             },
             "pageSeen"=>{self.pending_page=None;json!({"success":true})},
-            "collectLogs"=>{match diagnostics::collect(&self.data,self.error.as_deref(),env!("CARGO_PKG_VERSION")){
+            "collectLogs"=>{match diagnostics::collect(&self.data,self.error.as_deref(),DISPLAY_VERSION){
                 Ok(path)=>{if std::env::var_os("LYRICISLAND_TEST_PIPE").is_none(){diagnostics::reveal(&path);}json!({"success":true,"message":format!("诊断日志已生成：{}（已在资源管理器中选中）",path.file_name().map(|n|n.to_string_lossy().to_string()).unwrap_or_default()),"path":path.to_string_lossy()})},
                 Err(e)=>json!({"success":false,"message":format!("生成诊断日志失败：{e}")})
             }},
@@ -663,6 +709,7 @@ impl App {
                 let todo=r["value"]["todo"].as_bool().unwrap_or(false);
                 match sound::play(&self.settings,todo,true){Ok(())=>json!({"success":true,"message":"已播放试听"}),Err(e)=>json!({"success":false,"message":e})}
             },
+            "debugSnapshot" if std::env::var("LYRICISLAND_TEST_PIPE").is_ok_and(|p|p.starts_with("LyricIsland.Settings.test."))=>{if let(Some(renderer),Some(path))=(&self.renderer,r["value"].as_str()){match renderer.snapshot(Path::new(path)){Ok(())=>json!({"success":true}),Err(e)=>json!({"success":false,"message":e.to_string()})}}else{json!({"success":false})}},
             "expand"=>{self.user_hidden=false;self.fade(1.);self.held=true;self.retarget(true);json!({"success":true})},
             "toggleVisibility"=>{self.dismiss_offset.set(0.);let _=self.position();self.user_hidden=!self.user_hidden;if !self.user_hidden{self.manual_until=Some(Instant::now()+Duration::from_secs(6));}self.fade(if self.user_hidden{0.}else{1.});json!({"success":true})},
             "notificationPreview"=>{if self.flag("PauseNotifications",false){return json!({"success":false,"message":"通知已暂停，请先关闭“暂停通知”后预览"})}self.show_notice(notifications::Notice::example(&self.base),true,None,true);json!({"success":true,"message":"通知横幅预览"})},
@@ -696,6 +743,7 @@ impl App {
                 if let Some(b)=&self.backend{b.apply(self.settings.clone());}if let Err(e)=self.position(){self.error=Some(e.to_string());return json!({"success":false,"message":e.to_string()})}
                 if r["value"]["key"]=="SystemStateHintPlacement"{unsafe{self.bottom_osd.clear();}let now=self.start.elapsed().as_secs_f64();let(r,rad)=self.shape();self.osd_banner.dismiss(r,rad,now,false);}
                 if r["value"]["key"]=="MusicExpandedLayout"{self.start_music_shift();}
+                if r["value"]["key"]=="IslandSizeMode"{self.swipe=None;self.hide_drag=None;self.dragging=None;self.seeking=false;self.hover=0;self.pressed=0;self.compact_secondary=self.compact_secondary_for();self.previous_compact_secondary.clear();self.input_region=None;}
                 if ["SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&r["value"]["key"].as_str().unwrap_or("")){self.apply_osd();}
                 self.transition=None;self.frame=if self.expanded{Frame::expanded()}else{Frame::hidden(self.options())};json!({"success":true,"message":"已保存"})
             },_=>json!({"success":false,"message":"不支持的操作"})
@@ -752,7 +800,7 @@ unsafe fn create(a:&mut App,owner:*const RefCell<App>,hidden:bool)->Result<()> {
 }
 unsafe fn tray(a:&App)->Result<()> {
     let path=a.base.join("Assets/LyricIsland-v2.ico").to_string_lossy().encode_utf16().chain(Some(0)).collect::<Vec<_>>();let icon=LoadImageW(None,PCWSTR(path.as_ptr()),IMAGE_ICON,0,0,LR_LOADFROMFILE|LR_DEFAULTSIZE).ok().map(|i|HICON(i.0)).unwrap_or(LoadIconW(None,IDI_APPLICATION)?);
-    let mut nid=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:a.hwnd,uID:1,uFlags:NIF_MESSAGE|NIF_ICON|NIF_TIP,uCallbackMessage:WM_TRAY,hIcon:icon,..Default::default()};let tip=format!("DotIsle · 点屿 {}",env!("CARGO_PKG_VERSION")).encode_utf16().collect::<Vec<_>>();let tip=&tip[..tip.len().min(127)];nid.szTip[..tip.len()].copy_from_slice(&tip);let _=Shell_NotifyIconW(NIM_ADD,&nid);Ok(())
+    let mut nid=NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>()as u32,hWnd:a.hwnd,uID:1,uFlags:NIF_MESSAGE|NIF_ICON|NIF_TIP,uCallbackMessage:WM_TRAY,hIcon:icon,..Default::default()};let tip=format!("DotIsle · 点屿 {}",DISPLAY_VERSION).encode_utf16().collect::<Vec<_>>();let tip=&tip[..tip.len().min(127)];nid.szTip[..tip.len()].copy_from_slice(&tip);let _=Shell_NotifyIconW(NIM_ADD,&nid);Ok(())
 }
 fn traces(directory:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(directory)?;let mut cases=vec![];
@@ -847,7 +895,7 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
     }
     if args.get(1).is_some_and(|s|s=="--notification-info"){let report=std::thread::spawn(||{let _=windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);notifications::diagnostics()}).join().map_err(|_|"notification diagnostic failed")?;std::fs::write(args.get(2).ok_or("missing report path")?,serde_json::to_vec_pretty(&report)?)?;return Ok(())}if args.get(1).is_some_and(|s|s=="--motion-trace"){return traces(Path::new(args.get(2).ok_or("missing directory")?))}
     if args.get(1).is_some_and(|s|s=="--media-info"){let data=std::thread::spawn(||lyric_backend::media::control_diagnostics().map_err(|e|e.to_string())).join().map_err(|_|"media diagnostics worker failed")??;std::fs::write(args.get(2).ok_or("missing output path")?,serde_json::to_vec_pretty(&data)?)?;return Ok(())}
-    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=args.get(1).is_some_and(|s|s=="--integration-preview")||tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");
+    let icon_mode=args.get(1).is_some_and(|s|s=="--icon-preview");let font_mode=args.get(1).is_some_and(|s|s=="--font-check");let notice_mode=args.get(1).is_some_and(|s|s=="--notification-preview");let cover_mode=args.get(1).is_some_and(|s|s=="--cover-preview");let tool_mode=args.get(1).is_some_and(|s|s=="--tools-preview");let preview_mode=args.get(1).is_some_and(|s|s=="--expanded-glass-preview"||s=="--mini-preview"||s=="--integration-preview")||tool_mode||cover_mode||icon_mode||font_mode||notice_mode||args.get(1).is_some_and(|s|s=="--animation-preview");let demo=preview_mode||args.iter().any(|s|s=="--demo");
     // One island per desktop, so a second copy must not start. It used to exit without a word,
     // which made a freshly built portable copy look broken: double-clicking it did nothing at all
     // while the installed version answered every click. The mutex is taken before any window is
@@ -861,8 +909,8 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
         // worse than staying quiet.
         if !preview_mode&&!args.iter().any(|s|s=="--startup"){
             let current=io::pipe_request("LyricIsland.Native.Settings.v1",&json!({"version":1,"command":"state"})).unwrap_or_default();
-            let message=format!("已有点屿 {} 正在运行。\r\n你正在启动的是此目录的 {}，不会跳转或改用安装版。\r\n\r\n请先从托盘退出正在运行的点屿，再启动这一份。",current["version"].as_str().unwrap_or("（版本未知）"),env!("CARGO_PKG_VERSION"));let text=message.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-            let title=format!("点屿 · DotIsle {}",env!("CARGO_PKG_VERSION")).encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            let message=format!("已有点屿 {} 正在运行。\r\n你正在启动的是此目录的 {}，不会跳转或改用安装版。\r\n\r\n请先从托盘退出正在运行的点屿，再启动这一份。",current["version"].as_str().unwrap_or("（版本未知）"),DISPLAY_VERSION);let text=message.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+            let title=format!("点屿 · DotIsle {}",DISPLAY_VERSION).encode_utf16().chain(Some(0)).collect::<Vec<_>>();
             MessageBoxW(None,PCWSTR(text.as_ptr()),PCWSTR(title.as_ptr()),MB_OK|MB_ICONINFORMATION|MB_SETFOREGROUND);
         }
         return Ok(())
@@ -870,6 +918,36 @@ fn run()->std::result::Result<(),Box<dyn std::error::Error>>{unsafe{
 let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-dir"){PathBuf::from(args.get(i+1).ok_or("missing data directory")?)}else if !base.join("Portable.json").is_file()&&base.join("Installed.json").exists(){let marker=io::read_settings(&base.join("Installed.json"));marker["dataDirectory"].as_str().map(PathBuf::from).unwrap_or_else(||io::data_directory())}else{base.join("Data")};
     if !demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&!base.join("Portable.json").is_file()&&base.join("Installed.json").is_file()&&base.join("Uninstall.exe").is_file(){let _=std::process::Command::new(base.join("Uninstall.exe")).arg("--repair-if-needed").arg(&base).spawn();}
     let owner=Box::new(RefCell::new(App::new(base,data,demo)));let owner_ptr=&*owner as *const RefCell<App>;let mut app=owner.borrow_mut();create(&mut app,owner_ptr,preview_mode)?;
+    if args.get(1).is_some_and(|s|s=="--expanded-glass-preview"){
+        let dir=Path::new(args.get(2).ok_or("missing preview directory")?);std::fs::create_dir_all(dir)?;app.opacity=1.;app.frame=Frame::expanded();app.lyric="晚风轻轻，音乐刚好".into();
+        let mut r=app.renderer.take().unwrap();r.set_cover(Some(&std::fs::read(app.base.join("Assets/LyricIsland-v2.png"))?))?;let scale=r.dpi as f64/96.;
+        for dark in [false,true]{app.settings["IslandSizeMode"]=json!("Classic");app.settings["ClassicCapsuleMaterial"]=json!("LiquidGlass");app.layout.set_compact(320.,40.);app.frame=Frame::hidden(app.options());let c=app.layout.capsule;let w=(c.w*scale).round()as u32;let h=(c.h*scale).round()as u32;let raw=(0..w*h).flat_map(|i|{let t=if (i%w/44)%2==0{0}else{22};if dark{[48+t,33+t,23+t,255]}else{[245-t,240-t,235-t,255]}}).collect::<Vec<_>>();let q=expanded_backdrop::Request{bounds:[0,0,w as i32,h as i32],radius:c.h/2.,scale,tint:0x10141c};r.set_expanded_backdrop(expanded_backdrop::Frame{request:q,pixels:raw})?;let mut s=app.scene();s.time_ms=900.;s.lyric_age_ms=1000.;r.render(&s,false)?;r.snapshot(&dir.join(format!("classic-black-capsule-{}.png",if dark{"dark"}else{"light"})))?;}app.frame=Frame::expanded();app.settings["ClassicCapsuleMaterial"]=json!("Classic");
+        for mini in [false,true]{app.settings["IslandSizeMode"]=json!(if mini{"Mini"}else{"Classic"});app.settings["MiniMaterial"]=json!("LiquidGlass");app.settings["IslandMaterial"]=json!("LiquidGlass");app.layout.card.w=if mini{420.}else{400.};app.layout.card.x=(app.layout.host.w-app.layout.card.w)/2.;
+            for dark in [false,true]{for tool in [false,true]{app.layout.card.h=if mini{if tool{110.}else{120.}}else{220.};let w=(app.layout.card.w*scale).round()as u32;let h=(app.layout.card.h*scale).round()as u32;
+                let mut raw=vec![0;w as usize*h as usize*4];for y in 0..h{for x in 0..w{let i=((y*w+x)*4)as usize;let stripe=if (x as f64/scale/44.)as i32%2==0{0.}else{12.};let t=x as f64/w as f64;let rgb=if dark{[20.+t*25.+stripe,34.+stripe,48.+t*22.+stripe]}else{[242.-t*20.-stripe,244.-stripe,251.-t*12.-stripe]};raw[i..i+4].copy_from_slice(&[rgb[2]as u8,rgb[1]as u8,rgb[0]as u8,255]);}}
+                let q=expanded_backdrop::Request{bounds:[0,0,w as i32,h as i32],radius:app.options().radius,scale,tint:r.preview_palette().0};let pixels=raw;r.set_expanded_backdrop(expanded_backdrop::Frame{request:q,pixels})?;
+                let mut store=timers::Store::new(PathBuf::new());let id=store.create(&json!({"mode":"countdown","duration":300})).unwrap();let panel=store.items.iter().find(|t|t.id==id).unwrap().panel();let mut s=app.scene();s.panel=if tool{Some(&panel)}else{None};s.title="晚风电台";s.artist="DotIsle";s.elapsed=83.;s.duration=236.;s.progress=0.35;s.lyric_age_ms=1000.;r.render(&s,false)?;r.snapshot(&dir.join(format!("{}-{}-{}.png",if mini{"mini"}else{"classic"},if dark{"dark"}else{"light"},if tool{"timer"}else{"music"})))?;
+            }}
+        }let _=DestroyWindow(app.hwnd);return Ok(())
+    }
+    if args.get(1).is_some_and(|s|s=="--mini-preview"){
+        let dir=Path::new(args.get(2).ok_or("missing preview directory")?);std::fs::create_dir_all(dir)?;
+        app.opacity=1.;app.lyric="晚风轻轻，音乐刚好".into();app.settings["IslandSizeMode"]=json!("Mini");app.settings["SettingsTheme"]=json!("Light");
+        app.renderer=None;
+        for scale in [1.,1.5,2.]{
+            let mut r=Renderer::new(app.visual_hwnd,(app.layout.host.w*scale)as u32,(app.layout.host.h*scale)as u32,(96.*scale)as f32,&app.base.join("Assets/Fonts/NotoSansSC.ttf"))?;r.set_cover(Some(&std::fs::read(app.base.join("Assets/LyricIsland-v2.png"))?))?;
+            app.layout.set_compact(276.,14.);app.layout.card.w=420.;app.layout.card.x=(app.layout.host.w-app.layout.card.w)/2.;app.layout.card.h=120.;app.frame=Frame::hidden(app.options());
+            let mut s=app.scene();s.layout_scale=scale;s.time_ms=900.;s.lyric_age_ms=1000.;r.render(&s,false)?;r.snapshot(&dir.join(format!("mini-capsule-{scale}.png")))?;
+            app.frame=Frame::expanded();let mut s=app.scene();s.layout_scale=scale;s.title="晚风电台";s.artist="DotIsle";s.elapsed=83.;s.duration=236.;s.progress=0.35;s.component_count=3;r.render(&s,false)?;r.snapshot(&dir.join(format!("mini-music-{scale}.png")))?;
+            let mut store=timers::Store::new(PathBuf::new());
+            for(name,v)in [("timer",json!({"mode":"countdown","duration":300})),("stopwatch",json!({"mode":"stopwatch"})),("pomodoro",json!({"mode":"pomodoro","focus":1500})),("workflow",json!({"mode":"workflow","stages":[{"name":"专注","seconds":1500},{"name":"休息","seconds":300}]}))]{
+                let id=store.create(&v).unwrap();let p=store.items.iter().find(|t|t.id==id).unwrap().panel();app.layout.card.h=110.;let mut s=app.scene();s.panel=Some(&p);s.layout_scale=scale;s.component_count=3;r.render(&s,false)?;r.snapshot(&dir.join(format!("mini-{name}-{scale}.png")))?;
+            }
+            let p=activities::Panel{kind:2,title:"今天的待办".into(),tasks:vec![activities::Task{id:"a".into(),title:"整理今天的想法".into(),color:0xff6ea8ff,..Default::default()},activities::Task{id:"b".into(),title:"让工作告一段落".into(),color:0xff9b8bd7,..Default::default()}],..Default::default()};let mut s=app.scene();s.panel=Some(&p);s.component_count=3;r.render(&s,false)?;r.snapshot(&dir.join(format!("mini-todos-{scale}.png")))?;
+            app.layout.card.h=142.;app.updates.state=json!({"phase":"downloading","version":"演示","percent":43,"receivedBytes":4300000,"totalBytes":10000000});let p=app.updates.panel();let mut s=app.scene();s.panel=Some(&p);s.component_count=3;r.render(&s,false)?;r.snapshot(&dir.join(format!("mini-update-{scale}.png")))?;
+        }
+        let _=DestroyWindow(app.hwnd);return Ok(())
+    }
     if cover_mode{
         let dir=Path::new(args.get(2).ok_or("missing directory")?);std::fs::create_dir_all(dir)?;
         app.poll();app.opacity=1.;app.frame=Frame::expanded();let mut r=app.renderer.take().unwrap();
@@ -900,7 +978,7 @@ let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-
     if notice_mode{notification_preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
     if preview_mode{preview(&mut app,Path::new(args.get(2).ok_or("missing directory")?))?;let _=DestroyWindow(app.hwnd);return Ok(())}
         if !app.demo&&std::env::var_os("LYRICISLAND_TEST_PIPE").is_none()&&!app.base.join("Portable.json").is_file()&&!app.base.join("Installed.json").exists()&&app.base.join("OtaInstall.json").exists()&&app.base.join("DotIsle.Setup.exe").exists(){
-        let offered=app.data.join(format!("install-offer-{}.txt",env!("CARGO_PKG_VERSION")));
+        let offered=app.data.join(format!("install-offer-{}.txt",DISPLAY_VERSION));
         if !offered.exists(){let _=std::fs::create_dir_all(&app.data);if std::process::Command::new(app.base.join("DotIsle.Setup.exe")).arg(format!("/MIGRATEDATA={}",app.data.display())).spawn().is_ok(){let _=std::fs::write(offered,b"offered");}}
     }
     tray(&app)?;let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());app._server=Some(Server::new(&pipe,settings_callback));
@@ -910,7 +988,7 @@ let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-
     drop(app);let pacing_hwnd=owner.borrow().visual_hwnd;let mut pacer=frame_pacing::FramePacer::new(pacing_hwnd);let mut msg=MSG::default();'events:loop{
         while PeekMessageW(&mut msg,None,0,0,PM_REMOVE).as_bool(){if msg.message==WM_QUIT{break 'events}let _=TranslateMessage(&msg);DispatchMessageW(&msg);}
         let mut app=owner.borrow_mut();if until.is_some_and(|t|Instant::now()>=t){let _=DestroyWindow(app.hwnd);break}
-        let animating=app.switching||app.swipe.is_some_and(|s|s.active)||app.panel.as_ref().is_some_and(|p|p.running)||app.banner.visible()||app.opacity>0.001&&app.snapshot["isPlaying"]==true&&app.flag("Animation",true)||app.transition.is_some()||(app.opacity-app.fade_to).abs()>0.00001||app.lyric_start.elapsed()<Duration::from_millis(180);
+        let animating=app.renderer.as_ref().is_some_and(|r|r.glass_status()["available"]==true)||app.mini_contrast.moving()||app.switching||app.swipe.is_some_and(|s|s.active)||app.panel.as_ref().is_some_and(|p|p.running)||app.banner.visible()||app.opacity>0.001&&app.snapshot["isPlaying"]==true&&app.flag("Animation",true)||app.transition.is_some()||(app.opacity-app.fade_to).abs()>0.00001||app.lyric_start.elapsed()<Duration::from_millis(180);
         // Pace before drawing: Present(1) already waits for the compositor, so
         // this only spends what is left of the frame budget.
         if animating{pacer.wait();}
@@ -921,10 +999,15 @@ let base=font_base();let data=if let Some(i)=args.iter().position(|s|s=="--data-
     }
     let app=owner.borrow();if let Some(b)=&app.backend{b.close();}if let Some(server)=&app._server{server.close();}let _=CloseHandle(mutex);CoUninitialize();Ok(())
 }}
-fn main(){if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|p.parent().map(Path::to_path_buf)).unwrap_or_default();let _=std::fs::write(base.join("native-error.txt"),e.to_string());std::process::exit(1)}}
+fn main(){let previous=std::panic::take_hook();std::panic::set_hook(Box::new(move|info|{let base=std::env::current_exe().ok().and_then(|p|p.parent().map(Path::to_path_buf)).unwrap_or_default();let report=format!("{}\n{}",info,std::backtrace::Backtrace::force_capture());if std::fs::write(base.join("native-panic.txt"),&report).is_err(){let path=io::data_directory().join("Logs");let _=std::fs::create_dir_all(&path);let _=std::fs::write(path.join("native-panic.txt"),report);}previous(info);}));if let Err(e)=run(){let base=std::env::current_exe().ok().and_then(|p|p.parent().map(Path::to_path_buf)).unwrap_or_default();let _=std::fs::write(base.join("native-error.txt"),e.to_string());std::process::exit(1)}}
 
 #[cfg(test)]mod interaction_tests{
     use super::*;
+    #[test]fn rounded_hit_testing_survives_degenerate_morph_endpoints(){
+        let r=Rect::new(100.,24.,300.,12.55065091416845);assert!(inside_round_rect(r,30.,250.,30.275325457084225));
+        for height in [14.,20.,24.,110.,120.,220.]{for i in 0..12000{let p=i as f64/11999.;let mut layout=Layout::new(260.);layout.capsule.h=height;layout.card.h=120.;for fluid in [false,true]{let(r,rad)=layout.morph_shape(p,30.,fluid);assert!(inside_round_rect(r,rad,r.x+r.w/2.,r.y+r.h/2.));assert!(!inside_round_rect(r,rad,r.x-1.,r.y));}}}
+        assert!(!inside_round_rect(r,f64::NAN,250.,30.));
+    }
     fn app()->App{App::new(PathBuf::new(),PathBuf::new(),true)}
     #[test]fn swipes_work_on_both_views_but_leave_controls_alone(){let mut a=app();a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();a.settings["SwipeActivities"]=json!(false);assert!(!a.can_swipe(0));a.settings["SwipeActivities"]=json!(true);for expanded in [false,true]{a.expanded=expanded;for hit in [0,1,13,40,41,42]{assert!(a.can_swipe(hit));}for hit in [-1,2,3,4,5,6,7,10,30,31]{assert!(!a.can_swipe(hit));}}}
     #[test]fn releasing_a_swipe_keeps_the_rendered_position_continuous(){for expanded in [false,true]{let mut a=app();let id=a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();a.expanded=expanded;let width=if expanded{a.layout.card.w}else{a.layout.capsule.w};let mut swipe=activities::Swipe::new(100.,80.);swipe.update(30.,80.);let offset=swipe.dx;assert!(a.finish_swipe(swipe));assert_eq!(a.selected,format!("timer:{id}"));assert!((a.slide.value-width-offset).abs()<0.001);assert!(a.slide_outgoing);}}
@@ -1066,7 +1149,7 @@ fn notice(title:&str)->Queued{Queued{notice:notifications::Notice{title:title.in
  for i in 0..40{a.enqueue(notice(&format!("m{i}")));}assert!(a.queue.iter().any(|e|e.todo.as_deref()==Some("t1")));}
 #[test]fn completing_or_deleting_a_todo_cancels_its_pending_banner(){let mut a=app();a.enqueue_todo(&reminder("t1"));a.enqueue_todo(&reminder("t2"));a.cancel_todo("t1");assert_eq!(a.queue.len(),1);assert_eq!(a.queue[0].todo.as_deref(),Some("t2"));}
 #[test]
-fn state_exposes_todos_version_and_pending_page(){let mut a=app();a.pending_page=Some("todos".into());unsafe{let state=a.request(json!({"version":1,"command":"state"}));assert_eq!(state["version"],env!("CARGO_PKG_VERSION"));assert!(state["todos"].is_array());assert!(state["today"].as_str().is_some_and(|d|todos::valid_date(d)));assert_eq!(state["pendingPage"],"todos");assert_eq!(a.request(json!({"version":1,"command":"pageSeen"}))["success"],true);assert!(a.pending_page.is_none());}}
+fn state_exposes_todos_version_and_pending_page(){let mut a=app();a.pending_page=Some("todos".into());unsafe{let state=a.request(json!({"version":1,"command":"state"}));assert_eq!(state["version"],DISPLAY_VERSION);assert!(state["todos"].is_array());assert!(state["today"].as_str().is_some_and(|d|todos::valid_date(d)));assert_eq!(state["pendingPage"],"todos");assert_eq!(a.request(json!({"version":1,"command":"pageSeen"}))["success"],true);assert!(a.pending_page.is_none());}}
 /// Demo runs are self-checks: they must never create or edit a todo file.
 #[test]
 fn demo_mode_leaves_the_todo_store_untouched(){let mut a=app();unsafe{let saved=a.request(json!({"version":1,"command":"todoSave","value":{"title":"x","date":"2026-10-16","time":"09:00"}}));assert_eq!(saved["success"],true);assert!(a.todos.items.is_empty());assert_eq!(a.request(json!({"version":1,"command":"todoComplete","value":{"id":"x","completed":true}}))["success"],true);assert_eq!(a.request(json!({"version":1,"command":"todoDelete","value":{"id":"x"}}))["success"],true);assert!(a.todos.items.is_empty());}}
@@ -1084,4 +1167,10 @@ fn island_presence_follows_need_not_switches(){assert!(island_needed(true,true,t
 
 #[cfg(test)]mod hide_gesture_tests{use super::*;
  #[test]fn hide_is_available_with_one_component_and_preserves_timers(){let mut a=App::new(PathBuf::new(),PathBuf::new(),true);assert!(a.can_hide(0));assert!(a.can_hide(1));for hit in [2,3,4,5,6,7,9,10,11,12,30,31]{assert!(!a.can_hide(hit));}let id=a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.hide_by_gesture();assert!(a.user_hidden);assert!(!a.held);assert!(a.timers.items.iter().any(|t|t.id==id&&t.running));a.settings["SwipeUpHide"]=json!(false);assert!(!a.can_hide(0));}
+}
+
+#[cfg(test)]mod mini_behavior_tests{use super::*;
+#[test]fn mini_defaults_and_validation_survive_serialization(){let s=config::defaults();assert_eq!(s["IslandSizeMode"],"Classic");let mini=config::validate_setting(json!({"key":"IslandSizeMode","value":"Mini","settings":s})).unwrap();let restored:Value=serde_json::from_slice(&serde_json::to_vec(&mini).unwrap()).unwrap();assert_eq!(restored["IslandSizeMode"],"Mini");assert!(config::validate_setting(json!({"key":"IslandSizeMode","value":true,"settings":restored})).is_err());}
+#[test]fn mini_hit_region_has_no_satellite_or_invisible_cover(){let mut a=App::new(PathBuf::new(),PathBuf::new(),true);a.settings["IslandSizeMode"]=json!("Mini");a.layout.set_compact(260.,20.);a.opacity=1.;a.frame=Frame::hidden(a.options());a.timers.create(&json!({"mode":"stopwatch"})).unwrap();a.refresh_components();let c=a.layout.capsule;assert_eq!(a.hit(c.x+12.,c.y+10.),0);assert_eq!(a.hit(c.x+100.,c.y+21.),-1);let sat=a.layout.satellite();assert_eq!(a.hit(sat.x+sat.w/2.,sat.y+sat.h/2.),-1);assert!(a.can_swipe(0));assert!(a.can_hide(0));assert_eq!(a.compact_secondary_for(),"");}
+#[test]fn mini_keeps_cards_small_and_leaves_the_classic_layout_setting_intact(){let mut a=App::new(PathBuf::new(),PathBuf::new(),true);a.settings["MusicExpandedLayout"]=json!("LyricFocus");for selected in ["music","update","timer:test","todos"]{a.selected=selected.into();a.panel=if selected=="music"{None}else{Some(Default::default())};a.settings["IslandSizeMode"]=json!("Classic");let h=a.card_height();a.settings["IslandSizeMode"]=json!("Mini");assert!(((a.card_height()-10.)*2.-h).abs()<0.001);assert_eq!(a.settings["MusicExpandedLayout"],"LyricFocus");}}
 }

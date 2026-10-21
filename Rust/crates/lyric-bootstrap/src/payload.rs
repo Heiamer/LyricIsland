@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = "2.1.6mini";
 pub const PAYLOAD_RESOURCE: &str = "DotIsle.InstallPayload.zip";
 pub const PAYLOAD_DIGEST_RESOURCE: &str = "DotIsle.InstallPayload.sha256";
 pub const LAUNCHER_PAYLOAD_RESOURCE: &str = "LyricIsland.Payload.zip";

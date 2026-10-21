@@ -21,6 +21,7 @@ impl Material{
 }
 #[derive(Clone,Copy)]
 pub struct Scene<'a>{
+    pub mini:bool,pub classic_glass:bool,pub mini_ink:u32,pub mini_outline:u32,
     pub tool_theme:crate::theme_accent::Accent,
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
     pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
@@ -39,6 +40,7 @@ pub struct Scene<'a>{
     pub outgoing_opacity:f64,pub outgoing_y:f64,
 }
 pub struct Renderer{
+    glass:crate::native_glass::Glass,glass_bitmap:Option<ID2D1Bitmap1>,hwnd:HWND,reading_glass:bool,reading_dark:bool,backdrop:Option<(crate::expanded_backdrop::Request,ID2D1Bitmap1)>,
     surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
     cover_pixels:Option<crate::liquid_glass::Cover>,lens:Option<(u32,u32,u32,bool,ID2D1Bitmap1)>,
     cover_palette:crate::cover_color::CoverPalette,shadow_shape:Option<(Rect,f64)>,
@@ -110,7 +112,7 @@ impl Renderer{
         let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
         let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
         dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{cover_pixels:None,lens:None,factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
+        Ok(Self{glass:Default::default(),glass_bitmap:None,hwnd,reading_glass:false,reading_dark:false,backdrop:None,cover_pixels:None,lens:None,factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
     }
     pub fn preview_palette(&self)->(u32,u32){(self.cover_palette.background,self.cover_palette.accent)}
     pub fn preview_art(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
@@ -145,6 +147,17 @@ impl Renderer{
             self.cover_changed=std::time::Instant::now();
         }Ok(())
     }
+    pub fn glass_status(&self)->serde_json::Value{serde_json::json!({"frames":self.glass.frames,"available":self.glass.available,"captureExcluded":self.glass.available,"error":self.glass.error})}
+    pub unsafe fn set_expanded_backdrop(&mut self,frame:crate::expanded_backdrop::Frame)->Result<()>{
+        let q=frame.request;let w=(q.bounds[2]-q.bounds[0])as u32;let h=(q.bounds[3]-q.bounds[1])as u32;
+        self.reading_dark=false;let bitmap=self.glass.fixture(&self._device,&self.dc,&frame.pixels,w,h,self.dpi,q.radius,q.tint,q.tint==0x10141c)?;self.backdrop=Some((q,bitmap));Ok(())
+    }
+    unsafe fn expanded_glass(&mut self,_s:&Scene<'_>,shape:Rect,radius:f64,opacity:f32,_compact:bool)->Result<()>{
+        self.clip(shape,radius,opacity)?;
+        if let Some(b)=self.glass_bitmap.as_ref().or_else(||self.backdrop.as_ref().map(|(_,b)|b)){self.dc.DrawBitmap(b,Some(&rect(shape)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
+        self.dc.PopLayer();Ok(())
+    }
+    fn contrast_outline(c:u32)->u32{let l=((c>>16)&255)*3+((c>>8)&255)*6+(c&255);if l>1280{0x88000000}else{0x88ffffff}}
     unsafe fn liquid_lens(&mut self,s:&Scene<'_>,shape:Rect,radius:f64,opacity:f32)->Result<()>{
         // Cache in final card space: morphing stretches one texture and never resamples per frame.
         let w=s.layout.card.w.round().clamp(1.,768.)as u32;let h=s.layout.card.h.round().clamp(1.,768.)as u32;
@@ -160,7 +173,7 @@ impl Renderer{
         self.dc.PopLayer();Ok(())
     }
     unsafe fn fill(&self,r:Rect,radius:f64,c:u32){self.brush.SetColor(&color(c));self.dc.FillRoundedRectangle(&rounded(r,radius),&self.brush);}
-    unsafe fn line(&self,a:(f64,f64),b:(f64,f64),c:u32,width:f32){self.brush.SetColor(&color(c));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width,None);}
+    unsafe fn line(&self,a:(f64,f64),b:(f64,f64),c:u32,width:f32){if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width+1.2,None);}self.brush.SetColor(&color(c));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width,None);}
     unsafe fn clip(&self,r:Rect,radius:f64,opacity:f32)->Result<()>{
         let geometry=self.factory.CreateRoundedRectangleGeometry(&rounded(r,radius))?;
         let mut params=D2D1_LAYER_PARAMETERS1{contentBounds:D2D_RECT_F{left:-100000.,top:-100000.,right:100000.,bottom:100000.},geometricMask:std::mem::ManuallyDrop::new(Some(geometry.cast()?)),maskAntialiasMode:D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,maskTransform:identity(),opacity,opacityBrush:std::mem::ManuallyDrop::new(None),layerOptions:D2D1_LAYER_OPTIONS1_NONE};
@@ -194,6 +207,7 @@ impl Renderer{
         result.unwrap_or(self.body_baseline/self.body_line_spacing)
     }
     unsafe fn text_family(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32,family:&str,system:bool,alignment:DWRITE_TEXT_ALIGNMENT,line_height:Option<f64>)->Result<()>{
+        let c=if self.reading_glass&&self.reading_dark&&(c&255)>128&&((c>>8)&255)>128&&((c>>16)&255)>128{(c&0xff000000)|0x17202c}else{c};
         if text.is_empty()||r.w<=0.{return Ok(())}let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,r.w,r.h,size,weight,family,alignment.0,line_height);
         if !self.layouts.contains_key(&key){
             if self.layouts.len()>192{self.layouts.clear()}
@@ -201,13 +215,15 @@ impl Renderer{
             let family=resolved.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
             let format=self.write.CreateTextFormat(PCWSTR(family.as_ptr()),if private{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT(weight),DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,if resolved==self.japanese_family||resolved.starts_with("Yu ")||resolved=="Meiryo"{w!("ja-JP")}else{w!("zh-CN")})?;
             format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            if !system{format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;let height=line_height.unwrap_or(size*self.body_line_spacing);format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,height as f32,(height*baseline)as f32)?;}
+            if !system&&line_height!=Some(-1.){format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;let height=line_height.unwrap_or(size*self.body_line_spacing);format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,height as f32,(height*baseline)as f32)?;}
             format.SetTextAlignment(alignment)?;
             let ellipsis=self.write.CreateEllipsisTrimmingSign(&format)?;format.SetTrimming(&DWRITE_TRIMMING{granularity:DWRITE_TRIMMING_GRANULARITY_CHARACTER,..Default::default()},&ellipsis)?;
-            let utf16=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&utf16,&format,r.w as f32,r.h.max(size*self.body_line_spacing)as f32)?;
+            let utf16=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&utf16,&format,r.w as f32,if line_height==Some(-1.){r.h as f32}else{r.h.max(size*self.body_line_spacing)as f32})?;
             if !system{layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;layout.cast::<IDWriteTextLayout4>()?.SetFontAxisValues(&[DWRITE_FONT_AXIS_VALUE{axisTag:DWRITE_FONT_AXIS_TAG_WEIGHT,value:weight as f32}],DWRITE_TEXT_RANGE{startPosition:0,length:utf16.len()as u32})?;}self.layouts.insert(key.clone(),layout);
         }
-        self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x,r.y),self.layouts.get(&key).unwrap(),&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);Ok(())
+        let layout=self.layouts.get(&key).unwrap();let (dx,dy)=if line_height==Some(-1.){let overhang=layout.GetOverhangMetrics()?;((overhang.left-overhang.right)as f64/2.,(overhang.top-overhang.bottom)as f64/2.)}else{(0.,0.)};
+        if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));for (x,y) in [(0.,0.5)]{self.dc.DrawTextLayout(point(r.x+dx+x,r.y+dy+y),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);}}
+        self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x+dx,r.y+dy),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);Ok(())
     }
     /// Cache actual glyph outlines so both icons share one visible height and
     /// physical-pixel center, independently of font line metrics and hinting.
@@ -229,6 +245,7 @@ impl Renderer{
             let transform=Matrix3x2{M11:scale,M22:scale,M31:cx as f32-(ink.left+ink.right)*0.5*scale,M32:cy as f32-(ink.top+ink.bottom)*0.5*scale,..Default::default()};
             let geometry=self.factory.CreateTransformedGeometry(&path,&transform)?;self.icons.insert(key.clone(),geometry);
         }
+        if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));self.dc.DrawGeometry(self.icons.get(&key).unwrap(),&self.brush,1.3,None);}
         self.brush.SetColor(&color(c));self.dc.FillGeometry(self.icons.get(&key).unwrap(),&self.brush,None);Ok(())
     }
     pub unsafe fn icon_bounds(&self)->Result<serde_json::Value>{
@@ -263,7 +280,7 @@ impl Renderer{
         let with_alpha=|c:u32|if disabled{0x4d000000|(c&0xffffff)}else{c};
         if id==4{self.fill(Rect::new(x,y,size,size),size/2.,with_alpha(scene.component_color))}
         if scene.hover==id{self.fill(Rect::new(x,y,size,size),size/2.,0x18ffffff)}
-        let scale=if scene.pressed==id&&!disabled{0.94}else{1.};let ox=x+(size-16.*scale)/2.;let oy=y+(size-16.*scale)/2.;let c=with_alpha(if id==4{0xff12251d}else{scene.component_color});
+        let scale=if scene.pressed==id&&!disabled{0.94}else{1.};let ox=x+(size-16.*scale)/2.;let oy=y+(size-16.*scale)/2.;let c=with_alpha(if id==4{if crate::cover_color::contrast(scene.component_color,0xffffff)>crate::cover_color::contrast(scene.component_color,0){0xffffffff}else{0xff090f18}}else{scene.component_color});
         let l=|a:(f64,f64),b:(f64,f64)|self.line((ox+a.0*scale,oy+a.1*scale),(ox+b.0*scale,oy+b.1*scale),c,if id==4{2.}else{1.4});
         match id{
             2=>{l((8.,1.),(8.,15.));l((1.,8.),(15.,8.));for (a,b) in [((5.,4.),(8.,1.)),((8.,1.),(11.,4.)),((4.,5.),(1.,8.)),((1.,8.),(4.,11.)),((5.,12.),(8.,15.)),((8.,15.),(11.,12.)),((12.,5.),(15.,8.)),((15.,8.),(12.,11.))]{l(a,b)}},
@@ -305,21 +322,23 @@ impl Renderer{
     }
     unsafe fn expanded_content(&mut self,s:&Scene<'_>)->Result<()>{
         let w=s.layout.card.w;
-        let mut g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale,s.font_size);
+        let g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale,s.font_size);
         let lyric_width=self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w);
-        g.lyric.x+=(g.lyric.w-lyric_width)*0.5*g.centered;g.lyric.w-=(g.lyric.x-20.).max(0.)*g.centered;
+        // One anchor for every layout: 0 leading, 0.5 centred, 1 trailing. The settings
+        // preview reads the same number, so both places place the line identically.
+        let lyric_x=g.lyric.x+(g.lyric.w-lyric_width)*g.align;
         let sub_width=self.measure_line(s.secondary,10.5)?.min(g.secondary.w);
-        g.secondary.x+=(g.secondary.w-sub_width)*0.5*g.centered;g.secondary.w=sub_width+(g.secondary.w-sub_width)*(1.-g.centered);
+        let sub_x=g.secondary.x+(g.secondary.w-sub_width)*g.align;
         let secondary=0xb8000000|(s.text_color&0xffffff);
         // Artwork, text, status, timeline and controls all share one geometry with hit testing.
         self.flipping_cover(g.cover,s)?;
         self.text(s.title,Rect::new(g.title.x,g.title.y,g.title.w,g.title.h),16.,600,s.text_color)?;
         self.text(s.artist,Rect::new(g.artist.x,g.artist.y,g.artist.w,g.artist.h),10.,400,secondary)?;
         let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=4.*(1.-lyric_t).powi(3);
-        let boundary=g.lyric.x+self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w)*s.highlight.clamp(0.,1.);
-        for (clip,ink) in [(Rect::new(g.lyric.x,g.lyric.y,(boundary-g.lyric.x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(g.lyric.x+g.lyric.w-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(g.lyric.x,g.lyric.y+lyric_y,g.lyric.w,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(g.lyric.h))?;self.dc.PopAxisAlignedClip();}}
+        let boundary=lyric_x+lyric_width*s.highlight.clamp(0.,1.);
+        for (clip,ink) in [(Rect::new(lyric_x,g.lyric.y,(boundary-lyric_x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(lyric_x+lyric_width-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(lyric_x,g.lyric.y+lyric_y,lyric_width,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(g.lyric.h))?;self.dc.PopAxisAlignedClip();}}
 
-        self.text(s.secondary,Rect::new(g.secondary.x,g.secondary.y,g.secondary.w,g.secondary.h),10.5,400,secondary)?;
+        self.text(s.secondary,Rect::new(sub_x,g.secondary.y,sub_width,g.secondary.h),10.5,400,secondary)?;
         let breath=if s.playing&&s.animate{0.68+0.32*(s.time_ms/2600.*std::f64::consts::TAU).sin()}else{1.};
         let dot=4.+if s.playing&&s.animate{0.8*breath}else{0.};
         // Use the secondary lyric's actual baseline on the side layout, including language fallback.
@@ -355,6 +374,11 @@ impl Renderer{
         let (base_shape,base_radius)=s.layout.morph_shape(s.frame.card_reveal,s.radius,s.fluid_motion);let p=s.frame.card_reveal;
         let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
         let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
+        let black_capsule=!s.mini&&s.classic_glass&&p<=0.05&&s.notification.is_none()&&s.osd.is_none();
+        let live_glass=(s.material==Material::LiquidGlass&&p>0.05||black_capsule)&&s.notification.is_none()&&s.osd.is_none()&&s.opacity>0.01;
+        if present&&live_glass{self.dc.SetTarget(None);self.glass_bitmap=self.glass.render(&self._device,&self.dc,self.hwnd,shape,radius,self.dpi,if black_capsule{0x10141c}else if s.cover_background{self.cover_palette.background}else{0x151b24},black_capsule,!s.mini,s.time_ms);self.reading_dark=false;}
+        else if present{self.glass.stop();self.glass_bitmap=None;}
+
         if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
             if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,0.));self.compact_view(&neighbor)?;}
             if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width+s.swipe_offset,0.));self.compact_view(&old)?;}
@@ -368,9 +392,15 @@ impl Renderer{
         // One opacity layer for pause/show fades. Geometry remains fixed.
         self.clip(Rect::new(0.,0.,s.layout.host.w,s.layout.host.h),0.,s.opacity)?;
         self.shadow_fx.SetInput(0,&self.shadow,true);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&(22_f32/3.).to_ne_bytes())?;
-        let shadow_color=[0_f32,0.,0.,0.3];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
+        let shadow_color=[0_f32,0.,0.,if s.mini&&p<0.01{0.04}else{0.22}];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
         self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
-        let alpha=if s.transparent{0xf5000000}else{0xff000000};
+        let clear=s.material==Material::LiquidGlass&&s.notification.is_none()&&s.osd.is_none();
+        // Only the reading surface gains density as it expands. A collapsed Mini
+        // leaves the browser tab strip visible through its low-opacity meniscus.
+        let black_capsule=!s.mini&&s.classic_glass&&p<=0.05&&s.notification.is_none()&&s.osd.is_none();
+        let expanded_clear=clear&&p>0.05;let optical_mix=if clear{blend(p,0.05,0.85)}else{0.};
+        let glass_ready=self.glass_bitmap.is_some()||self.backdrop.is_some();
+        let alpha=if expanded_clear&&!glass_ready{0xf5000000}else if black_capsule&&!glass_ready{0xfa000000}else if clear{(((if s.mini{22.+174.*p.clamp(0.,1.)}else{245.-49.*p.clamp(0.,1.)})*(1.-optical_mix)+8.*optical_mix)as u32)<<24}else if black_capsule{0x60000000}else if s.transparent{0xf5000000}else{0xff000000};
         let top=alpha|crate::cover_color::mix(0x1b1f25,self.cover_palette.background,if s.cover_background{p*music_alpha}else{0.});
         let bottom=alpha|crate::cover_color::mix(0x0c0f14,self.cover_palette.background,if s.cover_background{p*music_alpha*0.65}else{0.});
         if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
@@ -382,8 +412,8 @@ impl Renderer{
         self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);
         // Frost the cover, never the text. This is a self-contained poster acrylic,
         // not desktop capture; the classic material and compact capsule stay intact.
-        let glass=if s.material!=Material::Classic&&s.notification.is_none()&&s.osd.is_none(){blend(p,if s.material==Material::LiquidGlass{0.11}else{0.16},0.92)}else{0.};
-        if glass>0.001{
+        let glass=if clear&&s.mini{1.}else if s.material!=Material::Classic&&s.notification.is_none()&&s.osd.is_none(){blend(p,if s.material==Material::LiquidGlass{0.11}else{0.16},0.92)}else{0.};
+        if glass>0.001&&s.material==Material::Acrylic{
             self.clip(shape,radius,glass as f32)?;
             if s.cover_background{
                 if let Some(cover)=&self.cover{
@@ -404,8 +434,11 @@ impl Renderer{
             self.fill(shape,radius,scrim|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));
             self.dc.PopLayer();
         }
-        if s.material==Material::LiquidGlass&&glass>0.001{self.liquid_lens(s,shape,radius,glass as f32)?;}
-        let edge=if s.material==Material::LiquidGlass{0x5affffff}else if glass>0.001{0x42ffffff}else{0x22ffffff};
+        if expanded_clear{self.expanded_glass(s,shape,radius,optical_mix as f32,false)?;}
+        if black_capsule{self.expanded_glass(s,shape,radius,1.,true)?;}
+        if clear&&!expanded_clear&&!black_capsule&&glass>0.001{self.liquid_lens(s,shape,radius,(glass*(if s.mini{0.025+0.255*p.clamp(0.,1.)}else{0.28}))as f32)?;}
+        if !expanded_clear&&!black_capsule{
+        let edge=if clear&&s.mini&&p<0.01{0x28ffffff}else if s.material==Material::LiquidGlass{0x5affffff}else if glass>0.001{0x42ffffff}else{0x22ffffff};
         self.brush.SetColor(&color(edge));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
         if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
             let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(0x44ffffff)},D2D1_GRADIENT_STOP{position:0.32,color:color(0x00ffffff)}];
@@ -417,10 +450,11 @@ impl Renderer{
         if s.material==Material::LiquidGlass&&glass>0.001{
             // A bright outer meniscus and a darker inset give the bevel optical thickness.
             self.clip(shape,radius,glass as f32)?;
-            self.brush.SetColor(&color(0x55ffffff));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.25,None);
+            self.brush.SetColor(&color(if s.mini&&p<0.01{0x28ffffff}else{0x55ffffff}));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.25,None);
             let inset=Rect::new(shape.x+2.,shape.y+2.,(shape.w-4.).max(1.),(shape.h-4.).max(1.));
-            self.brush.SetColor(&color(0x48000000));self.dc.DrawRoundedRectangle(&rounded(inset,(radius-2.).max(1.)),&self.brush,0.8,None);
+            self.brush.SetColor(&color(if s.mini&&p<0.01{0x14000000}else{0x48000000}));self.dc.DrawRoundedRectangle(&rounded(inset,(radius-2.).max(1.)),&self.brush,0.8,None);
             self.dc.PopLayer();
+        }
         }
         let content_scale=(base_shape.w/s.layout.card.w).min(base_shape.h/s.layout.card.h);
         let tx=base_shape.x+(base_shape.w-s.layout.card.w*content_scale)/2.;let ty=base_shape.y+(base_shape.h-s.layout.card.h*content_scale)/2.;
@@ -428,7 +462,7 @@ impl Renderer{
         if alpha>0.001{self.draw_layer(&self.expanded,if s.resizing{s.frame.card_blur}else{0.},alpha as f32,matrix(content_scale,tx,ty),(shape,radius))?;}
         let alpha=(1.-blend(p,0.06,0.46))*music_alpha;
         if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,matrix(1.,base_shape.x-s.layout.capsule.x,base_shape.y-s.layout.capsule.y),(shape,radius))?;}
-        if s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none()&&s.osd.is_none(){self.satellite(s)?;}
+        if !s.mini&&s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none()&&s.osd.is_none(){self.satellite(s)?;}
         if let Some(notice)=s.notification{self.clip(shape,radius,s.notification_mix as f32)?;self.notification_content(notice,shape)?;self.dc.PopLayer();}
         if let Some(osd)=s.osd{self.clip(shape,radius,s.osd_mix as f32)?;self.osd_content(osd,shape)?;self.dc.PopLayer();}
         self.dc.PopLayer();self.dc.EndDraw(None,None)?;
@@ -486,6 +520,7 @@ fn time(s:f64)->String{let s=s.max(0.)as u64;format!("{:02}:{:02}",s/60,s%60)}
 
 
 include!("tool_renderer.rs");
+include!("mini_renderer.rs");
 
 impl Renderer{
  pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,present:bool)->Result<()>{

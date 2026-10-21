@@ -140,12 +140,18 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     // A layout type, never a raw boolean pair.
     if key=="SystemStateHintPlacement"{if !["Island","Bottom"].contains(&text){return Err("提示位置无效".into())}return request("update",json!({"key":key,"value":text}));}
     if key == "MusicExpandedLayout" {
-        if !["Separated", "SideBySide", "LyricFocus"].contains(&text) {
+        if !["Separated", "SideBySide", "LyricFocus", "LyricRight"].contains(&text) {
             return Err("布局选项无效。".into());
         }
         return request("update", json!({"key": key, "value": text}));
     }
     // The material picker is a segmented control: it sends a bare label, not a JSON literal.
+    if key=="IslandSizeMode"{let mode=match text{"Classic"=>"Classic","Mini"=>"Mini",_=>if text.parse::<f64>().map_err(|_|"尺寸选项无效")?>=0.5{"Mini"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
+    if key=="ClassicCapsuleMaterial"{let mode=match text{"Classic"=>"Classic","LiquidGlass"=>"LiquidGlass",_=>if text.parse::<f64>().map_err(|_|"材质选项无效")?>=0.5{"LiquidGlass"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
+    if key == "MiniMaterial" {
+        if !["Classic", "LiquidGlass"].contains(&text) {return Err("Mini 材质选项无效。".into());}
+        return request("update",json!({"key":key,"value":text}));
+    }
     if key == "IslandMaterial" {
         if !["Classic", "Acrylic", "LiquidGlass"].contains(&text) {
             return Err("材质选项无效。".into());
