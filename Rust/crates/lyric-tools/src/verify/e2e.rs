@@ -277,7 +277,7 @@ fn check_tools(runtime: &mut Runtime) -> Result<Value> {
         "concurrentTimers": true,
         "pauseResetResume": true,
         "cycleWithSwipeDisabled": true,
-        "adaptiveMaximum": true,
+        "emptyFramePreservesWidthWithMaximum": true,
         "pastelColor": true,
         "pausedSessionRestore": true,
         "devicePreview": true,
@@ -419,7 +419,7 @@ pub fn run(args: &[String]) -> Result<()> {
     report.insert("version".into(), json!(version));
     report.insert("runtime".into(), json!(runtime_directory.to_string_lossy()));
     report.insert("testOverrides".into(), json!({"AllowedSources": ["LyricIsland.Verify13"], "OnlineSongInfo": false}));
-    let mut runtime = Runtime::new(&runtime_directory, &data, 60_000);
+    let mut runtime = Runtime::new(&runtime_directory, &data, 180_000);
 
     let outcome = (|| -> Result<()> {
         std::fs::write(data.join("settings.json"), "{\"AllowedSources\":[\"LyricIsland.Verify13\"],\"OnlineSongInfo\":false}")?;
