@@ -195,22 +195,32 @@ pub fn download_bundle(target: &Path, version: &str, scratch: &Path, preferred: 
 }
 
 pub fn apply(stage: &Path, target: &Path, backup: &Path, fail_after: usize, after: Option<&mut dyn FnMut() -> Result<()>>) -> Result<()> {
+    // Check every changed destination before touching any installed file. In
+    // particular a running settings executable must not trigger a partial update.
+    let mut files = Vec::new();
+    for relative in payload::relative_files(stage)? {
+        let input = stage.join(relative.replace('/', "\\"));
+        let destination = target.join(relative.replace('/', "\\"));
+        if destination.is_file() {
+            // Identical fonts may remain mapped after shutdown and need no write.
+            if std::fs::metadata(&input)?.len() == std::fs::metadata(&destination)?.len()
+                && lyric_archive::sha256_file(&input)? == lyric_archive::sha256_file(&destination)? {
+                continue;
+            }
+            std::fs::OpenOptions::new().write(true).open(&destination)
+                .map_err(|error| Error(format!("无法替换 {}，请关闭占用该文件的窗口后重试：{error}", destination.display())))?;
+        }
+        files.push(relative);
+    }
     let mut changed: Vec<String> = Vec::new();
     let mut existed: HashSet<String> = HashSet::new();
     let mut after = after;
     let outcome = (|| -> Result<()> {
-        let files = payload::relative_files(stage)?;
         for relative in files {
             let input = stage.join(relative.replace('/', "\\"));
             let destination = target.join(relative.replace('/', "\\"));
             let old = backup.join(relative.replace('/', "\\"));
             if destination.is_file() {
-                // Windows may retain font mappings after the app exits. Identical
-                // assets need no write, so leave them untouched during an update.
-                if std::fs::metadata(&input)?.len() == std::fs::metadata(&destination)?.len()
-                    && lyric_archive::sha256_file(&input)? == lyric_archive::sha256_file(&destination)? {
-                    continue;
-                }
                 if let Some(parent) = old.parent() { std::fs::create_dir_all(parent)?; }
                 std::fs::copy(&destination, &old)?;
                 existed.insert(relative.clone());
@@ -252,6 +262,21 @@ pub fn stop_app(pipe: &str) -> Result<()> {
 pub fn wait(pid: i32) -> Result<()> {
     if pid <= 0 { return Ok(()); }
     if !win::wait_process(pid as u32, Duration::from_secs(15)) { return Err(Error("应用尚未退出，更新已取消".into())); }
+    Ok(())
+}
+
+/// Settings can be launched directly or outlive a restarted island, so the
+/// island's child handle and the launcher's settings PID are not sufficient.
+pub fn stop_settings(target: &Path) -> Result<()> {
+    for entry in win::processes() {
+        if !["LyricIsland.Settings.exe", "lyric-island-settings.exe"].iter().any(|name| entry.name.eq_ignore_ascii_case(name)) { continue; }
+        let Some(image) = win::process_image(entry.pid) else { continue; };
+        if !image.parent().is_some_and(|parent| paths::same_path(parent, target)) { continue; }
+        win::close_main_windows(entry.pid);
+        if !win::wait_process(entry.pid, Duration::from_secs(3)) && !win::terminate_process(entry.pid) {
+            return Err(Error(format!("设置窗口尚未退出，未替换文件：{}", image.display())));
+        }
+    }
     Ok(())
 }
 
@@ -368,6 +393,7 @@ pub fn run(args: Vec<String>) -> i32 {
         stop_app(&pipe)?;
         stopped = true;
         wait(pid)?;
+        stop_settings(&target_path)?;
         wait(settings)?;
         let confirmation_pipe = pipe.clone();
         let confirmation_version = version.clone();
@@ -419,6 +445,24 @@ fn report_failure(args: &[String], error: &Error) -> Result<()> {
 mod update_file_tests {
     use super::*;
     use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn changed_locked_file_is_rejected_before_any_file_is_replaced() {
+        let root = paths::temp_unique("DotIsle.LockedUpdateTest");
+        let stage = root.join("stage");let target = root.join("target");let backup = root.join("backup");
+        std::fs::create_dir_all(&stage).unwrap();std::fs::create_dir_all(&target).unwrap();
+        for name in ["a.txt", "z.exe"] {
+            std::fs::write(stage.join(name), b"new").unwrap();
+            std::fs::write(target.join(name), b"old").unwrap();
+        }
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(1).open(target.join("z.exe")).unwrap();
+        let error = apply(&stage, &target, &backup, 0, None).unwrap_err();
+        assert!(error.to_string().contains("z.exe"));
+        assert!(!error.to_string().contains("回滚未完成"));
+        for name in ["a.txt", "z.exe"] { assert_eq!(std::fs::read(target.join(name)).unwrap(), b"old"); }
+        assert!(!backup.exists());
+        drop(locked);std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn unchanged_locked_assets_are_preserved_while_changed_files_are_updated() {

@@ -53,6 +53,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let backup = root.join("backup");
     let pipe = format!("LyricIsland.Settings.test.ota.{}", unique());
     let mut launched: Option<Child> = None;
+    let mut settings: Option<Child> = None;
 
     let outcome = (|| -> Result<()> {
         updater::verify(&zip, &expected)?;
@@ -69,8 +70,19 @@ pub fn run(args: &[String]) -> Result<()> {
         check(initial["settings"]["CompactWidth"].as_f64() == Some(317.0), format!("初始设置缺失：{initial}"))?;
         let old_pid = launched.as_ref().map(|child| child.id()).unwrap_or(0);
 
+        // Make the installed settings binary differ from the new payload, and
+        // launch it independently so the island cannot stop it via a child handle.
+        use std::io::Write;
+        std::fs::OpenOptions::new().append(true).open(target.join("LyricIsland.Settings.exe"))?.write_all(b"previous OTA settings binary")?;
+        settings = Some(Command::new(target.join("LyricIsland.Settings.exe"))
+            .current_dir(&target).env("LYRICISLAND_TEST_PIPE", &pipe).spawn()?);
+        std::thread::sleep(Duration::from_millis(500));
+        check(settings.as_mut().unwrap().try_wait()?.is_none(), "独立设置窗口未启动")?;
+
         updater::stop_app(&pipe)?;
         updater::wait(old_pid as i32)?;
+        updater::stop_settings(&target)?;
+        check(settings.as_mut().unwrap().try_wait()?.is_some(), "独立设置窗口未退出")?;
         std::env::set_var("LYRICISLAND_TEST_PIPE", &pipe);
         let mut after = || updater::start(&target, &data);
         updater::apply(&stage, &target, &backup, 0, Some(&mut after))?;
@@ -86,6 +98,7 @@ pub fn run(args: &[String]) -> Result<()> {
             "originalDirectoryUpdated": true,
             "restarted": true,
             "preservedSettings": true
+            ,"independentSettingsClosed": true
         });
         write_json(&report_path, &report)?;
         println!("{report}");
@@ -93,6 +106,7 @@ pub fn run(args: &[String]) -> Result<()> {
     })();
     let _ = process::request(&pipe, "exit", None, Duration::from_secs(1));
     kill(&mut launched);
+    kill(&mut settings);
     let _ = std::env::remove_var("LYRICISLAND_TEST_PIPE");
     outcome
 }
