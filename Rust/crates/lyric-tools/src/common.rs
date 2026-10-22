@@ -52,7 +52,7 @@ pub fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().map(strip_verbatim).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-pub fn default_version() -> &'static str { "2.1.6mini" }
+pub fn default_version() -> &'static str { "2.1.6" }
 
 pub fn unique() -> String { lyric_bootstrap::paths::unique_suffix() }
 
