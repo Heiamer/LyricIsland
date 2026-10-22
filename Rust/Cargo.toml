@@ -6,7 +6,7 @@ members = ["crates/lyric-core", "crates/lyric-archive", "crates/lyric-bootstrap"
 exclude = ["vendor/material-colors-0.4.2"]
 
 [workspace.package]
-version = "2.1.8"
+version = "2.1.9"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"

@@ -55,7 +55,7 @@ jobs:
         run: cargo build --release --locked --workspace
       - name: Build portable, installer, source and OTA packages
         run: |
-          & .\Rust\target\release\lyric-tools.exe package --version 2.1.8 --binary-dir "$pwd\Rust\target\release" --output "$pwd\publish\release-output" --sqlite $env:SQLITE_DLL --iscc $env:INNO_SETUP_COMPILER
+          & .\Rust\target\release\lyric-tools.exe package --version 2.1.9 --binary-dir "$pwd\Rust\target\release" --output "$pwd\publish\release-output" --sqlite $env:SQLITE_DLL --iscc $env:INNO_SETUP_COMPILER
           if($LASTEXITCODE -ne 0){throw 'Packaging failed'}
       - name: Check installer maintenance
         run: |
@@ -64,17 +64,17 @@ jobs:
       - name: Check packaged GUI and OTA on the runner
         continue-on-error: true
         run: |
-          & .\Rust\target\release\lyric-tools.exe verify e2e "$pwd\publish\DotIsle-2.1.8" --version 2.1.8 --artifacts "$pwd\publish\release-output" --report "$pwd\validation\e2e.json"
+          & .\Rust\target\release\lyric-tools.exe verify e2e "$pwd\publish\DotIsle-2.1.9" --version 2.1.9 --artifacts "$pwd\publish\release-output" --report "$pwd\validation\e2e.json"
           if($LASTEXITCODE -ne 0){throw 'GUI verification failed; inspect runner GPU availability'}
-          $ota="$pwd\publish\release-output\OTA-Compatibility\LyricIsland-2.1.8-Portable.zip"
+          $ota="$pwd\publish\release-output\OTA-Compatibility\LyricIsland-2.1.9-Portable.zip"
           $digest=(Get-FileHash $ota -Algorithm SHA256).Hash.ToLowerInvariant()
-          & .\Rust\target\release\lyric-tools.exe verify updater $ota $digest "$pwd\validation\updater-work" "$pwd\validation\updater.json" 2.1.8
+          & .\Rust\target\release\lyric-tools.exe verify updater $ota $digest "$pwd\validation\updater-work" "$pwd\validation\updater.json" 2.1.9
           if($LASTEXITCODE -ne 0){throw 'OTA verification failed'}
       - name: Save packages, test reports and verification tool
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-release-2.1.8
+          name: windows-release-2.1.9
           if-no-files-found: warn
           retention-days: 3
           path: |
@@ -85,10 +85,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag='v2.1.8'
+          $tag='v2.1.9'
           gh release view $tag --json isDraft --jq .isDraft 2>$null
           if($LASTEXITCODE -eq 0){throw 'The release tag already exists; inspect it before replacement'}
-          gh release create $tag --target $env:GITHUB_SHA --draft --title '点屿 DotIsle 2.1.8' --notes '布局预览动效、封面尺寸与亚克力材质更新，附件仍在最终验证中。'
+          gh release create $tag --target $env:GITHUB_SHA --draft --title '点屿 DotIsle 2.1.9' --notes '布局预览动效、封面尺寸与亚克力材质更新，附件仍在最终验证中。'
           if($LASTEXITCODE -ne 0){throw 'Draft release creation failed'}
           $files=@(Get-ChildItem publish/release-output -File | ForEach-Object FullName)+@(Get-ChildItem publish/release-output/OTA-Compatibility -File | ForEach-Object FullName)
           gh release upload $tag @files
