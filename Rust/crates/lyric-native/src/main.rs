@@ -4,7 +4,7 @@
 #![recursion_limit = "256"]
 mod bottom_osd;mod frame_pacing;mod update_activity;mod activation;mod notification_store;mod cover_color;
 mod mini_contrast;mod surface;mod material_preview;
-pub const DISPLAY_VERSION:&str="2.1.8";
+pub const DISPLAY_VERSION:&str="2.1.6";
 mod theme_accent;mod app_icon;mod motion;mod layout;mod renderer;mod config;mod font_probe;mod progress;mod notifications;mod banner;
 mod devices;mod osd;mod timers;mod activities;
 mod gestures;mod compact;mod sound;mod todos;mod history;mod quick_reminder;mod app_rules;mod foreground;mod diagnostics;

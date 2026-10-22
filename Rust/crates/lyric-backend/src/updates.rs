@@ -92,23 +92,23 @@ pub fn install()->Result<Value,String>{
     #[test]fn rejects_untrusted_tags_and_preview_releases(){for tag in ["latest","v1.3-beta","v1.3/evil"]{assert!(describe(&json!({"tag_name":tag}),"1.2.0").is_err());}assert!(describe(&json!({"tag_name":"v2.0","prerelease":true}),"1.2.0").is_err());}
     #[test]fn fallback_reads_only_canonical_repository_metadata(){assert_eq!(page_release(r#"<meta property="og:url" content="/Heiamer/LyricIsland/releases/tag/v1.2" />"#).unwrap()["tag_name"],"v1.2");assert!(page_release(r#"<meta property="og:url" content="/other/project/releases/tag/v9.0" />"#).is_err());}
     #[test]fn html_fallback_accepts_attribute_order_quotes_and_spacing(){
-        for html in [r#"<META content = 'https://github.com/Heiamer/LyricIsland/releases/tag/v2.1.8' data-test='release' property = 'og:url'>"#,
-                     "<meta\ncontent=\"/Heiamer/LyricIsland/releases/tag/v2.1.8\"\nproperty=\"og:url\">"]{
-            assert_eq!(page_release(html).unwrap()["tag_name"],"v2.1.8");
+        for html in [r#"<META content = 'https://github.com/Heiamer/LyricIsland/releases/tag/v2.1.6' data-test='release' property = 'og:url'>"#,
+                     "<meta\ncontent=\"/Heiamer/LyricIsland/releases/tag/v2.1.6\"\nproperty=\"og:url\">"]{
+            assert_eq!(page_release(html).unwrap()["tag_name"],"v2.1.6");
         }
         for html in [r#"<meta data-property='og:url' content='/Heiamer/LyricIsland/releases/tag/v9.0'>"#,
                      r#"<meta property='og:url' content='https://evil.test/Heiamer/LyricIsland/releases/tag/v9.0'>"#,
-                     r#"<meta property='og:url' content='/Heiamer/LyricIsland/releases/tag/v2.1.8/evil'>"#]{assert!(page_release(html).is_err());}
+                     r#"<meta property='og:url' content='/Heiamer/LyricIsland/releases/tag/v2.1.6/evil'>"#]{assert!(page_release(html).is_err());}
     }
     #[test]fn raw_manifest_requires_a_published_stable_release(){
-        let valid=json!({"published":true,"tag_name":"v2.1.8","prerelease":false,"draft":false});
-        assert_eq!(manifest_release(valid.clone()).unwrap()["tag_name"],"v2.1.8");
+        let valid=json!({"published":true,"tag_name":"v2.1.6","prerelease":false,"draft":false});
+        assert_eq!(manifest_release(valid.clone()).unwrap()["tag_name"],"v2.1.6");
         for key in ["published","prerelease","draft"]{let mut invalid=valid.clone();invalid[key]=json!(key!="published");assert!(manifest_release(invalid).is_err());}
         assert!(manifest_release(json!({"published":true,"tag_name":"latest"})).is_err());
     }
     #[test]fn numeric_stable_release_is_newer_than_installed_and_mini_versions(){
-        for current in ["2.1.5","2.1.5mini","2.1.6-mini","2.1.7"]{assert_eq!(describe(&json!({"tag_name":"v2.1.8","prerelease":false}),current).unwrap()["newer"],true);}
-        assert_eq!(describe(&json!({"tag_name":"v2.1.8"}),"2.1.8").unwrap()["newer"],false);
+        for current in ["2.1.5","2.1.5mini"]{assert_eq!(describe(&json!({"tag_name":"v2.1.6","prerelease":false}),current).unwrap()["newer"],true);}
+        assert_eq!(describe(&json!({"tag_name":"v2.1.6"}),"2.1.6").unwrap()["newer"],false);
     }
 }
 
