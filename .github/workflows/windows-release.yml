@@ -1,0 +1,95 @@
+name: Build and verify Windows release
+
+on:
+  push:
+    branches: [fix/in-app-update]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: -C target-feature=+crt-static
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Windows build tools
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable-x86_64-pc-windows-msvc
+          $fxc=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Filter fxc.exe -Recurse | Where-Object {$_.Directory.Name -eq 'x64'} | Sort-Object FullName | Select-Object -Last 1
+          if(-not $fxc){throw 'Windows SDK fxc.exe is missing'}
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+          $compiler='C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if(-not(Test-Path $compiler)){
+            $download=Join-Path $env:RUNNER_TEMP 'inno-setup.exe'
+            Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $download
+            if((Get-AuthenticodeSignature $download).Status -ne 'Valid'){throw 'Inno signature verification failed'}
+            $directory=Join-Path $env:RUNNER_TEMP 'inno'
+            $process=Start-Process $download -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER','/NOICONS',('/DIR="'+$directory+'"')) -WindowStyle Hidden -Wait -PassThru
+            if($process.ExitCode -ne 0){throw 'Inno installation failed'}
+            $compiler=Join-Path $directory 'ISCC.exe'
+          }
+          "INNO_SETUP_COMPILER=$compiler" >> $env:GITHUB_ENV
+          $archive=Join-Path $env:RUNNER_TEMP 'sqlite.zip'
+          Invoke-WebRequest 'https://api.nuget.org/v3-flatcontainer/sqlitepclraw.lib.e_sqlite3/2.1.6/sqlitepclraw.lib.e_sqlite3.2.1.6.nupkg' -OutFile $archive
+          $sqlite=Join-Path $env:RUNNER_TEMP 'sqlite'
+          Expand-Archive $archive $sqlite
+          "SQLITE_DLL=$sqlite\runtimes\win-x64\native\e_sqlite3.dll" >> $env:GITHUB_ENV
+      - name: Run workspace tests
+        working-directory: Rust
+        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Build optimized Windows binaries
+        working-directory: Rust
+        run: cargo build --release --locked --workspace
+      - name: Build portable, installer, source and OTA packages
+        run: |
+          & .\Rust\target\release\lyric-tools.exe package --version 2.1.8 --binary-dir "$pwd\Rust\target\release" --output "$pwd\release-output" --sqlite $env:SQLITE_DLL --iscc $env:INNO_SETUP_COMPILER
+          if($LASTEXITCODE -ne 0){throw 'Packaging failed'}
+      - name: Check installer maintenance
+        run: |
+          & .\Rust\target\release\lyric-tools.exe verify installer "$pwd\validation\installer-work" "$pwd\validation\installer.json"
+          if($LASTEXITCODE -ne 0){throw 'Installer verification failed'}
+      - name: Check packaged GUI and OTA on the runner
+        continue-on-error: true
+        run: |
+          & .\Rust\target\release\lyric-tools.exe verify e2e "$pwd\publish\DotIsle-2.1.8" --version 2.1.8 --artifacts "$pwd\release-output" --report "$pwd\validation\e2e.json"
+          if($LASTEXITCODE -ne 0){throw 'GUI verification failed; inspect runner GPU availability'}
+          $ota="$pwd\release-output\OTA-Compatibility\LyricIsland-2.1.8-Portable.zip"
+          $digest=(Get-FileHash $ota -Algorithm SHA256).Hash.ToLowerInvariant()
+          & .\Rust\target\release\lyric-tools.exe verify updater $ota $digest "$pwd\validation\updater-work" "$pwd\validation\updater.json" 2.1.8
+          if($LASTEXITCODE -ne 0){throw 'OTA verification failed'}
+      - name: Save packages, test reports and verification tool
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-2.1.8
+          if-no-files-found: warn
+          retention-days: 3
+          path: |
+            release-output/**
+            validation/*.json
+            Rust/target/release/lyric-tools.exe
+      - name: Create draft release for final validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag='v2.1.8'
+          gh release view $tag --json isDraft --jq .isDraft 2>$null
+          if($LASTEXITCODE -eq 0){throw 'The release tag already exists; inspect it before replacement'}
+          gh release create $tag --target $env:GITHUB_SHA --draft --title '点屿 DotIsle 2.1.8' --notes '正式版更新兼容性修复，附件仍在最终验证中。'
+          if($LASTEXITCODE -ne 0){throw 'Draft release creation failed'}
+          $files=@(Get-ChildItem release-output -File | ForEach-Object FullName)+@(Get-ChildItem release-output/OTA-Compatibility -File | ForEach-Object FullName)
+          gh release upload $tag @files
+          if($LASTEXITCODE -ne 0){throw 'Release upload failed'}

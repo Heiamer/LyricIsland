@@ -24,7 +24,7 @@ mod theme;
 mod value;
 mod quick_ui;
 mod rules_ui;
-pub const DISPLAY_VERSION:&str="2.1.6mini";
+pub const DISPLAY_VERSION:&str="2.1.8";
 mod tutorial;
 mod mini_mode;
 mod row_edges;
