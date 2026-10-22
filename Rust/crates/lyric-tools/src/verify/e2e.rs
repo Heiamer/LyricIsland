@@ -128,7 +128,7 @@ fn check_settings_updates(runtime: &Runtime, runtime_directory: &Path) -> Result
     check(reset["Motion"]==original["Motion"]&&reset["Animation"]==true&&reset["IslandFluidMotion"]==true&&reset["SettingsLightAccentColor"]=="#9B4BC7"&&reset["SettingsDarkAccentColor"]=="#E5B86A","动效还原不完整或改变主题色")?;
     let classic=state(runtime)?;let classic_w=classic["islandGeometry"]["card"]["w"].as_f64().unwrap();let classic_h=classic["islandGeometry"]["card"]["h"].as_f64().ok_or_else(||ToolError("missing card geometry".into()))?;let stored_layout=classic["settings"]["MusicExpandedLayout"].clone();
     update(runtime,"IslandSizeMode",json!("Mini"))?;sleep(1.4);let mini=state(runtime)?;
-    for material in ["Classic","Glass"]{
+    for material in ["Classic","Acrylic","Glass"]{
         update(runtime,"MiniMaterial",json!(material))?;check(settings(runtime)?["MiniMaterial"]==material,"Mini 材质未保存")?;
         process::call(runtime.pipe(),"expand",None)?;sleep(0.2);
         for _ in 0..24{process::call(runtime.pipe(),"testPointerClick",None)?;sleep(0.065);let clicked=state(runtime)?;check(clicked["lastError"].is_null(),format!("Mini 点击出现渲染错误：{}",clicked["lastError"]))?;}
@@ -146,7 +146,9 @@ fn check_settings_updates(runtime: &Runtime, runtime_directory: &Path) -> Result
     update(runtime,"MiniAutoContrast",json!(false))?;sleep(0.4);let fixed_ink=state(runtime)?;
     check(fixed_ink["miniContrast"]["enabled"]==false&&fixed_ink["miniContrast"]["foreground"]=="#F4F6F8","关闭自动文字对比未恢复浅色文字")?;
     update(runtime,"MiniAutoContrast",json!(true))?;check(settings(runtime)?["MiniAutoContrast"]==true,"自动文字对比未保存")?;
-    check(rejected(runtime,"update",Some(json!({"key":"MiniMaterial","value":"Acrylic"})))?,"Mini 收起细条应只提供经典与玻璃")?;
+    let strip_before=settings(runtime)?["MiniMaterial"].clone();
+    update(runtime,"MiniMaterial",json!("Acrylic"))?;check(settings(runtime)?["MiniMaterial"]=="Acrylic","Mini 亚克力材质未保存")?;
+    update(runtime,"MiniMaterial",strip_before)?;
     check(mini["compactHeight"].as_f64().is_some_and(|h|h<=14.1)&&mini["islandGeometry"]["satellite"]==false&&mini["islandGeometry"]["horizontalGestures"]==true,"Mini 尺寸或交互未生效")?;
     check(mini["islandGeometry"]["card"]["h"].as_f64().is_some_and(|h|(h-(classic_h*0.5+10.)).abs()<0.3&&(mini["islandGeometry"]["card"]["w"].as_f64().unwrap()-classic_w*1.05).abs()<0.3),"Mini 紧凑卡片尺寸不正确")?;
     check(rejected(runtime,"update",Some(json!({"key":"IslandSizeMode","value":true})))?,"Mini 模式应拒绝开关值")?;

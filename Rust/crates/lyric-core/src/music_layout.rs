@@ -14,6 +14,14 @@ fn buttons_at(width:f64,scale:f64,center_y:f64)->[(i32,Rect);7]{
 }
 // Grow with the first stage that clears the artwork, before widening the lyric band.
 pub fn music_height(mix:f64,font:f64)->f64{220.+16.*(mix*2.).clamp(0.,1.)+(font+8.-24.).max(0.)}
+/// The v2.1.6 native layout transition: 230 ms, with zero speed at both ends.
+/// Both the island and the settings preview use this exact timing.
+pub fn music_layout_mix(from:f64,target:f64,elapsed_seconds:f64)->f64{
+    let t=(elapsed_seconds/0.23).clamp(0.,1.);
+    if t>=1.{return target}
+    let e=t*t*(3.-2.*t);
+    from+(target-from)*e
+}
 /// The expanded music layouts. This is a layout type, not a set of switches.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum MusicLayout { Separated, SideBySide, LyricFocus, LyricRight }
@@ -37,7 +45,7 @@ fn lerp_rect(a:Rect,b:Rect,t:f64)->Rect{Rect::new(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*
 impl MusicGeometry {
     /// Blend two layouts. Geometry is the only thing that interpolates, so drawing and
     /// hit testing stay in lockstep on every frame of the transition.
-    fn between(a:&Self,b:&Self,t:f64)->Self{
+    pub fn between(a:&Self,b:&Self,t:f64)->Self{
         let mut buttons=a.buttons;
         for (slot,other) in buttons.iter_mut().zip(b.buttons){slot.1=lerp_rect(slot.1,other.1,t);}
         Self{cover:lerp_rect(a.cover,b.cover,t),title:lerp_rect(a.title,b.title,t),artist:lerp_rect(a.artist,b.artist,t),lyric:lerp_rect(a.lyric,b.lyric,t),secondary:lerp_rect(a.secondary,b.secondary,t),status_dot:lerp_rect(a.status_dot,b.status_dot,t),status_text:lerp_rect(a.status_text,b.status_text,t),track:lerp_rect(a.track,b.track,t),elapsed:lerp_rect(a.elapsed,b.elapsed,t),total:lerp_rect(a.total,b.total,t),buttons,height:a.height+(b.height-a.height)*t,progress_hit:lerp_rect(a.progress_hit,b.progress_hit,t),text_hit:lerp_rect(a.text_hit,b.text_hit,t),split:a.split+(b.split-a.split)*t,align:a.align+(b.align-a.align)*t}
@@ -56,16 +64,18 @@ pub fn music_geometry(width:f64,_layout:MusicLayout,mix:f64,scale:f64,font:f64)-
         progress_hit:Rect::new(16.,128.+extra,width-32.,14.),text_hit:Rect::new(108.,18.,width-128.,46.),split:0.,align:0.,
     };
     let separated=MusicGeometry{
-        cover:Rect::new(20.,18.,68.,68.),
-        title:Rect::new(108.,29.5,width-214.,24.),artist:Rect::new(108.,56.5,width-128.,18.),
+        cover:Rect::new(20.,18.,56.,56.),
+        title:Rect::new(96.,23.5,width-202.,24.),artist:Rect::new(96.,50.5,width-116.,18.),
         lyric:Rect::new(20.,94.,width-40.,line),secondary:Rect::new(20.,118.+extra,width-40.,18.),
-        status_dot:Rect::new(width-94.,40.,4.,4.),status_text:Rect::new(width-84.,29.5,64.,24.),
+        status_dot:Rect::new(width-94.,34.,4.,4.),status_text:Rect::new(width-84.,23.5,64.,24.),
         track:Rect::new(20.,150.+extra,width-40.,3.),elapsed:Rect::new(20.,160.+extra,70.,14.),total:Rect::new(width-90.,160.+extra,70.,14.),
         buttons:buttons_at(width,scale,201.+extra),height:music_height(1.,font),
-        progress_hit:Rect::new(16.,144.+extra,width-32.,14.),text_hit:Rect::new(108.,29.5,width-204.,45.),split:1.,align:0.,
+        progress_hit:Rect::new(16.,144.+extra,width-32.,14.),text_hit:Rect::new(96.,23.5,width-192.,45.),split:1.,align:0.,
     };
     // The live mix drives both directions; the destination enum must not snap a reverse morph.
     let mut focus=separated;
+    // Focus and right keep the side-by-side artwork size; only the lyric band changes.
+    focus.cover=Rect::new(20.,18.,68.,68.);
     focus.title=Rect::new(108.,19.,width-214.,24.);focus.artist=Rect::new(108.,46.,width-128.,18.);
     focus.status_text.y=19.;focus.status_dot.y=29.5;focus.align=0.5;focus.lyric.y=92.;focus.secondary.y=116.+extra;focus.text_hit=Rect::new(108.,19.,width-128.,45.);
     // 右韵 shares the focus stack and only moves the anchor: the same header, the same
@@ -96,7 +106,9 @@ mod tests{
                 let mix=step as f64/8.;
                 let layout=if mix<=1.{MusicLayout::SideBySide}else if mix<=2.{MusicLayout::LyricFocus}else{MusicLayout::LyricRight};
                 let g=music_geometry(width,layout,mix,1.5,font);
-                assert_eq!((g.cover.w,g.cover.h),(68.,68.));
+                // Artwork stays square: 68 side by side/focus/right, 56 when separated.
+                assert_eq!(g.cover.w,g.cover.h);
+                assert!(g.cover.w>=56.&&g.cover.w<=68.);
                 for text in [g.title,g.artist,g.lyric,g.secondary]{assert!(!overlaps(g.cover,text));}
                 assert!(g.title.y+g.title.h<=g.artist.y);
                 assert!(g.artist.y+g.artist.h<=g.lyric.y);

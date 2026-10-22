@@ -24,7 +24,7 @@ mod theme;
 mod value;
 mod quick_ui;
 mod rules_ui;
-pub const DISPLAY_VERSION:&str="2.1.6";
+pub const DISPLAY_VERSION:&str="2.1.8";
 mod tutorial;
 mod mini_mode;
 mod row_edges;
@@ -231,6 +231,7 @@ struct SettingsApp {
     hue_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Keyboard focus for the music-layout blocks, so Left/Right/Space work after a click.
     music_focus: FocusHandle,
+    music_preview_motion: music_preview::LayoutMotion,
     /// Scroll state of the content column. One scroll handle per route, so switching routes always
     /// starts where that route was left. The drawer keeps its own offset as well.
     scrolls: Vec<ScrollHandle>,
@@ -455,6 +456,7 @@ impl SettingsApp {
             pad_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             hue_bounds: Rc::new(Cell::new(Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))))),
             music_focus,
+            music_preview_motion: Default::default(),
             scrolls: (0..Route::ALL.len()).map(|_| ScrollHandle::new()).collect(),
             drawer_scroll: ScrollHandle::new(),
             applied_dark: None,
@@ -962,6 +964,11 @@ impl Render for SettingsApp {
         // a dead interface.
         let animate = flag(&state, "Animation", true);
         motion::set_enabled(animate);
+        let preview_visible = self.route == Route::Island && setting_str(&state,"IslandSizeMode","Classic") != "Mini";
+        let layout_target = lyric_core::music_layout::MusicLayout::from_setting(setting_str(&state,"MusicExpandedLayout","SideBySide"));
+        if self.music_preview_motion.update(layout_target,animate && preview_visible,Instant::now()) {
+            window.request_animation_frame();
+        }
         if cx.reduce_motion() != !animate {
             cx.set_reduce_motion(!animate);
         }
@@ -1305,7 +1312,7 @@ fn music_layout_row(state: &Value, view: &SettingsApp, cx: &mut Context<Settings
         .child(div().w(px(6.)).h(px(6.)).rounded(px(3.)).bg(t::accent()))
         .child(div().text_size(px(12.)).text_color(t::text_dim()).child(format!("当前选择：{label}")));
     card("row-music-layout","展开卡片布局","预览跟随当前歌曲、歌词与配色；点选方块切换布局，上方即为真实排版。")
-        .flex_col().items_stretch().gap_3().child(music_preview::live(state)).child(options).child(footer).into_any_element()
+        .flex_col().items_stretch().gap_3().child(music_preview::live(state,view.music_preview_motion.value())).child(options).child(footer).into_any_element()
 }
 
 fn music_layout_option(value: &'static str, title: &'static str, detail: &'static str, selected: bool, view: &SettingsApp, cx: &mut Context<SettingsApp>) -> AnyElement {

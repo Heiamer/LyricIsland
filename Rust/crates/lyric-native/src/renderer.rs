@@ -32,7 +32,7 @@ impl MaterialTheme{
 }
 #[derive(Clone,Copy)]
 pub struct Scene<'a>{
-    pub mini:bool,pub mini_glass:bool,pub classic_glass:bool,pub mini_ink:u32,pub mini_outline:u32,
+    pub mini:bool,pub mini_glass:bool,pub classic_capsule:Material,pub mini_capsule:Material,pub mini_ink:u32,pub mini_outline:u32,
     pub tool_theme:crate::theme_accent::Accent,
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
     pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
@@ -157,7 +157,11 @@ impl Renderer{
                 self.dc.SetTransform(&matrix(scale,shape.x+(shape.w-width*scale)/2.-bounds.left as f64*scale,shape.y+(shape.h-height*scale)/2.-bounds.top as f64*scale));
                 self.dc.DrawImage(&output,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);self.dc.SetTransform(&identity());
             }}
-            let scrim=if surface.material==Material::Acrylic{0xc9000000}else{0x55000000};
+            // The dense acrylic scrim follows whichever material owns the plane right now, so
+            // an acrylic strip stays as readable as an acrylic card while it opens.
+            let acrylic=(if surface.compact==Material::Acrylic{1.-paint.amount}else{0.})+(if surface.material==Material::Acrylic{paint.amount}else{0.});
+            let scrim_alpha=(0x55 as f64+(0xc9 as f64-0x55 as f64)*acrylic.clamp(0.,1.)).round()as u32;
+            let scrim=scrim_alpha<<24;
             self.fill(shape,radius,scrim|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));self.dc.PopLayer();
         }
         let edge=(((34.+68.*paint.reflection)as u32)<<24)|0x00ffffff;
@@ -436,7 +440,7 @@ impl Renderer{
         self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
         self.material_surface(shape,radius,crate::surface::Surface{
             material:s.material,reveal:p,overlay:s.notification_mix.max(s.osd_mix),
-            compact_glass:if s.mini{s.mini_glass}else{s.classic_glass},mini:s.mini,
+            compact:if s.mini{s.mini_capsule}else{s.classic_capsule},mini:s.mini,
             transparent:s.transparent,cover_background:s.cover_background,
         })?;
         let content_scale=(base_shape.w/s.layout.card.w).min(base_shape.h/s.layout.card.h);

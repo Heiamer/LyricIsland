@@ -35,8 +35,8 @@ pub fn load(path:&std::path::Path)->Value {
         s["ThrowMotionVersion"]=json!(1);
     }
     migrate_materials(&stored,&mut s);
-    if !["Classic","Glass"].contains(&s["ClassicCapsuleMaterial"].as_str().unwrap_or("")){s["ClassicCapsuleMaterial"]=json!("Classic");}
-    if !["Classic","Glass"].contains(&s["MiniMaterial"].as_str().unwrap_or("")){s["MiniMaterial"]=json!("Glass");}
+    if !["Classic","Acrylic","Glass"].contains(&s["ClassicCapsuleMaterial"].as_str().unwrap_or("")){s["ClassicCapsuleMaterial"]=json!("Classic");}
+    if !["Classic","Acrylic","Glass"].contains(&s["MiniMaterial"].as_str().unwrap_or("")){s["MiniMaterial"]=json!("Glass");}
     if !["Classic","Acrylic","Glass"].contains(&s["MiniExpandedMaterial"].as_str().unwrap_or("")){s["MiniExpandedMaterial"]=json!("Acrylic");}
     if !["Classic","Mini"].contains(&s["IslandSizeMode"].as_str().unwrap_or("")){s["IslandSizeMode"]=json!("Classic");}
     if !["Classic","Acrylic","Glass"].contains(&s["IslandMaterial"].as_str().unwrap_or("")){s["IslandMaterial"]=json!("Acrylic");}
@@ -84,7 +84,7 @@ fn migrate_player_filter(s: &mut Value) {
 pub fn validate_setting(v:Value)->Result<Value,String>{
     let key=v["key"].as_str().ok_or("missing key")?;let value=&v["value"];let mut settings=v["settings"].clone();if !settings.is_object(){return Err("invalid settings".into())}
     let range=match key{"DeviceVolume"|"NotificationVolume"|"TodoVolume"=>Some((0.,100.)),"AutoCompactMaxWidth"|"CompactWidth"=>Some((140.,480.)),"FontSize"=>Some((11.,17.)),"OffsetMilliseconds"=>Some((-5000.,5000.)),"NotificationHistoryDays"=>Some((1.,30.)),"MotionGap"=>Some((0.,24.)),"MotionDuration"=>Some((250.,1200.)),"MotionCollapseDuration"=>Some((150.,700.)),"MotionRadius"=>Some((8.,48.)),"SpringStiffness"=>Some((100.,1000.)),"SpringDamping"=>Some((10.,80.)),"SpringMass"=>Some((0.3,2.)),_=>None};
-    let value=if let Some((min,max))=range{let n=value.as_f64().ok_or("invalid number")?;if !n.is_finite()||n<min||n>max{return Err("number outside range".into())}if key=="OffsetMilliseconds"{json!(n.round() as i32)}else if key=="NotificationHistoryDays"{json!(n.round() as u32)}else{json!(n)}}else if key=="IslandSizeMode"{let s=value.as_str().ok_or("invalid size mode")?;if !["Classic","Mini"].contains(&s){return Err("invalid size mode".into())}json!(s)}else if key=="MiniMaterial"||key=="ClassicCapsuleMaterial"{let s=value.as_str().ok_or("invalid mini material")?;if !["Classic","Glass"].contains(&s){return Err("invalid mini material".into())}json!(s)}else if key=="IslandMaterial"||key=="MiniExpandedMaterial"{let s=value.as_str().ok_or("invalid material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid material".into())}json!(s)}
+    let value=if let Some((min,max))=range{let n=value.as_f64().ok_or("invalid number")?;if !n.is_finite()||n<min||n>max{return Err("number outside range".into())}if key=="OffsetMilliseconds"{json!(n.round() as i32)}else if key=="NotificationHistoryDays"{json!(n.round() as u32)}else{json!(n)}}else if key=="IslandSizeMode"{let s=value.as_str().ok_or("invalid size mode")?;if !["Classic","Mini"].contains(&s){return Err("invalid size mode".into())}json!(s)}else if key=="MiniMaterial"{let s=value.as_str().ok_or("invalid mini material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid mini material".into())}json!(s)}else if key=="ClassicCapsuleMaterial"{let s=value.as_str().ok_or("invalid capsule material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid capsule material".into())}json!(s)}else if key=="IslandMaterial"||key=="MiniExpandedMaterial"{let s=value.as_str().ok_or("invalid material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid material".into())}json!(s)}
     else if ["MiniAutoContrast","LyricColorFromCover","AutoCheckUpdatesEnabled","DeviceRemindersEnabled","DeviceSoundEnabled","SwipeActivities","SwipeUpHide","GestureTutorialSeen","TodoRemindersEnabled","TodoIslandEnabled","AutoCompactWidth","CompactTranslation","ChineseTwoLine","NotificationSoundEnabled","TodoSoundEnabled","Floating","Translation","Animation","IslandFluidMotion","HoverExpand","ClickAnywhereExpand","WordHighlight","AlwaysOnTop","AutoStart","OnlineSongInfo","HideWhenPaused","NotificationsEnabled","PauseNotifications","NotificationClickOpenApp","MusicClickOpenApp","NotificationBlacklistEnabled","NotificationWhitelistEnabled","NotificationHistoryEnabled","CoverBackground","FocusCountUp","FocusPauseOnLock","AppEntryRemindersEnabled","AppUsageRemindersEnabled","HeadphoneConnectionRemindersEnabled","SpeakerConnectionRemindersEnabled","GamepadConnectionRemindersEnabled","MouseConnectionRemindersEnabled","KeyboardConnectionRemindersEnabled","DeviceDisconnectRemindersEnabled","SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&key){json!(value.as_bool().ok_or("invalid bool")?)}
     else if key=="DeviceSound"||key=="NotificationSound"||key=="TodoSound"{let name=value.as_str().ok_or("invalid sound")?;if !["Soft","Glass","Bell","Connect"].contains(&name){return Err("invalid sound".into())}json!(name)}
     else if key=="DeviceSoundPath"||key=="NotificationSoundPath"||key=="TodoSoundPath"{let path=value.as_str().ok_or("invalid path")?;crate::sound::validate_file(path)?;json!(path)}
@@ -128,7 +128,7 @@ pub fn validate_setting(v:Value)->Result<Value,String>{
 
 
 #[cfg(test)]mod unified_osd_tests{use super::*;
-#[test]fn mini_material_has_an_independent_clear_default_and_only_two_choices(){let d=defaults();assert_eq!(d["IslandSizeMode"],"Classic");assert_eq!(d["IslandMaterial"],"Acrylic");assert_eq!(d["MiniMaterial"],"Glass");for value in ["Classic","Glass"]{let s=validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).unwrap();assert_eq!(s["MiniMaterial"],value);assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!("Acrylic"),json!(true),json!("glass")]{assert!(validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).is_err());}}
+#[test]fn mini_material_has_an_independent_clear_default_and_three_choices(){let d=defaults();assert_eq!(d["IslandSizeMode"],"Classic");assert_eq!(d["IslandMaterial"],"Acrylic");assert_eq!(d["MiniMaterial"],"Glass");for value in ["Classic","Acrylic","Glass"]{let s=validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).unwrap();assert_eq!(s["MiniMaterial"],value);assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).is_err());}}
 #[test]fn one_osd_switch_controls_all_legacy_aliases(){let s=validate_setting(json!({"key":"SystemStateHintsEnabled","value":false,"settings":defaults()})).unwrap();for key in ["SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"]{assert_eq!(s[key],false);}let s=validate_setting(json!({"key":"CapsLockHintEnabled","value":true,"settings":s})).unwrap();assert_eq!(s["SystemStateHintsEnabled"],true);assert_eq!(s["TouchpadHintEnabled"],true);assert!(validate_setting(json!({"key":"SystemStateHintsEnabled","value":"true","settings":s})).is_err());}
 }
 
@@ -206,7 +206,7 @@ use super::*;
     }
 }
 
-#[cfg(test)]mod classic_capsule_tests{use super::*;#[test]fn black_glass_setting_is_independent_and_validated(){let d=defaults();assert_eq!(d["ClassicCapsuleMaterial"],"Classic");for material in ["Classic","Glass"]{let s=validate_setting(json!({"key":"ClassicCapsuleMaterial","value":material,"settings":d})).unwrap();assert_eq!(s["ClassicCapsuleMaterial"],material);assert_eq!(s["MiniMaterial"],"Glass");assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("Acrylic"),json!("Black")]{assert!(validate_setting(json!({"key":"ClassicCapsuleMaterial","value":value,"settings":d})).is_err());}}}
+#[cfg(test)]mod classic_capsule_tests{use super::*;#[test]fn capsule_material_is_independent_and_validated(){let d=defaults();assert_eq!(d["ClassicCapsuleMaterial"],"Classic");for material in ["Classic","Acrylic","Glass"]{let s=validate_setting(json!({"key":"ClassicCapsuleMaterial","value":material,"settings":d})).unwrap();assert_eq!(s["ClassicCapsuleMaterial"],material);assert_eq!(s["MiniMaterial"],"Glass");assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("Black"),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"ClassicCapsuleMaterial","value":value,"settings":d})).is_err());}}}
 
 #[cfg(test)] mod expanded_material_tests{
     use super::*;
@@ -254,5 +254,20 @@ use super::*;
             std::fs::write(&path,serde_json::to_vec(&updated).unwrap()).unwrap();assert_eq!(load(&path),updated);
         }
         let _=std::fs::remove_file(path);
+    }
+    #[test] fn both_capsules_accept_three_materials(){
+        let mut settings=defaults();
+        assert_eq!(settings["ClassicCapsuleMaterial"],"Classic");
+        assert_eq!(settings["MiniMaterial"],"Glass");
+        for key in ["ClassicCapsuleMaterial","MiniMaterial"]{
+            for value in ["Classic","Acrylic","Glass"]{
+                settings=validate_setting(json!({"key":key,"value":value,"settings":settings})).unwrap();
+                assert_eq!(settings[key],value);
+            }
+            for invalid in [json!(true),json!("glass"),json!("LiquidGlass"),json!("")]{
+                assert!(validate_setting(json!({"key":key,"value":invalid,"settings":settings})).is_err());
+            }
+        }
+        assert_eq!(settings["IslandMaterial"],"Acrylic");
     }
 }

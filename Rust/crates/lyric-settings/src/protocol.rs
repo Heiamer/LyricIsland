@@ -147,9 +147,16 @@ pub fn change(key: &str, text: &str, state: &Value) -> Result<Value, String> {
     }
     // The material picker is a segmented control: it sends a bare label, not a JSON literal.
     if key=="IslandSizeMode"{let mode=match text{"Classic"=>"Classic","Mini"=>"Mini",_=>if text.parse::<f64>().map_err(|_|"尺寸选项无效")?>=0.5{"Mini"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
-    if key=="ClassicCapsuleMaterial"{let mode=match text{"Classic"=>"Classic","Glass"=>"Glass",_=>if text.parse::<f64>().map_err(|_|"材质选项无效")?>=0.5{"Glass"}else{"Classic"}};return request("update",json!({"key":key,"value":mode}));}
+    // The capsule picker sends a bare label; the numeric branch keeps older builds working.
+    if key=="ClassicCapsuleMaterial"{
+        let mode=match text{
+            "Classic"|"Acrylic"|"Glass"=>text,
+            _=>{let n=text.parse::<f64>().map_err(|_|"材质选项无效")?.round();if n<=0.{"Classic"}else if n==1.{"Acrylic"}else{"Glass"}}
+        };
+        return request("update",json!({"key":key,"value":mode}));
+    }
     if key == "MiniMaterial" {
-        if !["Classic", "Glass"].contains(&text) {return Err("Mini 材质选项无效。".into());}
+        if !["Classic", "Acrylic", "Glass"].contains(&text) {return Err("Mini 材质选项无效。".into());}
         return request("update",json!({"key":key,"value":text}));
     }
     if key == "IslandMaterial" || key == "MiniExpandedMaterial" {

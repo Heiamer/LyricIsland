@@ -1,7 +1,7 @@
 //! A two-position slider: direct pointer tracking, then a spring to the chosen detent.
 use crate::*;
 pub fn row(state:&Value,view:&SettingsApp,cx:&mut Context<SettingsApp>)->AnyElement{slider_row(state,view,cx,"IslandSizeMode","Mini","island-size-mode","灵动岛大小","经典保留完整卡片；Mini 使用顶部细条与紧凑卡片，保留左右滑动切换与上滑隐藏手势。","经典","Mini")}
-pub fn capsule_material(state:&Value,view:&SettingsApp,cx:&mut Context<SettingsApp>)->AnyElement{if setting_str(state,"IslandSizeMode","Classic")=="Mini"{return div().id("classic-capsule-folded").into_any_element()}slider_row(state,view,cx,"ClassicCapsuleMaterial","Glass","classic-capsule-material","经典灵动岛材质","收起时可选经典深色或黑色玻璃；展开卡片材质独立设置。","经典","黑色玻璃")}
+pub fn capsule_material(state:&Value,_view:&SettingsApp,cx:&mut Context<SettingsApp>)->AnyElement{if setting_str(state,"IslandSizeMode","Classic")=="Mini"{return div().id("classic-capsule-folded").into_any_element()}segmented_row("classic-capsule-material","ClassicCapsuleMaterial","经典灵动岛材质","收起时可选经典深色、亚克力磨砂或黑色玻璃；亚克力沿用展开卡片同款磨砂平面，展开卡片材质仍独立设置。",&[("Classic","经典"),("Acrylic","亚克力"),("Glass","玻璃")],setting_str(state,"ClassicCapsuleMaterial","Classic"),cx)}
 fn slider_row(state:&Value,view:&SettingsApp,cx:&mut Context<SettingsApp>,key:&'static str,second:&str,id:&'static str,title:&str,description:&str,left:&'static str,right:&'static str)->AnyElement{
     let mini=setting_str(state,key,"Classic")==second;
     let dragging=view.slider.filter(|d|d.key==key);
@@ -36,7 +36,7 @@ pub fn material(state:&Value,cx:&mut Context<SettingsApp>)->AnyElement{
     let expanded=segmented_row(id,key,"展开卡片材质","经典使用深色平面；亚克力使用磨砂封面；玻璃使用 Aero 风格的厚实底色、磨砂与柔和高光，保留封面莫奈取色；系统提示和通知横幅跟随此选项。",&[("Classic","经典"),("Acrylic","亚克力"),("Glass","玻璃")],setting_str(state,key,"Acrylic"),cx);
     if mini{
         div().flex().flex_col().gap_3()
-            .child(segmented_row("mini-material","MiniMaterial","Mini 收起材质","顶部细条可选经典深色或透明玻璃；与展开卡片分别保存。",&[("Classic","经典"),("Glass","玻璃")],setting_str(state,"MiniMaterial","Glass"),cx))
+            .child(segmented_row("mini-material","MiniMaterial","Mini 收起材质","顶部细条可选经典深色、亚克力磨砂或透明玻璃；与展开卡片分别保存。",&[("Classic","经典"),("Acrylic","亚克力"),("Glass","玻璃")],setting_str(state,"MiniMaterial","Glass"),cx))
             .child(expanded).into_any_element()
     }else{expanded}
 }
