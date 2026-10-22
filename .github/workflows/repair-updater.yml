@@ -1,0 +1,78 @@
+name: Repair and verify the 2.1.6 updater
+
+on:
+  push:
+    branches: [fix/updater-proxy]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  updater:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TERM_COLOR: never
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify unchanged application source and download verified base binaries
+        run: |
+          git diff --exit-code HEAD^ HEAD -- Rust/crates/lyric-native Rust/crates/lyric-settings Rust/crates/lyric-core Rust/crates/lyric-backend Rust/Cargo.toml Rust/Cargo.lock Assets
+          if($LASTEXITCODE -ne 0){throw 'Application source changed; a full rebuild is required'}
+          $zip=Join-Path $env:RUNNER_TEMP 'base-portable.zip'
+          Invoke-WebRequest 'https://github.com/Heiamer/LyricIsland/releases/download/v2.1.6/DotIsle-2.1.6-Portable.zip' -OutFile $zip
+          if((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '41dfb6cb0cace5a62c827eb656dad5bc918b6a8b8cd77a816bd30506707a5b0a'){throw 'Verified base package changed'}
+          Expand-Archive $zip (Join-Path $env:RUNNER_TEMP 'base')
+          "BASE_RUNTIME=$env:RUNNER_TEMP\base\DotIsle-2.1.6" >> $env:GITHUB_ENV
+          rustup update stable --no-self-update
+          rustup default stable-x86_64-pc-windows-msvc
+      - name: Test updater, archive and packaging components
+        working-directory: Rust
+        run: cargo test --locked -p lyric-bootstrap -p lyric-archive -p lyric-tools -- --test-threads=1
+      - name: Build repaired updater and maintenance tools
+        working-directory: Rust
+        run: cargo build --release --locked -p lyric-bootstrap -p lyric-tools
+      - name: Package using the verified unchanged application binaries
+        run: |
+          Copy-Item "$env:BASE_RUNTIME\LyricIsland.exe" Rust/target/release/LyricIsland.exe
+          Copy-Item "$env:BASE_RUNTIME\LyricIsland.Settings.exe" Rust/target/release/lyric-island-settings.exe
+          $compiler='C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if(-not(Test-Path $compiler)){throw 'Inno Setup compiler is missing'}
+          & .\Rust\target\release\lyric-tools.exe package --version 2.1.6 --binary-dir "$pwd\Rust\target\release" --output "$pwd\publish\release-output" --sqlite "$env:BASE_RUNTIME\e_sqlite3.dll" --iscc $compiler
+          if($LASTEXITCODE -ne 0){throw 'Packaging failed'}
+      - name: Validate the installer, packaged GUI and OTA restart
+        run: |
+          & .\Rust\target\release\lyric-tools.exe verify installer "$pwd\validation\installer-work" "$pwd\validation\installer.json"
+          if($LASTEXITCODE -ne 0){throw 'Installer validation failed'}
+          & .\Rust\target\release\lyric-tools.exe verify e2e "$pwd\publish\DotIsle-2.1.6" --version 2.1.6 --artifacts "$pwd\publish\release-output" --report "$pwd\validation\e2e.json"
+          if($LASTEXITCODE -ne 0){throw 'Packaged GUI validation failed'}
+          $ota="$pwd\publish\release-output\OTA-Compatibility\LyricIsland-2.1.6-Portable.zip"
+          $digest=(Get-FileHash $ota -Algorithm SHA256).Hash.ToLowerInvariant()
+          & .\Rust\target\release\lyric-tools.exe verify updater $ota $digest "$pwd\validation\updater-work" "$pwd\validation\updater.json" 2.1.6
+          if($LASTEXITCODE -ne 0){throw 'OTA restart validation failed'}
+      - name: Save repaired release and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-updater-repair-2.1.6
+          retention-days: 3
+          path: |
+            publish/release-output/**
+            validation/*.json
+            Rust/target/release/lyric-tools.exe
+      - name: Replace the candidate files after validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release=gh release view v2.1.6 --json isPrerelease,isDraft | ConvertFrom-Json
+          if(-not $release.isPrerelease -or $release.isDraft){throw 'Only the unpublished-as-stable candidate may be replaced'}
+          $files=@(Get-ChildItem publish/release-output -File|ForEach-Object FullName)+@(Get-ChildItem publish/release-output/OTA-Compatibility -File|ForEach-Object FullName)
+          gh release upload v2.1.6 @files --clobber
+          if($LASTEXITCODE -ne 0){throw 'Candidate replacement failed'}
