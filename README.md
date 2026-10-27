@@ -1,120 +1,92 @@
 <div align="center">
 
-<img src="Assets/LyricIsland-v2.png" width="112" alt="点屿 DotIsle 图标">
+<img src="Assets/LyricIsland-v2.png" width="96" alt="点屿 DotIsle">
 
 # 点屿 · DotIsle
 
-**Windows 桌面的灵动岛，让音乐、消息与日常事项停留在一眼可见的地方。**
+**Windows 桌面的灵动岛，把音乐、歌词、专注与提醒放在一眼可见的地方。**
 
-音乐歌词 · 通知提醒 · 待办清单 · 番茄钟 · 倒计时 · 秒表 · 设备连接
+音乐歌词 · 通知与设备 · 待办清单 · 番茄钟 · 倒计时 · 秒表
 
-[GitHub 下载](https://github.com/Heiamer/LyricIsland/releases/latest) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
+[下载 3.1.1 正式版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Portable.zip) · [本版更新说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Notes.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
 
 </div>
 
-## 认识点屿
+## 3.1.1 更新
 
-点屿从歌词岛发展而来。收起时是一枚轻巧的胶囊，展开后显示当前活动的完整卡片：听歌时查看歌词与控制播放，专注时查看计时，日常使用时接收消息、待办和设备提醒。
+- **混合渲染**：主岛、控制中心和更新窗口采用 Vello Hybrid；CPU 处理路径，GPU 完成绘制与合成。
+- **更轻的资源管理**：设置按需启动，关闭一分钟后退出；字体使用文件映射，图片与 GPU 资源按需分配和复用。
+- **更紧凑的沉浸歌词**：移除歌名旁的小封面，保留磨砂取色背景；当前歌词采用中等字重，翻译和前后句按内容紧凑排列。
+- **悬停才显示操作**：鼠标进入音乐卡片后显示进度和播放按钮，离开后回归歌词；拖动进度时保留操作，外框不跳动。
+- **有形变的交互反馈**：侧栏指示跟随、选项圆角与勾选过渡、开关拇指和颜色切换、按钮按压及播放按钮形变；支持快速反向和减少动态效果。
+- **细节修正**：播放状态点按文字字形中心对齐，动态色板的色点与标签共用列中心；概览音乐卡片显示当前歌词。
 
-多个活动同时存在时，胶囊旁会出现同高的圆形组件。点击它可以切换活动，也可以开启左右拖动切换；收起后会保留当前选中的界面。
+## 界面预览
 
-下面是程序原生渲染的演示画面：
+以下为程序原生渲染的演示画面，歌曲与歌词为示例数据。
 
-| 音乐与歌词 | 待办清单 |
-| :---: | :---: |
-| ![音乐展开卡片](docs/images/music.png) | ![待办展开卡片](docs/images/todos.png) |
+![沉浸歌词：默认与悬停状态](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Music.png)
 
-| 计时器 | 收起胶囊与副组件 |
-| :---: | :---: |
-| ![番茄钟展开卡片](docs/images/timer.png) | ![收起胶囊与同高副组件](docs/images/capsule.png) |
+![控制中心：概览与实时歌词](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Overview.png)
+
+![控制中心交互反馈逐帧预览](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Motion.gif)
 
 ## 下载与开始使用
 
-适用于 **Windows 10 / 11 x64**。
+适用于 **Windows 10 / 11 x64**。运行时不需要安装 Rust、Python 或 .NET。
 
-| 文件 | 使用方式 |
+| 文件 | 用途 |
 | --- | --- |
-| [DotIsle-1.3.2.exe](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.2/DotIsle-1.3.2.exe) | 单文件启动包，运行后自动释放完整组件并启动。 |
-| [DotIsle-1.3.2-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.2/DotIsle-1.3.2-Portable.zip) | 完整解压到可写目录，再运行其中的 `LyricIsland.exe`。 |
-| [DotIsle-1.3.2-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v1.3.2/DotIsle-1.3.2-Source.zip) | 对应 1.3.2 正式版提交的源码。 |
+| [DotIsle-3.1.1-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Portable.zip) | 推荐下载。解压完整目录后运行 `LyricIsland.exe`。 |
+| [DotIsle-3.1.1-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Source.zip) | 与本轮构建对应的完整源码、字体、许可证和构建文档。 |
+| [DotIsle-3.1.1-SHA256.txt](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-SHA256.txt) | 交付文件的 SHA256 校验值。 |
+| [DotIsle-3.1.1-Validation.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Validation.zip) | 测试报告、原生渲染截图和打包验收结果。 |
 
-1. 启动后，通过系统托盘打开设置。
-2. 打开播放器并播放音乐，胶囊会显示当前歌词；点击胶囊可展开。
-3. 在设置中添加待办、创建计时器，或按需开启通知与设备提醒。
+1. 将便携 ZIP **完整解压到可写目录**，不要在压缩包中直接启动 EXE。
+2. 运行 `LyricIsland.exe`，通过系统托盘打开控制中心。
+3. 打开播放器并播放音乐，点屿会尝试连接 Windows 媒体会话并显示歌词。
+4. 在“灵动岛 → 音乐卡片 → 展开排版”选择沉浸歌词；其他布局继续保留。
+5. 在“设置 → 外观”调整动态色彩、明暗主题和减少动态效果。
 
-程序随包提供中文、日文字体和 SQLite，无需另行安装字体或通知证书。分享应用时请发送完整启动包或便携 ZIP。
+请保留 EXE 旁的 `Assets`、字体、更新助手和许可证。需要迁移旧数据时，先退出旧程序，再把原运行目录的 `Data` 复制到新目录；请先备份，不要同时运行两个版本操作同一份数据。
 
-### 双源在线更新
+### 从旧版更新
 
-1.3.2 的更新按钮会同时请求两个更新源；一个失败时使用另一个可用源。下载失败也会切换来源，更新包经过 SHA256 校验后才会替换原程序。更新请求使用 Windows 系统代理设置，检查状态固定显示在设置窗口底部。
+发行页同时提供 `LyricIsland-3.1.1-Portable.zip` 与 `LyricIsland-3.1.1-SHA256.txt`，供旧版更新器识别。兼容包使用旧更新器要求的目录名，内部运行文件与推荐便携包相同。
 
-### 老版本 OTA 更新
+可以从旧版的“关于与更新”检查更新；网络或旧更新器无法完成升级时，请手动下载推荐便携包，退出旧程序后再迁移 `Data`。本次只发布 GitHub，国内镜像不保证同步更新。
 
-**1.2.1 / 1.2.2 用户**的旧更新器仅连接 GitHub；旧版无法通过服务器自动增加国内源。如果所在网络无法访问 GitHub，需要先下载新版便携包，退出旧程序后将完整内容覆盖到旧运行目录，保留 `Data` 和 `Logs`。完成首次升级后即可使用双源 OTA。GitHub 可访问时，可以在「设置 → 关于与更新」检查版本，点击「下载并更新」。程序会下载并校验更新包，在原运行目录替换文件、保留 `Data` 和 `Logs`，随后自动重启。写入失败时会尝试恢复备份。
+## 日常功能
 
-发行页保留的 `LyricIsland-1.3.2-Portable.zip` 和 `LyricIsland-1.3.2-SHA256.txt` 专供旧更新器使用，与 DotIsle 便携包内容一致。产品已更名，内部程序文件名、配置与更新标识继续兼容旧版本，因此仓库地址暂时沿用 LyricIsland。
+- **音乐与歌词**：播放/暂停、上一首/下一首、播放进度、原文与翻译、多种展开排版及封面动态色彩。实际控制能力取决于播放器的媒体会话接口。
+- **专注与计时**：番茄钟、倒计时、秒表和工作流计时；支持多计时项目和暂停恢复。
+- **待办**：记录事项、编辑、完成、撤销及日期时间提醒。
+- **通知与设备**：在岛体中展示通知与连接状态；能力受 Windows 版本、权限及设备接口影响。
+- **外观与交互**：控制中心与灵动岛分别保存配色和材质，胶囊与展开卡片圆角可独立设置。
 
-如果正在使用同为 **1.3** 的早期测试包，版本比较不会发现变化，请先退出测试版，再运行正式启动包。从 1.2 升级时需先运行一次支持 OTA 的版本。
+关闭控制中心后，主岛继续运行。完全退出主程序后，不再提供计时和待办提醒。
 
-## 可以做什么
+## 性能与验证
 
-### 音乐与歌词
+本轮通过 **435 项 workspace 测试、10 组原生 IPC 集成检查、112 张设置场景截图与 65 张沉浸卡片截图**，并从最终 ZIP 解压验证程序、字体、更新助手和文件校验。
 
-- 显示封面、歌名、歌手、播放进度，提供播放/暂停、上一首、下一首等控制。
-- 有翻译时上下两行显示原文与译文；中文双行模式可在当前句下方显示下一句。
-- 歌词长度可驱动胶囊宽度平滑变化，并单独设置宽度上限。
-- 根据封面为展开卡片、控制组件、进度条与状态点取色，压低背景亮度以保证文字可读。
-- 播放状态点采用呼吸效果；可独立设置点击封面或歌名跳转播放器。
-- 默认允许网易云音乐、QQ 音乐、酷狗、酷我、Spotify 和 Twilight Echo，也可设置自定义播放器来源。实际控制能力取决于播放器提供的 Windows 媒体接口。
+优化包括收紧 GPU 数据纹理与分配块、去掉常驻中间画布、字体按需映射、复用着色器缓存、设置延迟启动与隐藏后退出。内存会随页面、缩放、显卡和使用时间变化，**不承诺设置窗口已达到 100 MB**。本轮 UI 改动没有重新进行同口径的可见窗口内存测量，也没有把旧测量值当作新版实测。
 
-### 通知与设备
+真实播放器、IME、桌面关闭/热重开的本轮人工交互验收仍待补充；离屏渲染和隔离状态检查不能替代这些验收。具体范围见[本版说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Notes.md)。
 
-- 在灵动岛显示新通知，支持队列、暂停提醒、可选应用白名单，以及点击通知跳转来源应用。
-- 通知接收采用免证书方式，无需注册额外通知身份组件。
-- 可开启 U 盘、USB 与便携设备连接/移除提醒。
-- 「通知与设备」页提供 **U 盘连接、手机连接、设备移除** 三种测试弹窗，无需插入真实硬件。
+## 源码与构建
 
-### 待办与计时
+当前运行栈为 **Rust、Win32、Vello Hybrid、wgpu 和 Parley**，控制中心使用同一套原生绘图技术。
 
-- 待办支持标题、内容、日期、时间、每日重复、完成勾选与编辑删除。
-- 按全部、进行中、已过期、今天、最近 7 天筛选，支持马卡龙配色和已完成项目收起。
-- 待办偏好通过独立齿轮入口调整，到期时通过灵动岛提醒。
-- 番茄钟、倒计时和秒表使用刻度表盘，可同时保留多个独立计时；重启后保留进度并暂停。
+本次选择以 Release 附件交付完整源码；**请下载 `DotIsle-3.1.1-Source.zip`**，其中 `BUILD-3.1.1.md` 说明工具链和构建步骤。仓库主分支与 GitHub 自动生成的 “Source code” 归档不作为本轮二进制的对应源码；本轮没有全量同步主分支代码。
 
-### 外观、交互与声音
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/li-cargo.ps1 build --release --package lyric-native --package dotisle-app --package lyric-bootstrap
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/li-cargo.ps1 test --workspace --release
+```
 
-- 设置窗口支持浅色、深色和跟随系统，标题栏与内容区域采用统一样式。
-- 收起胶囊和展开卡片均可按住内容区左右拖动切换活动；播放按钮和进度条保留各自操作。
-- 音效集中设置，通知、待办与计时器、设备分别调节音量、试听，并可选用自定义本地 PCM WAV。
-- 内置短音为原创合成，不使用 Apple 原版提示音录音。
+构建所需工具仅用于开发，不需要随程序安装。源码包保留当前使用的第三方补丁和许可证，不包含用户 `Data` 或编译 `target`。
 
-## 默认开关
+## 许可与反馈
 
-已有配置会保留，新默认值不会强行覆盖个人选择。
-
-| 选项 | 新配置默认值 |
-| --- | --- |
-| 点击胶囊任意区域展开 | 开启 |
-| 胶囊显示歌词翻译 | 开启 |
-| 封面取色 | 开启 |
-| 在线补全网易云歌曲信息 | 开启 |
-| 点击通知跳转来源应用 | 开启 |
-| 中文下一句双行模式 | 关闭 |
-| 歌词长度自适应宽度 | 关闭；开启后显示上限设置 |
-| 左右拖动切换活动 | 关闭，在「灵动岛」页开启 |
-| 应用通知 / 通知白名单 / 暂停通知 | 均关闭 |
-| 设备连接提醒 / 音乐点击跳转播放器 | 均关闭 |
-| 开机启动 / 悬停展开 | 均关闭 |
-
-## 数据与使用说明
-
-- 设置、待办和计时数据保存在运行目录的 `Data` 中，升级时保留。待办提醒需要程序保持运行；关闭后不会在后台唤醒，每日待办只检查当天的提醒。
-- 通知接收只读当前 Windows 用户的通知存储，不修改通知数据库或上传通知正文；不同系统版本、权限和数据库占用情况可能影响接收。
-- 手机需被 Windows 识别为便携设备，例如 MTP 模式；仅充电连接不能保证识别。实体 USB / 手机插拔尚未完成覆盖测试。
-- 更多细节见[使用说明](NATIVE-README.md)。遇到问题时，可在 [Issues](https://github.com/Heiamer/LyricIsland/issues) 中附上系统版本、应用版本和复现步骤。
-
-## 开发与开源
-
-主程序采用 **Rust、Win32、Direct2D、DirectWrite、DirectComposition**，设置界面使用 **GPUI**。构建方法见[构建文档](docs/BUILDING.md)，测试与发布历史见[更新日志](CHANGELOG.md)。
-
-代码许可见 [LICENSE](LICENSE)。第三方来源、字体和组件许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)、[FONT-NOTICE.md](FONT-NOTICE.md) 与 [licenses](licenses)。
+许可见 [LICENSE](LICENSE)，第三方与字体说明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)、[FONT-NOTICE.md](FONT-NOTICE.md)。反馈时请附 Windows 版本、应用版本、复现步骤和相关日志，并先移除个人信息。
