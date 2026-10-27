@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Assets/LyricIsland-v2.png" width="96" alt="点屿 DotIsle">
+<img src="Assets/LyricIsland-v3.png" width="96" alt="点屿 DotIsle">
 
 # 点屿 · DotIsle
 
@@ -8,9 +8,17 @@
 
 音乐歌词 · 通知与设备 · 待办清单 · 番茄钟 · 倒计时 · 秒表
 
-[下载 3.1.1 正式版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Portable.zip) · [本版更新说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Notes.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
+[下载安装版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Setup.exe) · [下载便携版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Portable.zip) · [本版更新说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Notes.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
 
 </div>
+
+## 3.1.2 正式版 · 安装包、手势教程与静默进度
+
+本版补回 2.2.3 的完整手势教学，并按当前模式与开关调整步骤。进入「灵动岛 → 交互与提示 → 再看一次」即可重看；教程采用原生 M3 Expressive 演示，不操作真实托盘或播放器。五种音乐展开缩略图同步校正，沉浸预览移入后显示控件。详见 [手势教程说明](GESTURE-TUTORIAL.md)。
+
+### 网易云静默进度控制
+
+在 3.1.1 基础上改用仅本机 CDP 静默控制网易云进度；已在网易云 3.1.42 播放中完成一次跳转并恢复，客户端全程保持最小化，未观察到弹窗或抢焦点。展开卡片、概览及音乐页共享该通道。请先通过 `Start-NetEase-SilentControl.cmd` 启动网易云，完整说明见 `NETEASE-SEEKFIX.md`。通道未开启时不会通过唤起播放器窗口的协议回退。
 
 ## 3.1.1 更新
 
@@ -37,10 +45,15 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [DotIsle-3.1.1-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Portable.zip) | 推荐下载。解压完整目录后运行 `LyricIsland.exe`。 |
-| [DotIsle-3.1.1-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Source.zip) | 与本轮构建对应的完整源码、字体、许可证和构建文档。 |
-| [DotIsle-3.1.1-SHA256.txt](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-SHA256.txt) | 交付文件的 SHA256 校验值。 |
-| [DotIsle-3.1.1-Validation.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Validation.zip) | 测试报告、原生渲染截图和打包验收结果。 |
+| [DotIsle-3.1.2-Setup.exe](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Setup.exe) | 推荐下载。标准安装向导，支持开始菜单、应用卸载与数据保留。 |
+| [DotIsle-3.1.2-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Portable.zip) | 免安装。解压完整目录后运行 `LyricIsland.exe`。 |
+| [DotIsle-3.1.2-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Source.zip) | 与本轮构建对应的完整源码、字体、许可证和构建文档。 |
+| [DotIsle-3.1.2-SHA256.txt](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-SHA256.txt) | 交付文件的 SHA256 校验值。 |
+| [DotIsle-3.1.2-Validation.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Validation.zip) | 测试报告、原生渲染截图和打包验收结果。 |
+
+使用安装版时运行 Setup.exe，按向导选择目录；首次使用教程会按当前手势开关展示。
+
+使用便携版：
 
 1. 将便携 ZIP **完整解压到可写目录**，不要在压缩包中直接启动 EXE。
 2. 运行 `LyricIsland.exe`，通过系统托盘打开控制中心。
@@ -52,7 +65,7 @@
 
 ### 从旧版更新
 
-发行页同时提供 `LyricIsland-3.1.1-Portable.zip` 与 `LyricIsland-3.1.1-SHA256.txt`，供旧版更新器识别。兼容包使用旧更新器要求的目录名，内部运行文件与推荐便携包相同。
+发行页同时提供 `LyricIsland-3.1.2-Portable.zip` 与 `LyricIsland-3.1.2-SHA256.txt`，供旧版更新器识别。兼容包使用旧更新器要求的目录名，内部运行文件与推荐便携包相同。
 
 可以从旧版的“关于与更新”检查更新；网络或旧更新器无法完成升级时，请手动下载推荐便携包，退出旧程序后再迁移 `Data`。本次只发布 GitHub，国内镜像不保证同步更新。
 
@@ -68,17 +81,17 @@
 
 ## 性能与验证
 
-本轮通过 **435 项 workspace 测试、10 组原生 IPC 集成检查、112 张设置场景截图与 65 张沉浸卡片截图**，并从最终 ZIP 解压验证程序、字体、更新助手和文件校验。
+本轮通过 **450 项 workspace 测试、11 组原生 IPC 集成检查、144 张设置场景截图与 65 张沉浸卡片截图**，并从最终 ZIP 解压验证程序、字体、更新助手和文件校验。
 
 优化包括收紧 GPU 数据纹理与分配块、去掉常驻中间画布、字体按需映射、复用着色器缓存、设置延迟启动与隐藏后退出。内存会随页面、缩放、显卡和使用时间变化，**不承诺设置窗口已达到 100 MB**。本轮 UI 改动没有重新进行同口径的可见窗口内存测量，也没有把旧测量值当作新版实测。
 
-真实播放器、IME、桌面关闭/热重开的本轮人工交互验收仍待补充；离屏渲染和隔离状态检查不能替代这些验收。具体范围见[本版说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Notes.md)。
+真实播放器、IME、桌面关闭/热重开的本轮人工交互验收仍待补充；离屏渲染和隔离状态检查不能替代这些验收。具体范围见[本版说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Notes.md)。
 
 ## 源码与构建
 
 当前运行栈为 **Rust、Win32、Vello Hybrid、wgpu 和 Parley**，控制中心使用同一套原生绘图技术。
 
-本次选择以 Release 附件交付完整源码；**请下载 `DotIsle-3.1.1-Source.zip`**，其中 `BUILD-3.1.1.md` 说明工具链和构建步骤。仓库主分支与 GitHub 自动生成的 “Source code” 归档不作为本轮二进制的对应源码；本轮没有全量同步主分支代码。
+完整可构建源码随 Release 附件交付；**请下载 `DotIsle-3.1.2-Source.zip`**，其中 `BUILD-3.1.2.md` 说明工具链和构建步骤。仓库主分支与 GitHub 自动生成的 “Source code” 归档不作为本轮二进制的对应源码；本轮没有全量同步主分支代码。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/li-cargo.ps1 build --release --package lyric-native --package dotisle-app --package lyric-bootstrap
