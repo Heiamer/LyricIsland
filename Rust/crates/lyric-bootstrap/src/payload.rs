@@ -6,14 +6,14 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const VERSION: &str = "2.1.9";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PAYLOAD_RESOURCE: &str = "DotIsle.InstallPayload.zip";
 pub const PAYLOAD_DIGEST_RESOURCE: &str = "DotIsle.InstallPayload.sha256";
 pub const LAUNCHER_PAYLOAD_RESOURCE: &str = "LyricIsland.Payload.zip";
 pub const INSTALLED_MARKER: &str = "Installed.json";
 
 pub fn required_runtime() -> &'static [&'static str] {
-    &["LyricIsland.exe", "LyricIsland.Settings.exe", "LyricIsland.Updater.exe", "Uninstall.exe", "e_sqlite3.dll", "Assets/Fonts/NotoSansSC.ttf", "Assets/Fonts/NotoSansJP.ttf"]
+    &["LyricIsland.exe", "LyricIsland.Settings.exe", "LyricIsland.Updater.exe", "Assets/Fonts/GoogleSansFlex-Regular.ttf", "Assets/Fonts/GoogleSansFlex-Medium.ttf", "Assets/Fonts/GoogleSansFlex-SemiBold.ttf", "Assets/Fonts/GoogleSansFlex-Bold.ttf", "Assets/Fonts/NotoSansSC.ttf", "Assets/Fonts/NotoSansJP.ttf"]
 }
 
 pub fn read_marker(target: &Path) -> Result<Value> { paths::read_json(&target.join(INSTALLED_MARKER)) }

@@ -10,7 +10,7 @@ unsafe fn save(r:&Renderer,dir:&Path,name:String,shape:Rect,rows:&mut Vec<Value>
 }
 pub unsafe fn surfaces(a:&mut App,dir:&Path)->Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(dir)?;a.opacity=1.;a.lyric="晚风轻轻，音乐刚好".into();
-    let mut r=a.renderer.take().unwrap();r.set_cover(Some(&std::fs::read(a.base.join("Assets/LyricIsland-v2.png"))?))?;
+    let mut r=a.renderer.take().unwrap();r.set_cover(Some(&std::fs::read(a.base.join("Assets/DemoCover.png"))?))?;
     let palette=r.preview_palette();let mut rows=vec![];
     for mini in [false,true]{
         a.settings["IslandSizeMode"]=json!(if mini{"Mini"}else{"Classic"});
@@ -39,7 +39,7 @@ pub unsafe fn surfaces(a:&mut App,dir:&Path)->Result<(),Box<dyn std::error::Erro
 
 pub unsafe fn cover_radii(a:&mut App,dir:&Path)->Result<(),Box<dyn std::error::Error>>{
     std::fs::create_dir_all(dir)?;a.opacity=1.;a.frame=Frame::expanded();a.lyric="晚风轻轻，音乐刚好".into();
-    let mut r=a.renderer.take().unwrap();let cover=std::fs::read(a.base.join("Assets/LyricIsland-v2.png"))?;
+    let mut r=a.renderer.take().unwrap();let cover=std::fs::read(a.base.join("Assets/DemoCover.png"))?;
     r.set_cover(Some(&cover))?;std::thread::sleep(std::time::Duration::from_millis(300));r.set_cover(Some(&cover))?;let mut rows=vec![];
     for mini in [false,true]{for radius in [8.,16.,30.,48.]{
         a.settings["IslandSizeMode"]=json!(if mini{"Mini"}else{"Classic"});a.settings["IslandMaterial"]=json!("Glass");a.settings["MiniExpandedMaterial"]=json!("Glass");a.settings["Motion"]["Radius"]=json!(radius);

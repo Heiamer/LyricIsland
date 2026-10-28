@@ -13,5 +13,6 @@ pub mod payload;
 pub mod registry;
 pub mod setup;
 pub mod ui;
+pub mod vello_overlay;
 pub mod updater;
 pub mod win;

@@ -4,7 +4,6 @@ use crate::error::{Error, Result};
 use crate::paths;
 use crate::payload;
 use crate::win;
-use lyric_archive::sha256_bytes;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +11,10 @@ const COMPLETE_FILES: &[&str] = &[
     "LyricIsland.exe",
     "LyricIsland.Settings.exe",
     "e_sqlite3.dll",
+    "Assets/Fonts/GoogleSansFlex-Regular.ttf",
+    "Assets/Fonts/GoogleSansFlex-Medium.ttf",
+    "Assets/Fonts/GoogleSansFlex-SemiBold.ttf",
+    "Assets/Fonts/GoogleSansFlex-Bold.ttf",
     "Assets/Fonts/NotoSansSC.ttf",
     "Assets/Fonts/NotoSansJP.ttf",
 ];
@@ -62,6 +65,20 @@ fn migrate_previous_data(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Cheap launcher identity used instead of hashing the whole embedded payload.
+///
+/// The runtime root is already versioned, so "same version, same launcher file,
+/// complete runtime" is enough to detect a changed build; `complete()` still
+/// verifies the extracted files exist. The old check read the ~70 MB embedded
+/// payload and SHA-256'd it on every single launch, which was pure cold-start
+/// cost on the login critical path.
+fn launcher_identity() -> Result<String> {
+    let exe = std::env::current_exe()?;
+    let metadata = std::fs::metadata(&exe)?;
+    let modified = metadata.modified().map(|t| format!("{t:?}")).unwrap_or_default();
+    Ok(format!("{}:{}:{}", payload::VERSION, metadata.len(), modified))
+}
+
 fn launch(args: &[String]) -> Result<i32> {
     let verify = args.len() == 2 && args[0] == "--verify-package";
     let root = if verify { paths::full_path(&args[1])? } else { runtime_root() };
@@ -70,14 +87,14 @@ fn launch(args: &[String]) -> Result<i32> {
     let folder = folder();
     let executable = root.join(&folder).join("LyricIsland.exe");
     let marker = root.join("ready.hash");
-    let bytes = payload::launcher_payload()?;
-    let digest = sha256_bytes(&bytes);
-    let fresh = marker.is_file() && std::fs::read_to_string(&marker).map(|text| text.trim().to_owned()).ok().as_deref() == Some(digest.as_str());
+    let identity = launcher_identity()?;
+    let fresh = marker.is_file() && std::fs::read_to_string(&marker).map(|text| text.trim().to_owned()).ok().as_deref() == Some(identity.as_str());
     if !fresh || !complete(&root) {
+        let bytes = payload::launcher_payload()?;
         std::fs::create_dir_all(&root)?;
         extract(&root, &bytes)?;
         if !complete(&root) { return Err(Error("组件释放不完整，请重新下载后运行。".into())); }
-        std::fs::write(&marker, &digest)?;
+        std::fs::write(&marker, &identity)?;
     }
     if verify {
         payload::write_verification(&root, &executable, true)?;

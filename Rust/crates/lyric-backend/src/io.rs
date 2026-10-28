@@ -2,6 +2,16 @@
 use std::{path::{Path,PathBuf},io::{Read,Write},time::{Instant,Duration},sync::{Mutex,OnceLock}};
 use windows::{core::PCWSTR,Win32::{Foundation::HANDLE,System::Pipes::{WaitNamedPipeW,PeekNamedPipe}}};
 use serde_json::Value;
+/// Auto-reset wake event shared by the island and its settings worker.
+pub struct SettingsWake(HANDLE);
+unsafe impl Send for SettingsWake{}
+unsafe impl Sync for SettingsWake{}
+impl SettingsWake{
+    pub fn new()->Option<Self>{let pipe=std::env::var("LYRICISLAND_TEST_PIPE").unwrap_or_else(|_|"LyricIsland.Native.Settings.v1".into());let name=format!("Local\\DotIsle.SettingsWake.{pipe}").encode_utf16().chain(Some(0)).collect::<Vec<_>>();unsafe{windows::Win32::System::Threading::CreateEventW(None,false,false,PCWSTR(name.as_ptr())).ok().map(Self)}}
+    pub fn signal(&self){unsafe{let _=windows::Win32::System::Threading::SetEvent(self.0);}}
+    pub fn wait(&self,ms:u32){unsafe{let _=windows::Win32::System::Threading::WaitForSingleObject(self.0,ms);}}
+}
+impl Drop for SettingsWake{fn drop(&mut self){unsafe{let _=windows::Win32::Foundation::CloseHandle(self.0);}}}
 pub fn data_directory()->PathBuf{PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("LyricIsland")}
 pub fn read_settings(path:&Path)->Value{
     if std::fs::metadata(path).is_ok_and(|m|m.len()<=1024*1024){if let Ok(file)=std::fs::File::open(path){if let Ok(value)=serde_json::from_reader(file){return value}}}

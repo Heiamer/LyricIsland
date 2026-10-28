@@ -1,6 +1,6 @@
 # 第三方组件与许可
 
-歌词岛 1.2 使用以下第三方组件与移植来源。
+点屿 3.1.1 使用以下第三方组件与移植来源。
 本文件列出项目来源、移植参考与主要随包组件。原作者版权及许可声明保持有效；许可全文见根目录 `LICENSE`、本文件与 `licenses/`。其他依赖的具体版本见 `Rust/Cargo.lock`，其许可及 NOTICE 以对应上游包所附文件为准。
 
 ## 1. Lyric Island / TaskbarLyrics（本项目与其原始项目）
@@ -56,36 +56,25 @@ Rust 后台把 QQ 音乐、网易云音乐、酷狗与 LRCLIB 的歌词协议处
 - 历史上随 C# 版本引用的 NuGet 包 `Lyricify.Lyrics.Helper` 0.2.0，其 nuspec 记录的提交为
   `a139e385b032b9abfca4c060627776cf9c3147ad`；两者可能有差异。
 
-## 4. GPUI（设置界面）
+## 4. Rust / Vello 界面栈
 
-https://github.com/zed-industries/zed · gpui 0.2.2，Apache License 2.0，Copyright 2022 - 2025 Zed Industries, Inc.
+界面使用 Vello Hybrid 0.2、wgpu 29 与 Parley 0.5，不使用 GPUI。依赖的锁定版本见 Rust/Cargo.lock，所选许可全文汇总于 licenses/Rust-Dependencies-Licenses.txt。
 
-设置界面使用 gpui 0.2.2 的 DirectX 渲染后端。
+## 5. 通知监听与旧版 SQLite 数据库兼容代码（随包捆绑 e_sqlite3.dll）
 
-- 完整许可文本：`licenses/GPUI-Apache-2.0.txt`
-
-## 5. SQLite（歌曲映射数据库）
-
-发行目录中的 `e_sqlite3.dll` 是 SQLite 的原生库，取自 NuGet 包
-`SQLitePCLRaw.lib.e_sqlite3` 2.1.6 的 `runtimes/win-x64/native` 资产。
-（该文件与 0.7.8.3 随包发布的那份逐字节相同，SHA256
-`DCCBABB2BC7E7D4302C44D9CE41B70721A7D0914FA4D289E2F340D39766AD102`。）
-
-- SQLite 本身处于公有领域（public domain）：https://www.sqlite.org/copyright.html
-- SQLitePCLRaw 采用 Apache License 2.0：https://github.com/ericsink/SQLitePCL.raw
-
-Rust 后台通过它只读访问用户数据目录下的 `database/song_maps.db`，用于歌曲别名映射。
+通知监听（只读 Windows 通知数据库 wpndatabase.db）与旧 database/song_maps.db 的可选只读导入共用随包捆绑的 `e_sqlite3.dll`（win-x64，来自 SQLitePCLRaw 的原生 SQLite 构建，以 Apache License 2.0 分发；SQLite 本身处于公有领域：https://www.sqlite.org/copyright.html ）。该 DLL 只以只读方式打开用户数据库，绝不写入或上传内容。SQLitePCLRaw 许可详见 licenses/e_sqlite3-APACHE-2.0.txt 与 https://github.com/ericsink/SQLitePCL.raw 。
 
 ## 6. 字体
 
-中文使用 Noto Sans SC，日文使用 Noto Sans JP；两套均为未修改的完整变量字体，采用 SIL Open Font License 1.1。
+西文与数字使用 Google Sans Flex，中文使用 Noto Sans SC，日文使用 Noto Sans JP；均采用 SIL Open Font License 1.1。
 
-Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+Google Sans Flex：Copyright 2025 Google LLC；Noto 字体：Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
 
+- Google Sans Flex 来源：https://fonts.google.com/specimen/Google+Sans+Flex （2025 年 11 月起以 SIL OFL 发布）
 - Noto Sans SC 来源：https://github.com/google/fonts/tree/main/ofl/notosanssc
 - Noto Sans JP 来源：https://github.com/google/fonts/tree/main/ofl/notosansjp
-- 完整许可：`licenses/NotoSansSC-OFL.txt`、`licenses/NotoSansJP-OFL.txt`
-- 资源位置：`Assets/Fonts/NotoSansSC.ttf`、`Assets/Fonts/NotoSansJP.ttf`
+- 完整许可：`licenses/GoogleSansFlex-OFL.txt`、`licenses/NotoSansSC-OFL.txt`、`licenses/NotoSansJP-OFL.txt`
+- 资源位置：`Assets/Fonts/GoogleSansFlex-*.ttf`、`Assets/Fonts/NotoSansSC.ttf`、`Assets/Fonts/NotoSansJP.ttf`
 
 具体使用说明见 `FONT-NOTICE.md`。
 
@@ -93,10 +82,20 @@ Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Sour
 
 https://github.com/RazrFalcon/roxmltree · 0.20.0 · MIT OR Apache-2.0。采用 MIT 许可副本，见 licenses/roxmltree-MIT.txt。
 
-## material-colors（封面 Monet 取色）
+## material-colors（动态色彩与封面取色）
 
 https://github.com/Aiving/material-colors · 0.4.2 · MIT OR Apache-2.0。它是 Google Material Color Utilities（https://github.com/material-foundation/material-color-utilities，Apache-2.0）的社区 Rust 移植，不是 Google 官方实现。源码随附于 `Rust/vendor/material-colors-0.4.2`，采用 MIT 许可副本，见 licenses/material-colors-MIT.txt。
 
 ## Inno Setup（安装向导）
 
 安装器由 Inno Setup 6.7.3 编译，许可见 licenses/Inno-Setup-License.txt。
+
+## Material Symbols Rounded
+
+Settings and device-status icons use official Material Symbols Rounded by Google, distributed under Apache License 2.0. Source: https://github.com/google/material-design-icons . The exact revision is recorded in Assets/MaterialSymbols/REVISION.txt. The license is retained in licenses/MaterialSymbols-Apache-2.0.txt. Music transport glyphs use the same icon set; the state-dependent button shape is application geometry.
+
+## 本地混合渲染补丁
+
+本轮修改 Vello Hybrid 0.2.0 的数据纹理布局，以及 wgpu-hal 29.0.4 的 DX12 字节码缓存。完整修改源码和原许可随源码包的 `Rust/vendor/` 提供，原项目许可均保留。便携包附带的 Hybrid29 DXBC 由这些源码生成。旧 compute 版本的 Vello/wgpu26 本地补丁不参与本混合版构建。
+
+新增依赖包括 Vello Hybrid/vello_common/vello_sparse_shaders 0.2.0、glifo 0.3.0、Peniko 0.6.1、Kurbo 0.13.1、wgpu 29.0.3 和 core/hal/types 29.0.4。补充许可见 `licenses/Hybrid-Rust-Licenses.txt`，实际锁定依赖见 `Rust/Cargo.lock`。

@@ -1,0 +1,18 @@
+//! Deterministic production scenes and spring checks; no operating-system input.
+use std::{path::Path,collections::HashMap};
+use serde_json::json;
+use crate::{model::{Model,Page,Action},draw::Text,gpu::Gpu,views::{self,ViewState},motion::{Spring,advance_selections}};
+pub fn run(m:&mut Model,text:&mut Text,gpu:&mut Gpu,out:&Path)->Result<Vec<String>,String>{
+ let saved=(m.page,m.settings_tab,m.scroll,m.native_state.clone(),m.prefs.clone());m.page=Page::Settings;m.settings_tab=0;m.scroll=0.;m.native_state["settings"]["ControlCenterColorSource"]=json!("Content");let mut captures=vec![];
+ let initial=views::render(m,text,900.,680.,&ViewState::default());let mut values=HashMap::new();advance_selections(&mut values,&initial.motion_targets,0.,false);m.native_state["settings"]["ControlCenterColorSource"]=json!("Custom");
+ for frame in 0..=36{if frame==7{m.native_state["settings"]["ControlCenterColorSource"]=json!("System");}
+  let view=views::render(m,text,900.,680.,&ViewState::default());let before=values.iter().map(|(key,v)|(key.clone(),v.value)).collect::<HashMap<_,_>>();advance_selections(&mut values,&view.motion_targets,0.,false);if before.iter().any(|(key,value)|values.get(key).is_some_and(|v|(v.value-*value).abs()>0.0021)){return Err("selection retarget restarted a spring".into())}advance_selections(&mut values,&view.motion_targets,1./60.,false);
+  if frame%2==0{let state=ViewState{selection_values:values.iter().map(|(key,v)|(key.clone(),v.value)).collect(),rail_y:522.,..Default::default()};let view=views::render(m,text,900.,680.,&state);let name=format!("expressive-select-{frame:02}.png");gpu.capture(&view.scene,900,680,&out.join(&name))?;captures.push(name);}
+ }
+ let view=views::render(m,text,900.,680.,&ViewState::default());for _ in 0..180{advance_selections(&mut values,&view.motion_targets,1./60.,false);}if advance_selections(&mut values,&view.motion_targets,1./60.,false){return Err("settled selection motion still schedules frames".into())}
+ m.native_state["settings"]["ControlCenterColorSource"]=json!("Custom");let view=views::render(m,text,900.,680.,&ViewState::default());advance_selections(&mut values,&view.motion_targets,1./60.,true);if values.values().any(|v|v.value!=v.target||!v.settled()){return Err("reduced-motion selection did not snap".into())}
+ let press=view.hits.iter().position(|hit|matches!(hit.action,Action::Pref("island"))).ok_or("primary action is missing")?;let target=view.hits[press].rect;let mut spring=Spring::new(0.);
+ for frame in 0..=30{spring.target=if frame<10{1.}else{0.};spring.tick(1./60.,false);if frame%2==0{let mut layers=vec![0.;view.hits.len()];layers[press]=spring.value;let state=ViewState{press_layers:layers,pressed:if frame<10{Some(press)}else{None},rail_y:522.,rail_target:Some(522.),..Default::default()};let v=views::render(m,text,900.,680.,&state);if v.hits[press].rect!=target{return Err("button animation moved its hit rectangle".into())}let name=format!("expressive-press-{frame:02}.png");gpu.capture(&v.scene,900,680,&out.join(&name))?;captures.push(name);}}
+ for frame in [0,2,4,7,11,18,30]{let mut enter=Spring::new(0.);enter.target=1.;enter.tick(frame as f64/60.,false);let rail=112.+410.*enter.value;let state=ViewState{page_enter:Some(enter.value),rail_y:rail,rail_target:Some(522.),..Default::default()};let view=views::render(m,text,900.,680.,&state);let name=format!("expressive-page-{frame:02}.png");gpu.capture(&view.scene,900,680,&out.join(&name))?;captures.push(name);}
+ m.page=saved.0;m.settings_tab=saved.1;m.scroll=saved.2;m.native_state=saved.3;m.prefs=saved.4;Ok(captures)
+}

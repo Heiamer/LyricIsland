@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{cell::RefCell,time::{Duration,Instant}};
 #[derive(Clone,Copy)]pub struct Accent{pub fill:u32,pub hover:u32,pub pressed:u32,pub ink:u32}
 thread_local!{static SYSTEM:RefCell<Option<(Instant,bool)>>=const{RefCell::new(None)};}
-fn system_dark()->bool{SYSTEM.with(|cache|{
+pub fn system_dark()->bool{SYSTEM.with(|cache|{
     let mut cache=cache.borrow_mut();if let Some((at,dark))=*cache{if at.elapsed()<Duration::from_secs(1){return dark}}
     let dark=windows::UI::ViewManagement::UISettings::new().and_then(|s|s.GetColorValue(windows::UI::ViewManagement::UIColorType::Background)).map(|c|(c.R as u32+c.G as u32+c.B as u32)<384).unwrap_or(false);
     *cache=Some((Instant::now(),dark));dark
@@ -23,3 +23,6 @@ pub fn resolve(settings:&Value)->Accent{
         for c in [a.fill,a.hover,a.pressed]{assert!(crate::cover_color::contrast(c,a.ink)>=4.5);}
     }}let s=serde_json::json!({"SettingsTheme":"Light","SettingsLightAccentColor":"#2563EB","SettingsDarkAccentColor":"#6EA8FF"});assert_eq!(resolve(&s).fill,0xff2563eb);}
 }
+
+thread_local!{static SYSTEM_ACCENT:RefCell<Option<(Instant,Option<u32>)>>=const{RefCell::new(None)};}
+pub fn system_accent()->Option<u32>{SYSTEM_ACCENT.with(|cache|{let mut cache=cache.borrow_mut();if let Some((at,c))=*cache{if at.elapsed()<Duration::from_secs(1){return c}}let c=windows::UI::ViewManagement::UISettings::new().and_then(|s|s.GetColorValue(windows::UI::ViewManagement::UIColorType::Accent)).ok().map(|c|(c.R as u32)<<16|(c.G as u32)<<8|c.B as u32);*cache=Some((Instant::now(),c));c})}

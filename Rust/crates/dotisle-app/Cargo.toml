@@ -1,0 +1,28 @@
+[package]
+name = "dotisle-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lyric-island-settings"
+path = "src/main.rs"
+
+[dependencies]
+lyric-core = { path = "../lyric-core" }
+dotisle-render = { path = "../dotisle-render" }
+dotisle-domain = { path = "../dotisle-domain" }
+lyric-backend = { path = "../lyric-backend" }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+vello = { package = "dotisle-scene", path = "../dotisle-scene" }
+winit = "=0.30.12"
+parley = "=0.5.0"
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Win32_System_Diagnostics_Debug", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_Graphics_Gdi", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[build-dependencies]
+embed-manifest = "=1.5.1"

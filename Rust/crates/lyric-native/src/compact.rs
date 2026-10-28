@@ -7,11 +7,22 @@ use serde_json::Value;
 pub struct Stability{candidate:Option<(String,f64,f64)>,since:f64}
 impl Stability{
  pub fn cancel(&mut self){self.candidate=None;}
+ #[cfg(test)]
  pub fn ready(&mut self,key:&str,size:(f64,f64),current:(f64,f64),now:f64,force:bool)->bool{
+  self.ready_within(key,size,current,now,force,0.30,0.08)
+ }
+ /// shrink and grow are the confirmation windows.
+ ///
+ /// The caller stretches shrink while a translation is still on its way, because a
+ /// width taken away now has to be given back the moment that translation lands —
+ /// which is exactly the one-pump the capsule must never show. grow is short but
+ /// non-zero: it filters a single bad snapshot (a seek rewind flashing a long line)
+ /// without making the new line wait.
+ pub fn ready_within(&mut self,key:&str,size:(f64,f64),current:(f64,f64),now:f64,force:bool,shrink:f64,grow:f64)->bool{
   if force||((size.0-current.0).abs()<0.05&&(size.1-current.1).abs()<0.05){self.candidate=None;return true}
   if !self.candidate.as_ref().is_some_and(|(seen,w,h)|seen==key&&(*w-size.0).abs()<0.05&&(*h-size.1).abs()<0.05){self.candidate=Some((key.into(),size.0,size.1));self.since=now;}
   let shrinking=size.0<current.0-0.05||size.1<current.1-0.05;
-  now-self.since>=if shrinking{0.60}else{0.16}
+  now-self.since>=if shrinking{shrink}else{grow}
  }
 }
 pub fn mini_font_size(font:f64)->f64{(font*0.80).clamp(9.,11.)}
@@ -43,9 +54,15 @@ impl Resize{
  pub fn tick(&mut self,dt:f64,expand_ms:f64)->bool{let dt=dt.clamp(0.,0.1);let omega=resize_omega(expand_ms);
   // Growth keeps up with the line that just became readable; contraction can
   // take the long way round because the old line is already fading out.
-  let grow=if self.width_target>self.width{1.25}else{1.};
+  // Growing is what keeps the new line readable, so it front-loads: 2× the natural
+  // frequency settles the wider capsule in about 110 ms. Contraction keeps the long
+  // way round because the old line is already fading out.
+  let grow=if self.width_target>self.width{2.0}else{1.7};
   let width=advance(&mut self.width,&mut self.width_velocity,self.width_target,omega*grow,dt);
-  let height=advance(&mut self.height,&mut self.height_velocity,self.height_target,omega*1.4,dt);
+  // Height still leads width: the capsule has to be tall enough for the second row
+  // before that row becomes readable, and the wider growth below is now fast enough
+  // that 1.4× would no longer be ahead of it.
+  let height=advance(&mut self.height,&mut self.height_velocity,self.height_target,omega*2.6,dt);
   width||height}
 }
 fn advance(value:&mut f64,velocity:&mut f64,target:f64,omega:f64,dt:f64)->bool{
@@ -97,12 +114,13 @@ pub fn capsule_height(font_size:f64,line_spacing:f64,scale:f64,double:bool)->f64
   assert!(!gate.ready("real-short",(160.,40.),current,6.,false));
   assert!(gate.ready("real-short",(160.,40.),current,6.61,false));
  }
- #[test]fn growth_is_prompt_but_a_late_translation_does_not_trigger_two_resizes(){
+ #[test]fn growth_is_prompt_and_contraction_waits_for_a_settled_line(){
   let mut gate=Stability::default();let current=(200.,40.);
-  assert!(!gate.ready("long",(420.,40.),current,0.,false));assert!(gate.ready("long",(420.,40.),current,0.17,false));
-  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.3,false));
-  assert!(gate.ready("long",(420.,40.),(420.,40.),0.5,false));
-  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.6,false));
+  assert!(!gate.ready("long",(420.,40.),current,0.,false));assert!(gate.ready("long",(420.,40.),current,0.09,false));
+  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.10,false));
+  assert!(!gate.ready("translation-missing",(240.,40.),(420.,40.),0.35,false));
+  assert!(gate.ready("translation-missing",(240.,40.),(420.,40.),0.41,false));
+  assert!(gate.ready("long",(420.,40.),(420.,40.),0.45,false));
  }
  #[test]fn manual_changes_and_initial_layout_do_not_wait_for_lyrics(){
   let mut gate=Stability::default();assert!(gate.ready("manual",(260.,14.),(420.,40.),0.,true));
@@ -112,4 +130,9 @@ pub fn capsule_height(font_size:f64,line_spacing:f64,scale:f64,double:bool)->f64
   r.target(140.,40.,true);let mut last=r.width;for _ in 0..240{r.tick(1./120.,480.);assert!(r.width<=last&&r.width>=140.);last=r.width;}assert_eq!(r.width,140.);
   r.target(460.,40.,true);for _ in 0..240{let before=r.width;r.tick(1./120.,480.);assert!(r.width>=before&&r.width<=460.);}assert_eq!(r.width,460.);
  }
+}
+
+#[cfg(test)]mod responsive_tests{use super::*;
+ #[test]fn contraction_is_smooth_monotonic_and_nearly_settled_in_300ms(){let mut r=Resize::new(460.,40.);r.target(180.,40.,true);let mut previous=r.width;for _ in 0..36{r.tick(1./120.,480.);assert!(r.width<=previous&&r.width>=180.);previous=r.width;}assert!((r.width-180.).abs()<4.,"{}",r.width);}
+ #[test]fn stable_short_lyrics_confirm_promptly_but_single_bad_samples_do_not(){let mut s=Stability::default();assert!(!s.ready_within("short",(180.,40.),(460.,40.),0.,false,0.10,0.04));assert!(!s.ready_within("short",(180.,40.),(460.,40.),0.05,false,0.10,0.04));assert!(s.ready_within("short",(180.,40.),(460.,40.),0.11,false,0.10,0.04));}
 }

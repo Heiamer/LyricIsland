@@ -42,6 +42,9 @@ impl Store{
   let (date,time)=if format!("{} {}",t.date,t.time)<=format!("{} {}",n.date,n.time){(n.date.as_str(),n.time.as_str())}else{(t.date.as_str(),t.time.as_str())};
   t.snooze_until=Some(add_minutes(date,time,minutes));t.last_reminded_date=Some(n.date.clone());self.persist(old)
  }
+ pub fn restore(&mut self,value:&Value)->Result<(),String>{
+  let todo:Todo=serde_json::from_value(value.clone()).map_err(|e|e.to_string())?;if self.items.iter().any(|t|t.id==todo.id){return Err("待办已存在".into())}if self.items.len()>=256||!valid_date(&todo.date)||!valid_time(&todo.time)||todo.title.trim().is_empty()||todo.title.chars().count()>120||todo.id.len()>80||!todo.id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){return Err("待办内容无效".into())}let old=self.items.clone();self.items.push(todo);self.persist(old)
+ }
  pub fn delete(&mut self,id:&str)->Result<(),String>{let old=self.items.clone();if !self.items.iter().any(|t|t.id==id){return Err("待办不存在".into())}self.items.retain(|t|t.id!=id);self.persist(old)}
  pub fn poll(&mut self,n:&Now)->Result<Vec<Todo>,String>{let old=self.items.clone();let mut due=vec![];for t in &mut self.items{if t.due(n){if t.snooze_until.is_some(){t.snooze_until=None;}else{t.last_reminded_date=Some(n.date.clone());}due.push(t.clone());}}if !due.is_empty(){self.persist(old)?;}Ok(due)}
 }

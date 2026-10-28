@@ -1,11 +1,11 @@
-//! Read-only current-user notification receiver; presentation remains Direct2D.
+//! Read-only current-user notification receiver; presentation uses Vello.
 use std::{sync::{Arc,Mutex,mpsc,atomic::{AtomicBool,Ordering}},time::Duration};
 use serde_json::{Value,json};
 use windows::Win32::System::WinRT::{RoInitialize,RoUninitialize,RO_INIT_MULTITHREADED};
 #[derive(Clone,Debug,Default)]
 pub struct Notice {pub app_id:String,pub app_name:String,pub title:String,pub body:String,pub icon:Option<Vec<u8>>}
 impl Notice {
-    pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"点屿".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v2.png")).ok()}}
+    pub fn example(base:&std::path::Path)->Self {Self{app_id:"LyricIsland".into(),app_name:"点屿".into(),title:"通知预览".into(),body:"这是一条通知预览。音乐继续，重要消息也不会错过。".into(),icon:std::fs::read(base.join("Assets/LyricIsland-v3.png")).ok()}}
 }
 #[derive(Clone,Default)]
 pub struct Policy {pub enabled:bool,pub paused:bool,pub whitelist_enabled:bool,pub allowed:Vec<String>,pub blacklist_enabled:bool,pub blocked:Vec<String>}
@@ -55,7 +55,7 @@ impl Listener {
     }
     pub fn configure(&self,p:Policy){if let Ok(mut old)=self.policy.lock(){*old=p;}}
 }
-pub fn diagnostics()->Value {json!({"packaged":windows::ApplicationModel::Package::Current().is_ok(),"readOnly":true,"source":"database","rendering":"Direct2D/DirectWrite/DirectComposition"})}
+pub fn diagnostics()->Value {json!({"packaged":windows::ApplicationModel::Package::Current().is_ok(),"readOnly":true,"source":"database","rendering":"Vello Hybrid 0.2 / wgpu 29"})}
 
 #[cfg(test)] mod tests {
     use super::*;

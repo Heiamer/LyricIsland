@@ -14,6 +14,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.0.trim_start_matches(CANCEL_TAG)) }
 }
 impl std::error::Error for Error {}
+impl From<String> for Error {
+    fn from(value: String) -> Self { Error(value) }
+}
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self { Error(value.to_string()) }
 }

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "2.0.3"
+  #define AppVersion "3.1.3"
 #endif
 #ifndef AppId
   #define AppId "DotIsle"
@@ -23,7 +23,7 @@ DisableDirPage=no
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\LyricIsland.exe
 UninstallDisplayName=点屿 DotIsle
-SetupIconFile=..\Assets\LyricIsland-v2.ico
+SetupIconFile=..\Assets\LyricIsland-v3.ico
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputBase}
 Compression=lzma2/fast

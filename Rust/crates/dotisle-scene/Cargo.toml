@@ -1,0 +1,11 @@
+[package]
+name = "dotisle-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vello_hybrid = { version = "=0.2.0", default-features = false, features = ["wgpu", "text"] }
+vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }
+wgpu = { version = "=29.0.3", default-features = false, features = ["std", "dx12", "wgsl"] }
+glifo = { version = "=0.3.0", default-features = false }

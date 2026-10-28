@@ -72,6 +72,9 @@ pub fn netease_window_metadata(filter:&SourceFilter)->Option<(String,String)>{
     }
     let mut result=None;unsafe{let _=EnumWindows(Some(visit),LPARAM(&mut result as *mut _ as isize));}*cache=(Instant::now(),result.clone());result
 }
+/// No session may be playing or current, but a paused player is still the one
+/// the island must control; only compare against a priority that exists.
+fn better(priority:Option<(bool,bool)>,candidate:(bool,bool))->bool{priority.is_none_or(|p|candidate<p)}
 #[derive(Clone)]pub struct MediaSample { pub playback:PlaybackSnapshot,pub updated_ms:i64,pub raw:f64,pub status:String,pub rate:f64,pub cover_identity:String }
 pub struct Media {
     manager:GlobalSystemMediaTransportControlsSessionManager,
@@ -89,11 +92,11 @@ impl Media{
         Ok(Self{manager,active:None,events,manager_tokens:(a,b),session_tokens:None,cached_properties:None,properties_at:Instant::now(),properties_events:u64::MAX,cached_cover:None,cover_key:String::new(),cover_retry:Instant::now()})
     }
     pub fn read(&mut self,filter:&SourceFilter)->Result<MediaSample>{
-        let sessions=self.manager.GetSessions()?;let current=self.manager.GetCurrentSession().ok();let mut best=None;let mut priority=(true,true);
+        let sessions=self.manager.GetSessions()?;let current=self.manager.GetCurrentSession().ok();let mut best=None;let mut priority:Option<(bool,bool)>=None;
         for i in 0..sessions.Size()?{
             let s=sessions.GetAt(i)?;let source=s.SourceAppUserModelId()?.to_string();if !filter.allows(&source){continue}
             let playing=s.GetPlaybackInfo().ok().and_then(|p|p.PlaybackStatus().ok())==Some(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
-            let candidate=(!playing,current.as_ref()!=Some(&s));if candidate<priority{priority=candidate;best=Some(s)}
+            let candidate=(!playing,current.as_ref()!=Some(&s));if better(priority,candidate){priority=Some(candidate);best=Some(s)}
         }
         let Some(session)=best else{self.set_active(None);return Ok(MediaSample{playback:PlaybackSnapshot::idle(),updated_ms:0,raw:0.,status:"Closed".into(),rate:1.,cover_identity:String::new()})};
         self.set_active(Some(session.clone()));
@@ -169,6 +172,14 @@ impl Drop for Media{fn drop(&mut self){self.set_active(None);let _=self.manager.
     let pinned=SourceFilter{ignored:vec![],only:vec!["LyricIsland.Verify13".into()]};
     assert!(pinned.allows("LyricIsland.Verify13"));
     assert!(!pinned.allows("QQMusic.exe"));
+}
+/// A paused player without SMTC focus is the normal resume case; it must not
+/// lose to an empty priority and leave the island without a controllable session.
+#[test]fn a_paused_non_current_session_can_still_be_controlled(){
+    assert!(better(None,(true,true)));
+    assert!(!better(Some((true,true)),(true,true)));
+    assert!(better(Some((true,true)),(true,false)));
+    assert!(better(Some((true,true)),(false,true)));
 }}
 
 

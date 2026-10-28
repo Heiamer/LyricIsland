@@ -42,8 +42,12 @@ impl Renderer{
             let boundary=line.x+self.measure_line(lyric,13.)?.min(line.w)*s.highlight.clamp(0.,1.);
             for(clip,ink)in[(Rect::new(line.x,line.y,(boundary-line.x).max(0.),line.h),s.progress_color),(Rect::new(boundary,line.y,(line.x+line.w-boundary).max(0.),line.h),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(lyric,line,13.,500,ink,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(line.h))?;self.dc.PopAxisAlignedClip();}}
             self.text(&format!("{}-{}",s.title,s.artist),Rect::new(text_x,31.,text_w,15.),9.,400,0xb8000000|(s.text_color&0xffffff))?;
-            let track=crate::layout::mini_track(w,h);self.fill(track,1.5,0xff354052);self.fill(Rect::new(track.x,track.y,track.w*s.progress.clamp(0.,1.),track.h),1.5,s.component_color);
-            self.text_family(&format!("{} / {}",time(s.elapsed),time(s.duration)),Rect::new(w-104.,33.,84.,14.),8.,400,0xffb8c5d3,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
+            let track=crate::layout::mini_track(w,h);let progress=track.w*s.progress.clamp(0.,1.);
+            self.fill(track,track.h/2.,0xff354052);self.fill(Rect::new(track.x,track.y,progress,track.h),track.h/2.,s.component_color);
+            let size=if s.pressed==10{12.}else if s.hover==10{10.}else{0.};self.fill(Rect::new(track.x+progress-size/2.,track.y+track.h/2.-size/2.,size,size),size/2.,s.component_color);
+            self.text(&time(s.elapsed),Rect::new(20.,h-59.,70.,14.),9.,400,0xffb8c5d3)?;
+            let remaining=if s.duration>0.{format!("−{}",time((s.duration-s.elapsed).max(0.)))}else{"--:--".into()};
+            self.text_family(&remaining,Rect::new(w-90.,h-59.,70.,14.),9.,400,0xffb8c5d3,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
             for(id,r)in crate::layout::mini_music_buttons(w,h){self.button(id,r.x,r.y,r.w,s);}
         }Ok(())
     }

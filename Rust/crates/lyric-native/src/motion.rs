@@ -1,20 +1,8 @@
 //! Port of IslandTransition.cs. All calculations remain f64, including velocity
 //! on retarget. Frame time is elapsed time, never an accumulated fixed timestep.
 //!
-//! Two curves live here, and the 灵动岛 setting picks between them:
-//!
-//! * [`Style::Classic`] is the 2.0.0 curve, byte for byte. Eight springs with five
-//!   different speed multipliers, so the outline, the opacity and the text each settle
-//!   on their own schedule. It is kept because it shipped, and because some people
-//!   prefer the softer, more staggered read.
-//! * [`Style::Fluid`] drives one spring and derives every other channel from it. The
-//!   container leads and the contents settle inside it — the ordering that matches what
-//!   the user believes happened. Nothing can desync, because nothing is running on its
-//!   own clock.
-//!
-//! Both are interruptible: a re-target samples the live frame and hands its velocity to
-//! the new transition, so grabbing the island mid-flight reverses it instead of
-//! restarting it.
+//! One fluid spring drives the shape and its derived content channels.
+//! Retargeting preserves every live position and velocity.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -23,8 +11,8 @@ pub struct Spring { pub stiffness: f64, pub damping: f64, pub mass: f64 }
 impl Default for Spring { fn default() -> Self { Self { stiffness:420., damping:30., mass:0.8 } } }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "PascalCase")]
-pub struct Options { pub gap:f64, pub duration:f64, pub collapse_duration:f64, pub radius:f64, pub spring:Spring }
-impl Default for Options { fn default()->Self { Self { gap:8.,duration:480.,collapse_duration:440.,radius:30.,spring:Spring::default() } } }
+pub struct Options { pub gap:f64, pub duration:f64, pub collapse_duration:f64, pub radius:f64, pub spring:Spring,pub curve:Option<[f64;4]> }
+impl Default for Options { fn default()->Self { Self { gap:8.,duration:480.,collapse_duration:440.,radius:30.,spring:Spring::default(),curve:None } } }
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize)]
 pub struct Frame {
     pub capsule_scale_y:f64, pub card_reveal:f64, pub card_offset_y:f64,
@@ -36,10 +24,6 @@ impl Frame {
     pub fn expanded()->Self { Self {capsule_scale_y:1.,card_reveal:1.,card_offset_y:0.,card_opacity:1.,card_scale:1.,card_blur:0.,content_opacity:1.,content_offset_y:0.} }
     pub fn values(self)->[f64;8] { [self.capsule_scale_y,self.card_reveal,self.card_offset_y,self.card_opacity,self.card_scale,self.card_blur,self.content_opacity,self.content_offset_y] }
 }
-
-/// Which curve the island morph runs on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Style { Classic, Fluid }
 
 /// How fast the fluid master spring runs relative to the configured one.
 ///
@@ -53,25 +37,16 @@ const FLUID_SPEED:f64=1.0;
 /// Where the expanded card starts on its way in. Never 0: nothing in the real world
 /// appears from nothing, so a barely-there shape reads as an arrival rather than a pop.
 const FLUID_SCALE_FLOOR:f64=0.98;
-
 #[derive(Clone, Copy)]
-pub struct Transition { from:Frame, velocity:Frame, options:Options, reduced:bool, rate:f64, style:Style, pub end:Frame, pub duration_ms:f64 }
+pub struct Transition { from:Frame, velocity:Frame, options:Options, reduced:bool, rate:f64, pub end:Frame, pub duration_ms:f64 }
 impl Transition {
-    /// The 2.0.0 curve, unchanged.
-    ///
-    /// Kept as the named entry point for it: the tests and the preview harness still call this,
-    /// and it is what "关闭流体动画" resolves to. The shipping path goes through [`styled`].
-    #[allow(dead_code)]
     pub fn new(expanded:bool,from:Frame,options:Options,velocity:Frame,reduced:bool)->Self {
-        Self::styled(Style::Classic,expanded,from,options,velocity,reduced)
-    }
-    pub fn styled(style:Style,expanded:bool,from:Frame,options:Options,velocity:Frame,reduced:bool)->Self {
         let rate=if expanded {options.duration} else {options.collapse_duration}/360.;
-        let s=options.spring;let omega=(s.stiffness/s.mass).sqrt();let zeta=(s.damping/(2.*(s.stiffness*s.mass).sqrt())).max(if style==Style::Fluid{1.}else{0.});
+        let s=options.spring;let omega=(s.stiffness/s.mass).sqrt();let zeta=(s.damping/(2.*(s.stiffness*s.mass).sqrt())).max(1.);
         // The settle time has to follow the speed actually used to sample, or the
         // transition lingers after its last visible frame and keeps the redraw loop awake.
-        let decay=(if zeta>1. {omega/(zeta+(zeta*zeta-1.).sqrt())}else{zeta*omega})*if style==Style::Fluid{FLUID_SPEED}else{1.};
-        Self{from,velocity,options,reduced,rate,style,end:if expanded{Frame::expanded()}else{Frame::hidden(options)},duration_ms:if reduced{120.}else{(12./decay*1000.*rate).max(1.)}}
+        let decay=(if zeta>1. {omega/(zeta+(zeta*zeta-1.).sqrt())}else{zeta*omega})*FLUID_SPEED;
+        Self{from,velocity,options,reduced,rate,end:if expanded{Frame::expanded()}else{Frame::hidden(options)},duration_ms:if reduced{120.}else if options.curve.is_some(){if expanded{options.duration}else{options.collapse_duration}}else{(12./decay*1000.*rate).max(1.)}}
     }
     pub fn sample(&self,ms:f64)->Frame { self.evaluate(ms,false) }
     pub fn velocity(&self,ms:f64)->Frame {self.evaluate(ms,true)}
@@ -84,15 +59,7 @@ impl Transition {
             g.card_opacity=self.from.card_opacity+(self.end.card_opacity-self.from.card_opacity)*t;
             g.content_opacity=self.from.content_opacity+(self.end.content_opacity-self.from.content_opacity)*t;return g;
         }
-        if self.style==Style::Fluid { return self.fluid(ms,velocity); }
-        let a=self.from.values();let b=self.end.values();let v=self.velocity.values();let mut r=[0.;8];
-        let speeds=[1.,1.,1.,1.5,1.,1.2,1.3,1.];
-        for i in 0..8 {
-            let (p,v)=self.spring(a[i],b[i],v[i],ms.max(0.)/1000.,speeds[i]/self.rate);
-            let (min,max)=match i{1=>(0.,1.035),3|6=>(0.,1.),5=>(0.,6.),_=>(f64::NEG_INFINITY,f64::INFINITY)};
-            r[i]=if velocity{if p<min||p>max{0.}else{v}}else{p.clamp(min,max)};
-        }
-        Frame{capsule_scale_y:r[0],card_reveal:r[1],card_offset_y:r[2],card_opacity:r[3],card_scale:r[4],card_blur:r[5],content_opacity:r[6],content_offset_y:r[7]}
+        self.fluid(ms,velocity)
     }
     /// One spring on the shape; every other channel is a pure function of it.
     ///
@@ -103,7 +70,7 @@ impl Transition {
     /// carries every channel through the reversal together.
     fn fluid(&self,ms:f64,velocity:bool)->Frame {
         let time=ms.max(0.)/1000.;let speed=FLUID_SPEED/self.rate;
-        let (p,dp)=self.integrate(self.from.card_reveal,self.end.card_reveal,self.velocity.card_reveal,time,speed,1.0);
+        let (p,dp)=if let Some(curve)=self.options.curve{let u=(ms/self.duration_ms).clamp(0.,1.);let(ease,slope)=lyric_core::motion_curve::sample(curve,u);let duration=self.duration_ms/1000.;let delta=self.end.card_reveal-self.from.card_reveal;let incoming=self.velocity.card_reveal;let start_slope=lyric_core::motion_curve::sample(curve,0.).1;let interrupted=self.from.card_reveal>0.0001&&self.from.card_reveal<0.9999||incoming.abs()>0.001;let residual=if interrupted{incoming-delta*start_slope/duration}else{0.};let correction=residual*duration*u*(1.-u).powi(2);(self.from.card_reveal+delta*ease+correction,delta*slope/duration+residual*(1.-u)*(1.-3.*u))}else{self.integrate(self.from.card_reveal,self.end.card_reveal,self.velocity.card_reveal,time,speed,1.0)};
         let channels=|value:f64,rate:f64|->([f64;8],[f64;8]){
             let q=value.clamp(0.,1.);let (fade,dfade)=step(q,0.16,0.72);
             let (content,dcontent)=step(q,0.58,0.985);let (scale,dscale)=step(q,0.,0.76);let (blur,dblur)=step(q,0.10,0.82);let lift=self.options.gap+10.;
@@ -111,8 +78,7 @@ impl Transition {
              [0.,rate,lift*rate,dfade*rate,(1.-FLUID_SCALE_FLOOR)*dscale*rate,-6.*dblur*rate,dcontent*rate,-6.*dcontent*rate])
         };
         let (mut values,mut velocities)=channels(p,dp);let (initial,initial_velocity)=channels(self.from.card_reveal,self.velocity.card_reveal);
-        // Preserve every presentation channel and its velocity, including when the
-        // user changes the animation style or reverses during the content crossfade.
+        // Preserve every presentation channel and its velocity on reversal.
         let omega=(self.options.spring.stiffness/self.options.spring.mass).sqrt()*speed;
         let decay=(-omega*time).exp();let from=self.from.values();let incoming=self.velocity.values();
         for i in 0..8{if i==1{continue}let offset=from[i]-initial[i];let tangent=incoming[i]-initial_velocity[i]+omega*offset;
@@ -123,12 +89,7 @@ impl Transition {
         let r=if velocity{velocities}else{values};
         Frame{capsule_scale_y:r[0],card_reveal:r[1],card_offset_y:r[2],card_opacity:r[3],card_scale:r[4],card_blur:r[5],content_opacity:r[6],content_offset_y:r[7]}
     }
-    fn spring(&self,from:f64,target:f64,velocity:f64,time:f64,speed:f64)->(f64,f64) {
-        self.integrate(from,target,velocity,time,speed,0.)
-    }
-    /// `zeta_floor` raises the damping ratio without lowering it: the classic curve passes
-    /// 0 and keeps whatever the user configured, the fluid curve passes 1.0 so its master
-    /// spring cannot overshoot.
+    /// The damping floor keeps the master spring from overshooting its measured card.
     fn integrate(&self,from:f64,target:f64,velocity:f64,time:f64,speed:f64,zeta_floor:f64)->(f64,f64) {
         let s=self.options.spring;let omega=(s.stiffness/s.mass).sqrt()*speed;let zeta=(s.damping/(2.*(s.stiffness*s.mass).sqrt())).max(zeta_floor);let d=from-target;
         let (x,v)=if zeta<0.999999 {
@@ -194,18 +155,17 @@ impl Activity {
             assert_eq!(a.sample(a.duration_ms).values(),Frame::expanded().values());
         }
     }
-    /// The fluid curve has to land on exactly the same two endpoints as the classic one,
-    /// or the renderer would draw a card that does not match the layout it was measured for.
+    /// Endpoints must match the geometry used for drawing and pointer hit testing.
     #[test] fn fluid_lands_on_the_same_endpoints() {
         let o=Options::default();
-        let open=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
+        let open=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
         assert_eq!(open.sample(0.).values(),Frame::hidden(o).values());
         assert_eq!(open.sample(open.duration_ms).values(),Frame::expanded().values());
-        let close=Transition::styled(Style::Fluid,false,Frame::expanded(),o,Frame::default(),false);
+        let close=Transition::new(false,Frame::expanded(),o,Frame::default(),false);
         assert_eq!(close.sample(close.duration_ms).values(),Frame::hidden(o).values());
     }
     #[test] fn fluid_is_monotonic_and_never_opens_from_zero() {
-        let o=Options::default();let t=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
+        let o=Options::default();let t=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
         let mut previous=-1.;
         for i in 0..=400{let f=t.sample(i as f64);assert!(f.card_reveal>=previous-1e-9);previous=f.card_reveal;
             assert!(f.card_scale>=FLUID_SCALE_FLOOR-1e-9,"scale dipped to {}",f.card_scale);
@@ -213,29 +173,27 @@ impl Activity {
     }
     /// Contents must not be readable before the container has room for them.
     #[test] fn fluid_contents_trail_the_outline() {
-        let o=Options::default();let t=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
+        let o=Options::default();let t=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
         for i in 0..200{let f=t.sample(i as f64*3.);if f.content_opacity>0.05{assert!(f.card_reveal>0.3,"contents visible at reveal {}",f.card_reveal);}}
     }
     #[test] fn fluid_reverses_without_a_jump() {
-        let o=Options::default();let a=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
-        for t in [30.,120.,260.] {let p=a.sample(t);let v=a.velocity(t);let b=Transition::styled(Style::Fluid,false,p,o,v,false);
+        let o=Options::default();let a=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
+        for t in [30.,120.,260.] {let p=a.sample(t);let v=a.velocity(t);let b=Transition::new(false,p,o,v,false);
             for (x,y) in b.sample(0.).values().iter().zip(p.values()){assert!((x-y).abs()<1e-6,"jumped at {t}ms");}}
     }
     /// Reversal preserves every channel even with the longer throw timing.
     #[test]fn fluid_reversal_preserves_the_first_real_frame_and_all_channel_velocities(){
-        let o=Options::default();let opening=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
-        for at in [10.,40.,90.,140.,230.]{let from=opening.sample(at);let speed=opening.velocity(at);let closing=Transition::styled(Style::Fluid,false,from,o,speed,false);
+        let o=Options::default();let opening=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
+        for at in [10.,40.,90.,140.,230.]{let from=opening.sample(at);let speed=opening.velocity(at);let closing=Transition::new(false,from,o,speed,false);
             let dt=0.0001;let frame=closing.sample(dt);for ((start,next),expected) in from.values().into_iter().zip(frame.values()).zip(speed.values()){
                 assert!((start-next).abs()<0.0001,"position discontinuity at {at}ms");
                 assert!(((next-start)/(dt/1000.)-expected).abs()<0.04,"velocity discontinuity at {at}ms");
             }
         }
     }
-    #[test] fn fluid_settles_sooner() {
+    #[test] fn fluid_settles_within_the_drawer_budget() {
         let o=Options::default();
-        let classic=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
-        let fluid=Transition::styled(Style::Fluid,true,Frame::hidden(o),o,Frame::default(),false);
-        assert!(fluid.duration_ms<classic.duration_ms);
+        let fluid=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);
         assert!(fluid.duration_ms<760.,"drawer budget exceeded: {}",fluid.duration_ms);
     }
     #[test] fn rubber_band_resists_instead_of_stopping() {
@@ -246,4 +204,8 @@ impl Activity {
         assert!(rubber(400.,100.)>past);
         assert_eq!(rubber(-200.,100.),-past);
     }
+}
+
+#[cfg(test)]mod curve_tests{use super::*;
+ #[test]fn custom_curve_drives_the_real_master_channel_and_preserves_reversal(){let mut o=Options::default();o.curve=Some([0.,0.,1.,1.]);let t=Transition::new(true,Frame::hidden(o),o,Frame::default(),false);assert!((t.sample(o.duration/2.).card_reveal-0.5).abs()<1e-6);let f=t.sample(180.);let v=t.velocity(180.);let r=Transition::new(false,f,o,v,false);assert_eq!(r.sample(0.).values(),f.values());assert_eq!(r.velocity(0.).values(),v.values());let near=(r.sample(0.001).card_reveal-f.card_reveal)/0.000001;assert!((near-v.card_reveal).abs()<0.01);assert_eq!(r.sample(r.duration_ms).card_reveal,0.);}
 }

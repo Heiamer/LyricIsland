@@ -10,7 +10,7 @@ fn wide(s:&[u16])->String{String::from_utf16_lossy(&s[..s.iter().position(|c|*c=
 #[derive(Clone,serde::Serialize)]#[serde(rename_all="camelCase")]
 pub struct TimingSample{pub song_id:String,pub title:String,pub artist:String,pub album:String,pub position:f64,pub duration:f64,pub playing:bool,pub captured_ms:i64,pub cover_url:Option<String>}
 #[derive(Default)]struct SongMetadata{title:String,artist:String,album:String,cover:Option<String>}
-struct Reader{process:Owned,player:usize,schedule:usize,metadata_id:String,title:String,artist:String,album:String,cover:Option<String>,next_metadata:Instant,remote:Option<mpsc::Receiver<(String,SongMetadata)>>,next_remote:Instant}
+struct Reader{target:Option<crate::netease_control::Target>,process:Owned,player:usize,schedule:usize,metadata_id:String,title:String,artist:String,album:String,cover:Option<String>,next_metadata:Instant,remote:Option<mpsc::Receiver<(String,SongMetadata)>>,next_remote:Instant}
 impl Reader{
     fn attach()->Result<Self,String>{unsafe{
         let snapshot=Owned(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0).map_err(|e|e.to_string())?);
@@ -47,7 +47,7 @@ impl Reader{
             let value=|at|u32::from_le_bytes(section[at..at+4].try_into().unwrap());let rva=value(12);let length=value(16);let offset=value(20);
             let p=lyric_core::memory_scan::scan_rip(&path,offset as u64,length as u64,rva as i64,PLAYER,3).map_err(|e|e.to_string())?;
             let s=lyric_core::memory_scan::scan_rip(&path,offset as u64,length as u64,rva as i64,SCHEDULE,4).map_err(|e|e.to_string())?;
-            return Ok(Self{process,player:(base as i64+p) as usize,schedule:(base as i64+s) as usize,metadata_id:String::new(),title:String::new(),artist:String::new(),album:String::new(),cover:None,next_metadata:Instant::now(),remote:None,next_remote:Instant::now()})
+            return Ok(Self{target:crate::netease_control::Target::from_pid(pid),process,player:(base as i64+p) as usize,schedule:(base as i64+s) as usize,metadata_id:String::new(),title:String::new(),artist:String::new(),album:String::new(),cover:None,next_metadata:Instant::now(),remote:None,next_remote:Instant::now()})
         }
         Err("missing executable section".into())
     }
@@ -98,6 +98,15 @@ fn remote_metadata(id:&str)->Result<SongMetadata,String>{
     let ctx=RequestContext::new(Duration::from_secs(4));let response=http::get(&format!("https://music.163.com/api/song/detail/?id={id}&ids=%5B{id}%5D"),&ctx)?;
     parse_metadata(&response,id)
 }
+/// Raw song object for the client's own playing/play action after a restart.
+pub fn track_detail(id:&str)->Result<serde_json::Value,String>{
+    if id.is_empty()||id.len()>32||!id.bytes().all(|b|b.is_ascii_digit()){return Err("歌曲 ID 无效".into())}
+    let ctx=RequestContext::new(Duration::from_secs(4));
+    let response=http::get(&format!("https://music.163.com/api/song/detail/?id={id}&ids=%5B{id}%5D"),&ctx)?;
+    let song=response["songs"].as_array().and_then(|list|list.first()).cloned().ok_or_else(||"网易云没有返回歌曲详情".to_string())?;
+    if text(&song,"id")!=id{return Err("歌曲详情 ID 不匹配".into())}
+    Ok(song)
+}
 fn parse_metadata(response:&serde_json::Value,id:&str)->Result<SongMetadata,String>{
     let song=&response["songs"][0];if text(song,"id")!=id{return Err("metadata ID mismatch".into())}
     let album=song.get("album").unwrap_or(&song["al"]);let cover=text(album,"picUrl");
@@ -111,6 +120,7 @@ impl NeteaseTimeline{
         if Instant::now()<self.retry{return}let result=(||{if self.reader.is_none(){self.reader=Some(Reader::attach()?)}self.reader.as_mut().unwrap().read(&self.local,online)})();
         match result{Ok(sample)=>{self.latest=sample;self.error=None;self.status=if self.latest.is_some(){"网易云实时进度"}else{"等待网易云有效进度"}.into()},Err(error)=>{self.latest=None;self.reader=None;self.error=Some(error);self.status="网易云读取不可用，使用系统媒体会话".into();self.retry=Instant::now()+Duration::from_secs(5)}}
     }
+    pub fn control_target(&self,track:&lyric_core::models::TrackInfo)->Option<crate::netease_control::Target>{self.matching(track)?;self.reader.as_ref()?.target.clone()}
     pub fn matching(&self,track:&lyric_core::models::TrackInfo)->Option<TimingSample>{
         let s=self.latest.as_ref()?;let age=unix_ms()-s.captured_ms;
         if track.source_app!="Netease"||!(0..800).contains(&age)||track.song_id.as_ref().map(|id|id!=&s.song_id).unwrap_or_else(||track.title.trim().to_lowercase()!=s.title.trim().to_lowercase()){return None}Some(s.clone())

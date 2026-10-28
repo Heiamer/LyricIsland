@@ -1,14 +1,14 @@
-# Current application workspace: lyric core, media backend, native island and GPUI settings.
+# DotIsle V3: shared domain, media backend, one Vello application.
 [workspace]
 resolver = "2"
-members = ["crates/lyric-core", "crates/lyric-archive", "crates/lyric-bootstrap", "crates/lyric-tools", "crates/lyric-backend", "crates/lyric-settings", "crates/lyric-native"]
+members = ["crates/dotisle-scene", "crates/lyric-core", "crates/lyric-backend", "crates/dotisle-domain", "crates/dotisle-app", "crates/dotisle-render", "crates/lyric-native", "crates/lyric-archive", "crates/lyric-bootstrap"]
 # Vendored third-party crate: built as a path dependency, its own tests stay out of `cargo test --workspace`.
-exclude = ["vendor/material-colors-0.4.2"]
+exclude = ["vendor/material-colors-0.4.2", "vendor/wgpu-hal-29.0.4", "vendor/vello_hybrid-0.2.0"]
 
 [workspace.package]
-version = "2.1.9"
+version = "3.1.5"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "MIT"
 authors = ["LyricIsland Rust port"]
 
@@ -21,12 +21,12 @@ sha2 = "0.10"
 base64 = "0.22"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+[patch.crates-io]
+vello_hybrid = { path = "vendor/vello_hybrid-0.2.0" }
+wgpu-hal = { path = "vendor/wgpu-hal-29.0.4" }
+
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 strip = true
 
-# The local GPUI patch uses the owning display's compositor cadence and keeps
-# animation changes reproducible without depending on an external fork.
-[patch.crates-io]
-gpui-fast = { path = "vendor/gpui-fast" }

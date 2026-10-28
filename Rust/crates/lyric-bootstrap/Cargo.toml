@@ -25,6 +25,9 @@ name = "lyric-uninstall"
 path = "src/bin/uninstall.rs"
 
 [dependencies]
+dotisle-render = { path = "../dotisle-render" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+vello = { package = "dotisle-scene", path = "../dotisle-scene" }
 lyric-archive = { path = "../lyric-archive" }
 serde_json.workspace = true
 regex.workspace = true

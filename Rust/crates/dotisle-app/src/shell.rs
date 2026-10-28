@@ -1,0 +1,146 @@
+//! One Vello settings window. The original island is owned by the native process.
+use std::{sync::Arc,time::{Instant,Duration}};
+use winit::{application::ApplicationHandler,event_loop::{EventLoop,ActiveEventLoop,ControlFlow},window::{Window,WindowId,ResizeDirection},dpi::{LogicalSize,LogicalPosition,PhysicalSize},event::{WindowEvent,ElementState,MouseButton,MouseScrollDelta,Ime,TouchPhase},keyboard::{Key,NamedKey,ModifiersState},platform::windows::IconExtWindows};
+use dotisle_render::surface::Surface as RenderSurface;
+use crate::{model::{Model,Action,Page},widgets::Hit,motion::Spring,views,draw,gpu,platform};
+static WAKE:std::sync::OnceLock<winit::event_loop::EventLoopProxy<()>>=std::sync::OnceLock::new();
+pub fn wake(){if let Some(proxy)=WAKE.get(){let _=proxy.send_event(());}}
+struct Surface{surface:RenderSurface,window:Arc<Window>,hits:Vec<Hit>,pointer:(f64,f64),focus:Option<usize>,pressed:Option<usize>,visible:bool,occluded:bool,taskbar:bool,open_profile:bool,hidden_since:Option<Instant>}
+struct App{warm:bool,switches:std::collections::HashMap<String,Spring>,color_motion:dotisle_domain::dynamic_color::RoleMotion,interactions:Vec<Spring>,presses:Vec<Spring>,selections:std::collections::HashMap<String,Spring>,motion_targets:Vec<(String,f64)>,page_enter:Spring,seek_preview:Option<f64>,seek_track:Option<serde_json::Value>,timeline:crate::timeline::Timeline,model:Model,gpu:gpu::Gpu,text:draw::Text,main:Option<Surface>,rail:Spring,mods:ModifiersState,started:Instant,last:Instant,max_scroll:f64,touch:Option<u64>,drag:Option<Action>,last_title_click:Option<Instant>,title_press:Option<(Instant,(f64,f64))>}
+impl App{
+ fn new(model:Model)->Self{let mut color_motion=dotisle_domain::dynamic_color::RoleMotion::default();color_motion.update(model.dynamic_color().roles,0.,false);Self{warm:false,switches:Default::default(),color_motion,interactions:vec![],presses:vec![],selections:Default::default(),motion_targets:vec![],page_enter:Spring::new(1.),seek_preview:None,seek_track:None,timeline:Default::default(),model,gpu:gpu::Gpu::new(),text:draw::Text::new_lazy_japanese(),main:None,rail:Spring::new(522.),mods:ModifiersState::empty(),started:Instant::now(),last:Instant::now(),max_scroll:0.,touch:None,drag:None,last_title_click:None,title_press:None}}
+ fn surface(&mut self,event:&ActiveEventLoop)->Result<Surface,String>{let icon=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("Assets/LyricIsland-v3.ico"))).and_then(|p|winit::window::Icon::from_path(p,Some(PhysicalSize::new(64,64))).ok());let attrs=Window::default_attributes().with_title("点屿 V3 · M3 Expressive").with_window_icon(icon).with_inner_size(LogicalSize::new(1200.,800.)).with_min_inner_size(LogicalSize::new(900.,680.)).with_decorations(false).with_resizable(true).with_transparent(true).with_visible(false);let window=Arc::new(event.create_window(attrs).map_err(|e|e.to_string())?);window.set_ime_allowed(true);platform::backdrop(&window);platform::set_window_icon(&window);let mut surface=self.gpu.surface(window.clone())?;
+        // Hidden Windows HWNDs do not receive WM_PAINT. Render synchronously once,
+        // then expose the completed composition surface and enter the normal loop.
+        self.model.tick();self.color_motion.update(self.model.dynamic_color().roles,self.started.elapsed().as_secs_f64(),false);let size=window.inner_size();let scale=window.scale_factor();let initial=views::ViewState{rail_y:112.+Page::ALL.iter().position(|p|*p==self.model.page).unwrap_or(0)as f64*82.,color_scheme:Some(self.model.scheme()),..Default::default()};self.rail.snap(initial.rail_y);
+        let view=views::render(&self.model,&mut self.text,size.width as f64/scale,size.height as f64/scale,&initial);self.max_scroll=view.max_scroll;self.motion_targets=view.motion_targets;for(key,target)in &self.motion_targets{self.selections.entry(key.clone()).or_insert_with(||Spring::new(*target));}self.gpu.draw(&mut surface,&view.scene,scale)?;
+        // The Japanese fallback (about 9.5 MB) is read after this first completed
+        // frame, so its disk read never sits on the window's cold-start path.
+        // Fallback fonts are registered by Text only when a glyph needs them.
+        if let Some(dir)=std::env::var_os("DOTISLE_PROFILE_DIR"){let dir=std::path::PathBuf::from(dir);let _=std::fs::create_dir_all(&dir);let _=std::fs::write(dir.join("settings-startup.json"),serde_json::json!({"firstCompleteFrameMs":crate::STARTED.get().map(|s|s.elapsed().as_secs_f64()*1000.),"mode":if self.model.demo{"preview"}else{"connected"},"whiteFrameExposed":false}).to_string());}
+        if !self.warm{window.set_visible(true);window.request_redraw();}Ok(Surface{surface,window,hits:view.hits,pointer:(-1.,-1.),focus:None,pressed:None,visible:!self.warm,occluded:false,taskbar:false,open_profile:false,hidden_since:if self.warm{Some(Instant::now())}else{None}})}
+ fn error(&mut self,e:String){lyric_backend::io::log(&self.model.data.join("Logs"),"V3_SETTINGS",&e);self.model.message(format!("绘制失败：{e}"));}
+ fn action(&mut self,a:Action){
+  match &a{Action::WindowMinimize=>{if let Some(s)=&self.main{s.window.set_minimized(true);}return},Action::WindowMaximize=>{if let Some(s)=&self.main{s.window.set_maximized(!s.window.is_maximized());}self.redraw();return},Action::WindowClose=>{if let Some(s)=&mut self.main{s.window.set_visible(false);s.visible=false;s.hidden_since=Some(Instant::now());}return},_=>{}}
+  let reset=crate::tutorial::allowed(&a)||matches!(a,Action::Navigate(_)|Action::SettingsTab(_)|Action::SaveModal|Action::CancelModal|Action::EditTodo(_)|Action::Paths|Action::Palette);self.model.dispatch(a);if reset{self.interactions.clear();self.presses.clear();if let Some(s)=&mut self.main{s.focus=None;s.pressed=None;}}self.redraw();}
+ fn redraw(&self){if let Some(s)=&self.main{if s.visible&&!s.occluded{s.window.request_redraw();}}}
+ fn get(&mut self,_cloud:bool)->Option<&mut Surface>{self.main.as_mut()}
+ fn cancel_drag(&mut self){self.drag=None;self.seek_preview=None;self.seek_track=None;self.model.preview_curve=None;self.model.preview_radius=None;self.model.preview_values.clear();}
+ fn drag_to(&mut self,p:(f64,f64)){if let Some(action)=&self.drag{match action{Action::Seek=>{if let Some(s)=&self.main{if let Some(hit)=s.pressed.and_then(|i|s.hits.get(i)){let duration=self.model.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);self.seek_preview=Some(((p.0-hit.rect.x0)/hit.rect.width()).clamp(0.,1.)*duration);}}},
+  Action::CurveHandle(i,b)=>{let mut c=self.model.preview_curve.unwrap_or_else(||self.model.curve().unwrap_or(lyric_core::motion_curve::EMPHASIZED));let n=*i as usize*2;c[n]=((p.0-b[0])/b[2]).clamp(0.,1.);c[n+1]=(1.-(p.1-b[1])/b[3]).clamp(0.,1.);self.model.preview_curve=Some(c);},
+  Action::RadiusHandle(b)=>self.model.preview_radius=Some((((b[0]-p.0)+(p.1-b[1]))/(2.*b[2])).clamp(if self.model.radius_target==0{0.}else{8.},48.).round()),
+  Action::ColorPad(b)=>{let s=((p.0-b[0])/b[2]).clamp(0.,1.);let v=(1.-(p.1-b[1])/b[3]).clamp(0.,1.);self.model.color_pad(s,v);},
+  Action::ColorHue(b)=>self.model.color_hue((p.0-b[0])/b[2]),
+  Action::RangeHandle(key,min,max,b)=>{let v=min+(max-min)*((p.0-b[0])/b[2]).clamp(0.,1.);let v=if *key=="FontSize"{(v*2.).round()/2.}else if *key=="SpringMass"{(v*100.).round()/100.}else{v.round()};self.model.preview_values.insert(key,serde_json::json!(v));},_=>{}}}self.redraw();}
+ fn resize_from_edge(&mut self)->bool{
+  if self.touch.is_some(){return false}
+  let Some(s)=&self.main else{return false};
+  if s.window.is_maximized(){return false}
+  let scale=s.window.scale_factor();let size=s.window.inner_size();let w=size.width as f64/scale;let h=size.height as f64/scale;let(x,y)=s.pointer;
+  if x<0.||y<0.||w<=0.||h<=0.{return false}
+  let e=6.;let left=x<e;let right=x>w-e;let top=y<e;let bottom=y>h-e;
+  let direction=if top&&left{Some(ResizeDirection::NorthWest)}else if top&&right{Some(ResizeDirection::NorthEast)}else if bottom&&left{Some(ResizeDirection::SouthWest)}else if bottom&&right{Some(ResizeDirection::SouthEast)}else if left{Some(ResizeDirection::West)}else if right{Some(ResizeDirection::East)}else if top{Some(ResizeDirection::North)}else if bottom{Some(ResizeDirection::South)}else{None};
+  if let Some(direction)=direction{let _=s.window.drag_resize_window(direction);return true}
+  false
+ }
+ fn down(&mut self){
+  if self.resize_from_edge(){return}
+  let mut action=None;let mut p=(0.,0.);if let Some(s)=&mut self.main{s.focus=None;s.pressed=s.hits.iter().rposition(|h|h.enabled&&h.rect.contains(s.pointer));action=s.pressed.and_then(|i|s.hits.get(i)).map(|h|h.action.clone());p=s.pointer;}
+  if self.model.tutorial.is_some()&&action.is_none(){self.redraw();return}
+  if action.is_none()&&p.1>=0.&&p.1<views::TITLEBAR_H{
+   let now=Instant::now();let double=self.last_title_click.is_some_and(|t|now.duration_since(t)<Duration::from_millis(420));
+   if double{self.last_title_click=None;if let Some(s)=&self.main{s.window.set_maximized(!s.window.is_maximized());}self.redraw();return}
+   self.last_title_click=Some(now);self.title_press=Some((now,p));
+   if let Some(s)=&self.main{s.window.focus_window();}
+   return;
+  }
+  if let Some(a)=action{if matches!(a,Action::Seek|Action::CurveHandle(_,_)|Action::RadiusHandle(_)|Action::RangeHandle(_,_,_,_)|Action::ColorPad(_)|Action::ColorHue(_)){if matches!(a,Action::Seek){self.seek_track=Some(self.model.snapshot["track"].clone());}self.drag=Some(a);self.drag_to(p);}}self.redraw();
+ }
+ fn up(&mut self){if self.title_press.take().is_some(){self.redraw();return}if let Some(drag)=self.drag.take(){if matches!(drag,Action::Seek){if let Some(position)=self.seek_preview.take(){let same=self.seek_track.take().is_some_and(|track|track["id"]==self.model.snapshot["track"]["id"]&&track["sourceApp"]==self.model.snapshot["track"]["sourceApp"]);if !same{self.cancel_drag();if let Some(s)=&mut self.main{s.pressed=None;}self.model.message("歌曲已切换，已取消这次进度拖动");self.redraw();return}let duration=self.model.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);if duration>0.{self.timeline.seek(position);self.model.seek(position/duration);}}}let update=match drag{Action::CurveHandle(_,_)=>self.model.preview_curve.take().map(|c|("MotionCurve",serde_json::json!(c))),Action::RadiusHandle(_)=>self.model.preview_radius.take().map(|r|(if self.model.radius_target==0{"CapsuleCornerRadius"}else{"MotionRadius"},serde_json::json!(r))),Action::RangeHandle(key,_,_,_)=>self.model.preview_values.remove(key).map(|v|(key,v)),_=>None};if let Some((key,value))=update{self.action(Action::NativeEdit(key,value));}if let Some(s)=&mut self.main{s.pressed=None;}self.redraw();return}let action=self.main.as_mut().and_then(|s|{let p=s.pointer;s.pressed.take().and_then(|i|s.hits.get(i)).filter(|h|h.enabled&&h.rect.contains(p)).map(|h|(h.action.clone(),h.rect,p))});if let Some((a,r,p))=action{if matches!(a,Action::Seek){self.model.seek((p.0-r.x0)/r.width());}else{if matches!(a,Action::Navigate(_)|Action::SettingsTab(_)|Action::IslandTab(_))&&!self.model.prefs.reduced_motion{if self.page_enter.settled(){self.page_enter.snap(0.);}self.page_enter.target=1.;self.interactions.clear();self.presses.clear();}self.action(a);}}self.redraw();}
+ fn key(&mut self,cloud:bool,key:Key,text:Option<String>){
+  if self.model.tutorial.is_some(){
+   if key==Key::Named(NamedKey::Tab){let reverse=self.mods.shift_key();if let Some(s)=&mut self.main{let enabled=s.hits.iter().enumerate().filter(|(_,h)|h.enabled&&crate::tutorial::allowed(&h.action)).map(|(i,_)|i).collect::<Vec<_>>();if !enabled.is_empty(){let pos=s.focus.and_then(|i|enabled.iter().position(|n|*n==i));let next=if reverse{pos.map(|p|(p+enabled.len()-1)%enabled.len()).unwrap_or(enabled.len()-1)}else{pos.map(|p|(p+1)%enabled.len()).unwrap_or(0)};s.focus=Some(enabled[next]);}}self.redraw();return}
+   let action=match key{Key::Named(NamedKey::Escape)=>Some(Action::TutorialFinish),Key::Named(NamedKey::ArrowLeft)=>Some(Action::TutorialBack),Key::Named(NamedKey::ArrowRight)=>Some(Action::TutorialNext),Key::Named(NamedKey::Enter)|Key::Named(NamedKey::Space)=>Some(self.main.as_ref().and_then(|s|s.focus.and_then(|i|s.hits.get(i))).filter(|h|h.enabled&&crate::tutorial::allowed(&h.action)).map(|h|h.action.clone()).unwrap_or(Action::TutorialNext)),_=>None};if let Some(action)=action{self.action(action);}return
+  }
+  if self.model.picker.is_some(){
+   if key==Key::Named(NamedKey::Escape){self.cancel_drag();self.model.dispatch(Action::ColorClose);self.redraw();return}
+   if key==Key::Named(NamedKey::Enter){self.cancel_drag();self.model.dispatch(Action::ColorSave);self.redraw();return}
+   if self.mods.control_key(){if let Key::Character(c)=&key{if c.to_lowercase().as_str()=="v"{if let Some(text)=platform::clipboard(){self.model.picker_input(&text);}self.redraw();return}}}
+   if key==Key::Named(NamedKey::Backspace){self.model.picker_backspace();self.redraw();return}
+   if let Key::Named(n)=&key{let name=match n{NamedKey::ArrowLeft=>Some("Left"),NamedKey::ArrowRight=>Some("Right"),NamedKey::Home=>Some("Home"),NamedKey::End=>Some("End"),NamedKey::Delete=>Some("Delete"),_=>None};if let Some(name)=name{self.model.picker_edit_key(name);self.redraw();return}}
+   if let Some(text)=text{self.model.picker_input(&text);self.redraw();}
+   return
+  }
+  if key==Key::Named(NamedKey::Escape)&&self.drag.is_some(){self.cancel_drag();self.redraw();return}if key==Key::Named(NamedKey::Escape){if self.model.dialog.is_some(){self.action(Action::CancelModal);}else if self.model.palette{self.action(Action::Palette);}else if cloud{self.model.cloud_expanded=false;}return}
+  if self.mods.control_key(){if let Key::Character(c)=&key{match c.to_lowercase().as_str(){"k"=>{self.action(Action::Palette);return},"v"=>{if let Some(text)=platform::clipboard(){self.model.input(&text);}self.redraw();return},"a"=>{self.model.select_all();self.redraw();return},"1"|"2"|"3"|"4"|"5"|"6"=>{let i=c.parse::<usize>().unwrap_or(1)-1;self.rail.snap(112.+i as f64*82.);self.action(Action::Navigate(Page::ALL[i]));return},_=>{}}}}
+  if key==Key::Named(NamedKey::Tab){if let Some(d)=&mut self.model.dialog{if !d.fields.is_empty(){let n=d.fields.len();d.active=(d.active+if self.mods.shift_key(){n-1}else{1})%n;}self.redraw();return}let reverse=self.mods.shift_key();if let Some(s)=self.get(cloud){let enabled=s.hits.iter().enumerate().filter(|(_,h)|h.enabled).map(|(i,_)|i).collect::<Vec<_>>();if !enabled.is_empty(){let pos=s.focus.and_then(|i|enabled.iter().position(|n|*n==i));let next=if reverse{pos.map(|p|(p+enabled.len()-1)%enabled.len()).unwrap_or(enabled.len()-1)}else{pos.map(|p|(p+1)%enabled.len()).unwrap_or(0)};s.focus=Some(enabled[next]);}}self.redraw();return}
+  if let Key::Named(n)=&key{let name=match n{NamedKey::ArrowLeft=>Some("Left"),NamedKey::ArrowRight=>Some("Right"),NamedKey::Home=>Some("Home"),NamedKey::End=>Some("End"),NamedKey::Delete=>Some("Delete"),_=>None};if let Some(name)=name{if self.model.dialog.is_some(){self.model.edit_key(name);self.redraw();return}}}
+  if key==Key::Named(NamedKey::Backspace){self.model.backspace();self.redraw();return}
+  if key==Key::Named(NamedKey::Enter)||key==Key::Named(NamedKey::Space){if self.model.dialog.is_some(){if key==Key::Named(NamedKey::Enter){self.action(Action::SaveModal);}else{self.model.input(" ");}return}if self.model.palette{if let Some(page)=Page::ALL.into_iter().find(|p|self.model.query.is_empty()||p.label().contains(&self.model.query)){self.action(Action::Navigate(page));}return}let action=self.get(cloud).and_then(|s|s.focus.and_then(|i|s.hits.get(i))).filter(|h|h.enabled).map(|h|h.action.clone());if let Some(a)=action{self.action(a);}else if key==Key::Named(NamedKey::Space)&&self.model.page==Page::Music{self.action(Action::Media("toggle"));}return}
+  if !self.mods.control_key()&&!self.mods.alt_key(){if let Some(text)=text{self.model.input(&text);self.redraw();}}
+ }
+}
+impl ApplicationHandler for App{
+ fn resumed(&mut self,e:&ActiveEventLoop){if self.main.is_none(){match self.surface(e){Ok(s)=>self.main=Some(s),Err(err)=>{self.error(err);e.exit();}}}}
+ fn window_event(&mut self,e:&ActiveEventLoop,id:WindowId,event:WindowEvent){if !self.main.as_ref().is_some_and(|s|s.window.id()==id){return}
+  match event{
+   WindowEvent::CloseRequested=>{if let Some(s)=&mut self.main{s.window.set_visible(false);s.visible=false;s.hidden_since=Some(Instant::now());}},
+   WindowEvent::Resized(size)=>{if size.width>0&&size.height>0{if let Some(s)=&mut self.main{s.surface.resize(size.width,size.height);s.window.request_redraw();}}},
+   WindowEvent::ScaleFactorChanged{..}=>self.redraw(),WindowEvent::Occluded(value)=>{if let Some(s)=&mut self.main{s.occluded=value;}if !value{self.redraw();}},
+   WindowEvent::Focused(false)=>{self.cancel_drag();if let Some(s)=&mut self.main{s.pressed=None;}self.touch=None;},
+   WindowEvent::CursorMoved{position,..}=>{if let Some(s)=&mut self.main{let scale=s.window.scale_factor();s.pointer=(position.x/scale,position.y/scale);s.window.set_ime_cursor_area(LogicalPosition::new(s.pointer.0,s.pointer.1),LogicalSize::new(1.,24.));s.window.set_cursor(if s.hits.iter().any(|h|h.enabled&&h.rect.contains(s.pointer)){winit::window::CursorIcon::Pointer}else{winit::window::CursorIcon::Default});s.window.request_redraw();}
+    if let Some((_,origin))=self.title_press{let p=self.main.as_ref().map(|s|s.pointer).unwrap_or_default();if (p.0-origin.0).abs().max((p.1-origin.1).abs())>4.{self.title_press=None;self.last_title_click=None;if let Some(s)=&self.main{if s.window.is_maximized(){s.window.set_maximized(false);}let _=s.window.drag_window();}return}}
+    if let Some(s)=&self.main{let p=s.pointer;if self.drag.is_some(){self.drag_to(p);}}},
+   WindowEvent::CursorLeft{..}=>{if self.drag.is_none(){if let Some(s)=&mut self.main{s.pointer=(-1.,-1.);s.window.request_redraw();}}},
+   WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Right,..}=>{if self.model.tutorial.is_some(){let action=self.main.as_ref().and_then(|s|s.hits.iter().rfind(|h|h.enabled&&h.rect.contains(s.pointer)&&matches!(h.action,Action::TutorialDemo(1)))).map(|h|h.action.clone());if let Some(action)=action{self.action(action);}}},
+   WindowEvent::MouseInput{state,button:MouseButton::Left,..}=>if state==ElementState::Pressed{self.down()}else{self.up()},
+   WindowEvent::MouseWheel{delta,..}=>{if self.model.tutorial.is_none()&&self.drag.is_none()&&self.model.dialog.is_none()&&!self.model.palette{let dy=match delta{MouseScrollDelta::LineDelta(_,y)=>y as f64*48.,MouseScrollDelta::PixelDelta(p)=>p.y/self.main.as_ref().map(|s|s.window.scale_factor()).unwrap_or(1.)};self.model.scroll=(self.model.scroll-dy).clamp(0.,self.max_scroll);self.redraw();}},
+   WindowEvent::ModifiersChanged(mods)=>self.mods=mods.state(),WindowEvent::KeyboardInput{event:key,..}=>if key.state==ElementState::Pressed{self.key(false,key.logical_key,key.text.map(|s|s.to_string()));},
+   WindowEvent::Ime(Ime::Commit(text))=>{self.model.input(&text);self.redraw();},WindowEvent::Ime(Ime::Preedit(text,_))=>{if let Some(d)=&mut self.model.dialog{d.preedit=text;}self.redraw();},
+   WindowEvent::Touch(t)=>{if let Some(s)=&mut self.main{let scale=s.window.scale_factor();s.pointer=(t.location.x/scale,t.location.y/scale);}match t.phase{TouchPhase::Started=>{if self.touch.is_none(){self.touch=Some(t.id);self.down();}},TouchPhase::Ended=>{if self.touch==Some(t.id){self.touch=None;self.up();}},TouchPhase::Moved=>{if self.touch==Some(t.id){if let Some(s)=&self.main{self.drag_to(s.pointer);}}},TouchPhase::Cancelled=>{self.cancel_drag();self.touch=None;if let Some(s)=&mut self.main{s.pressed=None;}}}},
+   WindowEvent::RedrawRequested=>{let state={let Some(s)=&self.main else{return};let palette=self.color_motion.sample(self.started.elapsed().as_secs_f64()).ui();views::ViewState{switches:self.switches.iter().map(|(k,v)|(k.clone(),v.value)).collect(),color_scheme:Some(palette),state_layers:self.interactions.iter().map(|v|v.value as f32).collect(),page_enter:Some(self.page_enter.value),selection_values:self.selections.iter().map(|(k,v)|(k.clone(),v.value)).collect(),press_layers:self.presses.iter().map(|v|v.value).collect(),rail_target:Some(self.rail.target),pointer:s.pointer,focus:s.focus,pressed:s.pressed,media_position:self.seek_preview.or(Some(self.timeline.position)),rail_y:self.rail.value,time:self.started.elapsed().as_secs_f64(),maximized:s.window.is_maximized(),..Default::default()}};let s=self.main.as_ref().unwrap();let size=s.window.inner_size();let scale=s.window.scale_factor();let view=views::render(&self.model,&mut self.text,size.width as f64/scale,size.height as f64/scale,&state);let s=self.main.as_mut().unwrap();s.hits=view.hits;self.motion_targets=view.motion_targets;self.max_scroll=view.max_scroll;self.model.scroll=self.model.scroll.min(self.max_scroll);let drawn=self.gpu.draw(&mut s.surface,&view.scene,scale);if s.open_profile&&drawn.is_ok(){s.open_profile=false;if let Some(dir)=std::env::var_os("DOTISLE_PROFILE_DIR"){let dir=std::path::PathBuf::from(dir);let _=std::fs::write(dir.join("settings-visible.json"),serde_json::json!({"processId":std::process::id(),"processElapsedMs":crate::STARTED.get().map(|v|v.elapsed().as_secs_f64()*1000.),"unixMs":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()}).to_string());}}let refresh=!s.taskbar&&s.visible;if refresh{s.taskbar=true;}let window=if refresh{Some(s.window.clone())}else{None};if let Some(window)=window{window.set_visible(true);platform::refresh_taskbar(&window);}if let Err(err)=drawn{self.error(err);}},_=>{}
+  }if self.model.exit{self.model.shutdown();e.exit();}
+ }
+ fn about_to_wait(&mut self,e:&ActiveEventLoop){let now=Instant::now();
+  // A closed settings window used to keep this process — and its whole wgpu +
+  // Vello context — resident until the island exited. After one hidden minute
+  // the process retires instead; the island spawns a fresh one on demand.
+  if self.main.as_ref().is_some_and(|s|!s.visible&&s.hidden_since.is_some_and(|at|now.duration_since(at)>=Duration::from_secs(60))){self.model.shutdown();e.exit();return}
+  let dt=now.duration_since(self.last).as_secs_f64();self.last=now;let changed=self.model.tick();let visible=self.main.as_ref().is_some_and(|s|s.visible&&!s.occluded);let resolved=self.model.dynamic_color();let colors_moving=self.color_motion.update(resolved.roles,self.started.elapsed().as_secs_f64(),!self.model.prefs.reduced_motion);let mut interaction_moving=false;if visible{if let Some(surface)=&self.main{self.interactions.resize_with(surface.hits.len(),||Spring::new(0.));self.presses.resize_with(surface.hits.len(),||Spring::new(0.));for(i,hit)in surface.hits.iter().enumerate(){
+            let target=if !hit.enabled{0.}else if surface.pressed==Some(i){0.12}else if surface.focus==Some(i){0.10}else if hit.rect.contains(surface.pointer){0.08}else{0.};self.interactions[i].target=target;interaction_moving|=self.interactions[i].tick(dt,self.model.prefs.reduced_motion);self.presses[i].target=if hit.enabled&&surface.pressed==Some(i){1.}else{0.};interaction_moving|=self.presses[i].tick(dt,self.model.prefs.reduced_motion);}}}let entering=self.page_enter.tick(dt,self.model.prefs.reduced_motion);interaction_moving|=crate::motion::advance_selections(&mut self.selections,&self.motion_targets,dt,self.model.prefs.reduced_motion);let media_moving=if self.seek_preview.is_some(){false}else{self.timeline.tick(&self.model,dt)};self.rail.target=112.+Page::ALL.iter().position(|p|*p==self.model.page).unwrap_or(0)as f64*82.;let moving=self.rail.tick(dt,self.model.prefs.reduced_motion)||colors_moving||interaction_moving||entering;if self.model.show_center{self.model.show_center=false;if let Some(s)=&mut self.main{s.window.set_visible(true);s.window.set_minimized(false);s.window.focus_window();s.open_profile=true;s.visible=true;s.hidden_since=None;s.window.request_redraw();}}let animated=visible&&((self.model.tutorial.as_ref().is_some_and(|t|t.demo==0)&&!self.model.prefs.reduced_motion)||(media_moving&&matches!(self.model.page,Page::Home|Page::Music))||(self.model.page==Page::Island&&self.model.island_tab==3&&!self.model.prefs.reduced_motion&&self.main.as_ref().is_some_and(|s|s.visible&&!s.occluded)));if changed||moving||animated{self.redraw();}if self.model.exit{self.model.shutdown();e.exit();return}e.set_control_flow(ControlFlow::WaitUntil(now+Duration::from_millis(if moving||animated{16}else{120})));}
+ fn exiting(&mut self,_:&ActiveEventLoop){self.model.shutdown();}
+}
+pub fn run(model:Model){platform::set_app_id();let event=EventLoop::new().expect("Windows event loop");let _=WAKE.set(event.create_proxy());let mut app=App::new(model);app.warm=std::env::args().any(|a|a=="--warm");if let Err(e)=event.run_app(&mut app){app.error(e.to_string());}}
+
+pub fn verify_tutorial_inputs(data:&std::path::Path)->Result<(),String>{
+ let mut model=Model::new(data.to_path_buf(),true);model.dispatch(Action::TutorialStart);let snapshot=model.snapshot.clone();let mut app=App::new(model);
+ app.key(false,Key::Named(NamedKey::ArrowRight),None);if app.model.tutorial.as_ref().map(|t|t.index)!=Some(1){return Err("tutorial right key failed".into())}
+ app.key(false,Key::Named(NamedKey::ArrowLeft),None);if app.model.tutorial.as_ref().map(|t|t.index)!=Some(0){return Err("tutorial left key failed".into())}
+ app.mods=ModifiersState::CONTROL;app.key(false,Key::Character("k".into()),Some("k".into()));if app.model.palette{return Err("tutorial leaked a background shortcut".into())}
+ app.mods=ModifiersState::empty();app.key(false,Key::Named(NamedKey::Space),None);if app.model.snapshot!=snapshot{return Err("tutorial space operated the player".into())}
+ app.key(false,Key::Named(NamedKey::Escape),None);if app.model.tutorial.is_some()||app.model.setting("GestureTutorialSeen")!=true{return Err("tutorial escape did not save completion".into())}Ok(())
+}
+pub fn verify_motion_editor(data:&std::path::Path)->Result<(),String>{
+ let mut model=Model::new(data.to_path_buf(),true);model.page=Page::Island;model.island_tab=3;let mut app=App::new(model);let view=views::render(&app.model,&mut app.text,1200.,800.,&views::ViewState::default());
+ let curve=view.hits.iter().find(|h|matches!(h.action,Action::CurveHandle(0,_))).ok_or("curve handle is missing")?.action.clone();let Action::CurveHandle(_,b)=curve else{unreachable!()};app.drag=Some(curve);app.drag_to((b[0]+b[2]*0.4,b[1]+b[3]*0.8));app.up();let c=app.model.curve().ok_or("curve drag did not commit")?;if (c[0]-0.4).abs()>1e-6||(c[1]-0.2).abs()>1e-6{return Err("curve drag uses the wrong coordinate space".into())}
+ let radius=view.hits.iter().find(|h|matches!(h.action,Action::RadiusHandle(_))).ok_or("radius handle is missing")?.action.clone();let Action::RadiusHandle(b)=radius else{unreachable!()};app.drag=Some(radius);app.drag_to((b[0]-40.*b[2],b[1]+40.*b[2]));app.up();if (app.model.radius()-40.).abs()>0.1{return Err("radius drag did not reach native MotionRadius".into())}
+ app.model.preview_curve=Some([0.,0.,1.,1.]);app.cancel_drag();if app.model.curve()!=Some(c){return Err("cancelled drag changed the saved curve".into())}Ok(())
+}
+
+
+pub fn verify_seek_inputs(data:&std::path::Path)->Result<(),String>{
+ let mut model=Model::new(data.to_path_buf(),true);
+ model.snapshot=serde_json::json!({"track":{"id":"netease-seek-a","title":"网易云进度适配","artist":"隔离演示","sourceApp":"Netease","durationSeconds":240.},"positionSeconds":48.,"isPlaying":false,"canSeek":true,"frame":{"currentLine":"播放进度由真实播放器确认"}});
+ let mut app=App::new(model);
+ for page in [Page::Home,Page::Music]{app.model.page=page;for width in [900.,1200.]{
+    let view=views::render(&app.model,&mut app.text,width,800.,&views::ViewState::default());let hit=view.hits.iter().find(|h|matches!(h.action,Action::Seek)).ok_or("NetEase seek slider missing")?;
+    if !hit.enabled{return Err("NetEase native capability did not enable slider".into())}
+    let p=hit.rect.x0+hit.rect.width()*0.73;let position=((p-hit.rect.x0)/hit.rect.width()).clamp(0.,1.)*240.;
+    app.seek_track=Some(app.model.snapshot["track"].clone());app.seek_preview=Some(position);app.drag=Some(Action::Seek);app.up();
+    if (app.model.snapshot["positionSeconds"].as_f64().unwrap_or(0.)-175.2).abs()>0.001{return Err("seek release did not use production Model::seek".into())}
+ }}
+ app.model.snapshot["positionSeconds"]=serde_json::json!(48.);app.seek_track=Some(app.model.snapshot["track"].clone());app.seek_preview=Some(180.);app.drag=Some(Action::Seek);app.model.snapshot["track"]["id"]=serde_json::json!("netease-seek-b");app.up();
+ if app.model.snapshot["positionSeconds"]!=48.{return Err("old drag sought the new track".into())}
+ app.model.snapshot["canSeek"]=serde_json::json!(false);app.model.seek(0.5);if app.model.snapshot["positionSeconds"]!=48.{return Err("unavailable seek changed position".into())}
+ app.model.snapshot["canSeek"]=serde_json::json!(true);app.model.seek(f64::NAN);if app.model.snapshot["positionSeconds"]!=48.{return Err("invalid seek changed position".into())}Ok(())
+}

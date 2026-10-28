@@ -1,48 +1,29 @@
-pub use lyric_core::music_layout::{Rect,MusicLayout,music_geometry,music_height,cover_corner_radius};
-#[derive(Clone,Copy)] pub struct Layout{pub capsule:Rect,pub card:Rect,pub host:Rect}
-impl Layout {
-    /// The host reserves the taller A layout so switching never resizes the window.
-    pub fn new(width:f64)->Self{let cw=(width+112.).max(400.);let host=cw.max(440.);Self{capsule:Rect::new(24.+(host-width)/2.,24.,width,40.),card:Rect::new(24.+(host-cw)/2.,24.,cw,264.),host:Rect::new(0.,0.,host+48.,332.)}}
-    pub fn reserve_compact(&mut self,max:f64){let width=(max+48.).max(self.host.w);self.host.w=width;self.capsule.x=(width-self.capsule.w)/2.;self.card.x=(width-self.card.w)/2.;}
-    pub fn set_compact(&mut self,width:f64,height:f64){self.capsule.w=width;self.capsule.x=(self.host.w-width)/2.;self.capsule.h=height;}
-    pub fn shape(self,p:f64,r:f64)->(Rect,f64){let p=p.clamp(0.,1.035);let a=self.capsule;let b=self.card;let l=|x:f64,y:f64|x+(y-x)*p;let rect=Rect::new(l(a.x,b.x),l(a.y,b.y),l(a.w,b.w).max(1.),l(a.h,b.h).max(1.));(rect,l(a.h/2.,r).clamp(0.,rect.w.min(rect.h)/2.))}
-    /// Horizontal expansion leads the vertical unfolding; both are derived from
-    /// the same live spring, so reversing the gesture never swaps coordinate spaces.
-    pub fn morph_shape(self,p:f64,r:f64,fluid:bool)->(Rect,f64){
-        if !fluid{return self.shape(p,r)}let p=p.clamp(0.,1.);let x=crate::motion::blend(p,0.10,0.88);let y=crate::motion::blend(p,0.22,1.);
-        let a=self.capsule;let b=self.card;// A restrained parabolic toss: lift as a capsule, unfold, then settle.
-        // One live progress parameter makes collapse retrace this exact path.
-        let arc=(std::f64::consts::PI*p).sin();
-        let rect=Rect::new(a.x+(b.x-a.x)*x+5.*arc,a.y+(b.y-a.y)*y-12.*arc,a.w+(b.w-a.w)*x,a.h+(b.h-a.h)*y);
-        (rect,(a.h/2.+(r-a.h/2.)*y).min(rect.w.min(rect.h)/2.).max(0.))
-    }
-    pub fn satellite(self)->Rect{Rect::new(self.capsule.x+self.capsule.w+8.,self.capsule.y,self.capsule.h,self.capsule.h)}
-    pub fn compact_cover(self,scale:f64)->Rect{let round=|v:f64|(v*scale).round_ties_even()/scale;Rect::new(self.capsule.x+round(7.)+round(3.),self.capsule.y+round((self.capsule.h-24.)/2.),24.,24.)}
-}
+pub use lyric_core::music_layout::{Rect,MusicLayout,music_geometry,mini_music_geometry,music_height,cover_corner_radius};
+pub use lyric_core::island_layout::Layout;
 /// Digital timer controls share their painted bounds with pointer hit testing.
-pub fn timer_buttons(width:f64)->[(i32,Rect);3]{[(31,Rect::new(24.,156.,66.,32.)),(30,Rect::new(width/2.-52.,156.,104.,32.)),(7,Rect::new(width-90.,156.,66.,32.))]}
-/// Shared by drawing and hit testing. Footer keeps a 12 px bottom safe area.
-pub fn todo_rows(width:f64,count:usize)->impl Iterator<Item=Rect>{(0..count.min(3)).map(move|i|Rect::new(20.,52.+i as f64*36.,width-40.,32.))}
-pub fn todo_footer(width:f64)->Rect{Rect::new(20.,164.,width-40.,24.)}
+pub fn timer_buttons(w:f64,h:f64)->[(i32,Rect);3]{let y=h-56.;[(31,Rect::new(20.,y,72.,40.)),(30,Rect::new(100.,y,w-200.,40.)),(7,Rect::new(w-92.,y,72.,40.))]}
+pub fn todo_rows(width:f64,count:usize)->impl Iterator<Item=Rect>{(0..count.min(2)).map(move|i|Rect::new(20.,54.+i as f64*50.,width-40.,42.))}
+pub fn todo_footer(w:f64,h:f64)->Rect{Rect::new(20.,h-48.,w-40.,32.)}
 /// Mini shares readable geometry with pointer hit testing, at half the classic area.
-pub fn mini_track(w:f64,h:f64)->Rect{Rect::new(20.,h-57.,w-40.,3.)}
+pub fn mini_track(w:f64,h:f64)->Rect{Rect::new(20.,h-69.,w-40.,4.)}
 pub fn mini_music_buttons(w:f64,h:f64)->[(i32,Rect);5]{let y=h-43.;[(9,Rect::new(20.,y+4.,28.,28.)),(3,Rect::new(w/2.-58.,y+2.,32.,32.)),(4,Rect::new(w/2.-18.,y,36.,36.)),(5,Rect::new(w/2.+26.,y+2.,32.,32.)),(7,Rect::new(w-48.,y+4.,28.,28.))]}
-pub fn mini_timer_buttons(w:f64,h:f64)->[(i32,Rect);3]{let y=h-32.;[(31,Rect::new(20.,y,64.,24.)),(30,Rect::new(w/2.-48.,y,96.,24.)),(7,Rect::new(w-84.,y,64.,24.))]}
-pub fn mini_todos(w:f64)->[Rect;2]{[Rect::new(20.,31.,w-40.,20.),Rect::new(20.,54.,w-40.,20.)]}
-pub fn mini_primary(w:f64,h:f64,_kind:u8)->Rect{Rect::new(20.,h-34.,w-40.,26.)}
+pub fn mini_timer_buttons(w:f64,h:f64)->[(i32,Rect);3]{let y=h-48.;[(31,Rect::new(20.,y,72.,36.)),(30,Rect::new(100.,y,w-200.,36.)),(7,Rect::new(w-92.,y,72.,36.))]}
+pub fn mini_todos(w:f64)->[Rect;1]{[Rect::new(20.,38.,w-40.,30.)]}
+pub fn mini_primary(w:f64,h:f64,_kind:u8)->Rect{Rect::new(20.,h-44.,w-40.,32.)}
 pub fn mini_hit(w:f64,h:f64,panel:Option<&crate::activities::Panel>,x:f64,y:f64)->i32{
     match panel.map(|p|p.kind){
         None=>{let t=mini_track(w,h);if Rect::new(t.x,t.y-5.,t.w,13.).contains(x,y){return 10}for(id,r)in mini_music_buttons(w,h){if r.contains(x,y){return id}}},
-        Some(2)=>{for(i,r)in mini_todos(w).iter().enumerate().take(panel.map(|p|p.tasks.len()).unwrap_or(0)){if r.contains(x,y){return 40+i as i32}}if Rect::new(20.,h-24.,w-40.,20.).contains(x,y){return 7}},
-        Some(3)=>{if panel.is_some_and(|p|!p.tasks.is_empty())&&mini_primary(w,h,3).contains(x,y){return 50}},
+        Some(2)=>{for(i,r)in mini_todos(w).iter().enumerate().take(panel.map(|p|p.tasks.len()).unwrap_or(0)){if r.contains(x,y){return 40+i as i32}}if mini_primary(w,h,2).contains(x,y){return 7}},
+        Some(3)=>{if update_close(w).contains(x,y){return 51}if panel.is_some_and(|p|!p.tasks.is_empty())&&update_primary(w,h).contains(x,y){return 50}},
         _=>{for(id,r)in mini_timer_buttons(w,h){if r.contains(x,y){return id}}}
     }0
 }
 #[cfg(test)]mod mini_tests{use super::*;
     #[test]fn mini_music_targets_stay_clear_of_timeline(){for w in [400.,480.,592.]{for h in [110.,118.,122.]{for(id,r)in mini_music_buttons(w,h){assert!(r.x>=20.&&r.x+r.w<=w-20.&&r.y+r.h<=h-7.);assert!(r.y>mini_track(w,h).y+mini_track(w,h).h+6.);assert_eq!(mini_hit(w,h,None,r.x+r.w/2.,r.y+r.h/2.),id);}}}}
-    #[test]fn mini_timer_hits_match_painted_buttons(){let p=crate::activities::Panel{kind:1,..Default::default()};for w in [400.,592.]{for(id,r)in mini_timer_buttons(w,100.){assert!(r.y>=64.&&r.y+r.h<=92.);assert_eq!(mini_hit(w,100.,Some(&p),r.x+r.w/2.,r.y+r.h/2.),id);}}}
+    #[test]fn mini_timer_hits_match_painted_buttons(){let p=crate::activities::Panel{kind:1,..Default::default()};for w in [400.,592.]{for(id,r)in mini_timer_buttons(w,132.){assert!(r.y>=80.&&r.y+r.h<=120.);assert_eq!(mini_hit(w,132.,Some(&p),r.x+r.w/2.,r.y+r.h/2.),id);}}}
+    #[test]fn mini_update_close_and_primary_targets_match_the_painted_card(){let p=crate::activities::Panel{kind:3,tasks:vec![crate::activities::Task{title:"取消下载".into(),..Default::default()}],..Default::default()};for w in [400.,592.]{assert_eq!(mini_hit(w,142.,Some(&p),w-26.,22.),51);let r=update_primary(w,142.);assert_eq!(mini_hit(w,142.,Some(&p),r.x+r.w/2.,r.y+r.h/2.),50);}}
 }
-#[cfg(test)]mod tests{use super::*;#[test]fn todo_content_has_safe_insets_and_nonoverlapping_targets(){for width in [340.,420.,528.]{let rows=todo_rows(width,3).collect::<Vec<_>>();let footer=todo_footer(width);assert_eq!(rows[2].y+rows[2].h+8.,footer.y);assert_eq!(footer.y+footer.h,200.-12.);assert_eq!(rows[0].x,footer.x);for r in rows{assert!(!r.contains(footer.x+1.,footer.y+1.));}}}}
+#[cfg(test)]mod tests{use super::*;#[test]fn todo_content_has_safe_insets_and_nonoverlapping_targets(){for width in [340.,420.,528.]{let rows=todo_rows(width,3).collect::<Vec<_>>();let footer=todo_footer(width,220.);assert_eq!(rows[1].y+rows[1].h+26.,footer.y);assert_eq!(footer.y+footer.h,220.-16.);assert_eq!(rows[0].x,footer.x);for r in rows{assert!(!r.contains(footer.x+1.,footer.y+1.));}}}}
 
 #[cfg(test)] mod music_spacing_tests {use super::*;
 #[test]fn compact_layouts_keep_text_controls_and_pointer_targets_disjoint(){
@@ -69,12 +50,21 @@ pub fn mini_hit(w:f64,h:f64,panel:Option<&crate::activities::Panel>,x:f64,y:f64)
     use super::*;
     #[test] fn toss_stays_in_host_and_retraces_the_same_path() {
         for width in [140.,260.,480.] {let l=Layout::new(width);
-            assert_eq!(l.morph_shape(0.,30.,true),l.shape(0.,30.));
-            let (end,r)=l.morph_shape(1.,30.,true);assert!((end.x-l.card.x).abs()<1e-8);assert!((end.y-l.card.y).abs()<1e-8);assert_eq!(r,30.);
-            for i in 0..=1000 {let p=i as f64/1000.;let(a,_)=l.morph_shape(p,30.,true);let(b,_)=l.morph_shape(1.-(1.-p),30.,true);
+            assert_eq!(l.morph_shape(0.,30.),(l.capsule,l.capsule.h/2.));
+            let (end,r)=l.morph_shape(1.,30.);assert!((end.x-l.card.x).abs()<1e-8);assert!((end.y-l.card.y).abs()<1e-8);assert_eq!(r,30.);
+            for i in 0..=1000 {let p=i as f64/1000.;let(a,_)=l.morph_shape(p,30.);let(b,_)=l.morph_shape(1.-(1.-p),30.);
                 assert!(a.x>=0.&&a.y>=0.&&a.x+a.w<=l.host.w&&a.y+a.h<=l.host.h);
                 assert!((a.y-b.y).abs()<1e-8);assert!((a.w-b.w).abs()<1e-8);
             }
         }
     }
+}
+
+pub fn update_close(w:f64)->Rect{let r=dotisle_render::update_card::close(w);Rect::new(r.x0,r.y0,r.width(),r.height())}
+pub fn update_primary(w:f64,h:f64)->Rect{let r=dotisle_render::update_card::primary(w,h);Rect::new(r.x0,r.y0,r.width(),r.height())}
+
+#[cfg(test)]mod expressive_tests{use super::*;
+ #[test]fn tool_targets_remain_disjoint_inside_the_card(){for w in [340.,400.,592.]{for mini in [false,true]{let h=if mini{132.}else{220.};let buttons=if mini{mini_timer_buttons(w,h)}else{timer_buttons(w,h)};for(i,(_,a))in buttons.iter().enumerate(){assert!(a.x>=16.&&a.x+a.w<=w-16.&&a.y+a.h<=h-4.);for(_,b)in &buttons[i+1..]{assert!(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y);}}}}
+ }
+ #[test]fn update_close_is_separate_from_body_and_primary(){for w in [340.,400.,592.]{for h in [132.,220.]{let a=update_close(w);let b=update_primary(w,h);assert!(a.y+a.h+8.<=b.y);assert!(b.y+b.h<=h-12.);let p=crate::activities::Panel{kind:3,tasks:vec![Default::default()],..Default::default()};assert_eq!(mini_hit(w,h,Some(&p),b.x+b.w/2.,b.y+b.h/2.),50);}}}
 }

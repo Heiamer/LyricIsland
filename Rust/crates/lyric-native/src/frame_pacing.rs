@@ -19,6 +19,19 @@ use windows::Win32::System::Threading::{
 /// Reject impossible monitor values without limiting high-refresh displays.
 pub const MAX_FPS: f64 = 1000.0;
 
+/// Ceiling for redraws that exist only because playback is running.
+///
+/// The island used to rebuild its whole Direct2D scene once per panel refresh, so a
+/// 144 Hz display paid for 144 full redraws a second to move a progress bar by a
+/// pixel and three activity bars by a fraction. Nothing in that set changes fast
+/// enough to tell 60 from 144. Transitions, fades, drags, banners and hovers still
+/// run at the panel rate; only the steady-state playback loop is capped.
+pub const CONTINUOUS_FPS: f64 = 60.0;
+
+pub fn continuous_interval() -> Duration {
+    Duration::from_secs_f64(1.0 / CONTINUOUS_FPS)
+}
+
 /// Read the current mode of the monitor that owns `hwnd`.
 pub fn refresh_hz(hwnd: HWND) -> Option<f64> {
     unsafe {
@@ -72,8 +85,17 @@ impl FramePacer {
     /// Sleep only what is left of this frame's budget. The first frame after
     /// an idle period is never delayed.
     pub fn wait(&mut self) {
+        self.wait_interval(self.interval);
+    }
+
+    /// Same budget, but against a caller-chosen interval.
+    ///
+    /// Used for the steady playback loop, which does not need the panel rate; the
+    /// monitor is still re-read once a second so plugging in a different display
+    /// restores the full rate for transitions.
+    pub fn wait_interval(&mut self, interval: Duration) {
         if self.checked.elapsed()>=Duration::from_secs(1){self.interval=target_interval(refresh_hz(self.hwnd));self.checked=Instant::now();}
-        let remaining = self.interval.saturating_sub(self.last.elapsed());
+        let remaining = interval.saturating_sub(self.last.elapsed());
         if !remaining.is_zero() {
             self.sleep(remaining);
         }

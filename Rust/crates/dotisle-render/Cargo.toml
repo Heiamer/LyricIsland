@@ -1,0 +1,16 @@
+[package]
+name = "dotisle-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vello = { package = "dotisle-scene", path = "../dotisle-scene" }
+parley = "=0.5.0"
+
+fontique = "=0.5.0"
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi_Common", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
+
+skrifa = "=0.44.0"

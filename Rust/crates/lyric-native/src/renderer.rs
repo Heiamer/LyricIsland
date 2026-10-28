@@ -1,520 +1,269 @@
-//! Native, premultiplied-alpha composition surface. Offscreen layers retain
-//! WPF's order: shadow, morph surface, clipped/scaled expanded content, capsule.
-use std::{collections::HashMap,path::Path};
-use windows::{core::{Interface,Result,PCWSTR,w},Win32::{Foundation::{HWND,HMODULE},Graphics::{
-    Direct2D::{*,Common::*},Direct3D::*,Direct3D11::*,DirectWrite::*,Dxgi::{*,Common::*},DirectComposition::*
-}}};
-use windows_numerics::{Matrix3x2,Vector2};
+//! Vello island painter. The v2 layout, activity model, hit targets and motion are retained.
+use std::{path::Path,sync::Arc,collections::HashMap,time::{Instant,Duration}};
+use windows::{core::{Result,Error,HRESULT},Win32::Foundation::HWND};
+use vello::{Scene as VScene,kurbo::{Affine,RoundedRect,Stroke,Circle,BezPath,Line,Cap},peniko::{Fill,Color,ImageData,ImageFormat,ImageAlphaType,Blob,Gradient,Mix}};
+use dotisle_render::draw::{Text,Icon};
 use crate::{layout::{Rect,Layout},motion::{Frame,blend}};
+fn err(e:impl ToString)->Error{Error::new(HRESULT(0x80004005u32 as i32),e.to_string())}
+fn vr(r:Rect)->vello::kurbo::Rect{vello::kurbo::Rect::new(r.x,r.y,r.x+r.w,r.y+r.h)}
+pub fn color(argb:u32)->Color{Color::from_rgba8((argb>>16)as u8,(argb>>8)as u8,argb as u8,(argb>>24)as u8)}
 
-pub fn color(argb:u32)->D2D1_COLOR_F{D2D1_COLOR_F{a:((argb>>24)&255)as f32/255.,r:((argb>>16)&255)as f32/255.,g:((argb>>8)&255)as f32/255.,b:(argb&255)as f32/255.}}
-fn rect(r:Rect)->D2D_RECT_F{D2D_RECT_F{left:r.x as f32,top:r.y as f32,right:(r.x+r.w)as f32,bottom:(r.y+r.h)as f32}}
-fn rounded(r:Rect,radius:f64)->D2D1_ROUNDED_RECT{D2D1_ROUNDED_RECT{rect:rect(r),radiusX:radius as f32,radiusY:radius as f32}}
-fn point(x:f64,y:f64)->Vector2{Vector2{X:x as f32,Y:y as f32}}
-fn identity()->Matrix3x2{Matrix3x2{M11:1.,M12:0.,M21:0.,M22:1.,M31:0.,M32:0.}}
-fn matrix(s:f64,x:f64,y:f64)->Matrix3x2{Matrix3x2{M11:s as f32,M22:s as f32,M31:x as f32,M32:y as f32,..Default::default()}}
+pub struct PreparedCover{image:ImageData,bgra:Vec<u8>,width:u32,height:u32,seed:Option<u32>}
+impl PreparedCover{pub fn save_preview(&self,path:&Path)->std::result::Result<(),String>{image::save_buffer(path,self.image.data.data(),self.width,self.height,image::ColorType::Rgba8).map_err(|e|e.to_string())}}
+pub struct Renderer{
+    gpu:crate::vello_surface::Surface,canvas:VScene,text:Text,
+    blurred_cover:Option<(u32,ImageData)>,cover:Option<ImageData>,previous_cover:Option<ImageData>,notification_icon:Option<ImageData>,
+    device_images:HashMap<String,ImageData>,cover_palette:crate::cover_color::CoverPalette,paint_palette:crate::cover_color::CoverPalette,cover_seed:Option<u32>,dynamic_resolved:Option<dotisle_domain::dynamic_color::Resolved>,
+    color_motion:dotisle_domain::dynamic_color::RoleMotion,m3_cache:Option<(u32,bool,dotisle_domain::monet::Scheme)>,preview_pixels:Option<(Vec<u8>,u32,u32)>,cover_changed:Instant,flip_from:f64,
+    pub body_line_spacing:f64,pub body_baseline:f64,pub width:u32,pub height:u32,pub dpi:f32,
+}
+impl Renderer{
+    pub unsafe fn new(hwnd:HWND,width:u32,height:u32,dpi:f32,font:&Path)->Result<Self>{
+        let gpu=crate::vello_surface::Surface::new(hwnd,width,height).map_err(err)?;let mut text=Text::empty();
+        text.register(font).map_err(err)?;
+        // Google Sans Flex covers Latin and digits; every weight is bundled.
+        for name in dotisle_render::draw::LATIN_FONTS{let _=text.register(&font.with_file_name(name));}
+        // Register the Japanese fallback only when text first requires it.
+        let japanese=font.with_file_name("NotoSansJP.ttf");
+        text.defer_japanese(japanese);
+        Ok(Self{gpu,canvas:VScene::new(),text,color_motion:Default::default(),m3_cache:None,blurred_cover:None,cover:None,previous_cover:None,notification_icon:None,device_images:HashMap::new(),cover_palette:Default::default(),paint_palette:Default::default(),cover_seed:None,dynamic_resolved:None,preview_pixels:None,cover_changed:Instant::now()-Duration::from_secs(1),flip_from:0.,body_line_spacing:1.448,body_baseline:1.16,width,height,dpi})
+    }
+    fn fill(&mut self,r:Rect,radius:f64,c:u32){if r.w>0.&&r.h>0.{self.canvas.fill(Fill::NonZero,Affine::IDENTITY,color(c),None,&RoundedRect::from_rect(vr(r),radius));}}
+    fn outline(&mut self,r:Rect,radius:f64,c:u32,width:f64){self.canvas.stroke(&Stroke::new(width),Affine::IDENTITY,color(c),None,&RoundedRect::from_rect(vr(r),radius));}
+    fn line(&mut self,a:(f64,f64),b:(f64,f64),c:u32,width:f64){self.canvas.stroke(&Stroke::new(width).with_caps(vello::kurbo::Cap::Round),Affine::IDENTITY,color(c),None,&Line::new(a,b));}
+    fn ring(&mut self,x:f64,y:f64,r:f64,c:u32,width:f64){self.canvas.stroke(&Stroke::new(width),Affine::IDENTITY,color(c),None,&Circle::new((x,y),r));}
+    /// Determinate byte progress or an indeterminate rotating arc; never a fake percentage.
+    fn update_ring(&mut self,x:f64,y:f64,radius:f64,progress:f64,time:f64,animate:bool,accent:u32){
+        let track=self.m3_cache.map(|(_,_,c)|c.outline).unwrap_or(0x43534c);self.ring(x,y,radius,0xff000000|track,3.);
+        let fraction=if progress<0.{0.22}else{progress.clamp(0.,1.)};
+        let start=if progress<0.&&animate{time/1200.*std::f64::consts::TAU}else{-std::f64::consts::FRAC_PI_2};
+        if fraction>=0.9999{self.ring(x,y,radius,accent,3.);return}
+        if fraction<=0.{return}
+        let mut path=BezPath::new();let steps=(fraction*120.).ceil().max(2.)as usize;
+        for i in 0..=steps{let angle=start+fraction*std::f64::consts::TAU*i as f64/steps as f64;let p=(x+radius*angle.cos(),y+radius*angle.sin());if i==0{path.move_to(p)}else{path.line_to(p)}}
+        self.canvas.stroke(&Stroke::new(3.).with_caps(Cap::Round),Affine::IDENTITY,color(accent),None,&path);
+    }
+    fn clip(&mut self,r:Rect,radius:f64,alpha:f32){self.canvas.push_layer(Mix::Normal,alpha.clamp(0.,1.),Affine::IDENTITY,&RoundedRect::from_rect(vr(r),radius));}
+    fn text_at(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32,align:f64){
+        self.text.line(&mut self.canvas,text,vr(r),size as f32,c,weight>=550,align);
+    }
+    fn text_line(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32){self.text_at(text,r,size,weight,c,0.);}
+    fn image(&mut self,image:&ImageData,r:Rect,radius:f64,opacity:f32){self.clip(r,radius,opacity);dotisle_render::draw::image(&mut self.canvas,image,vr(r),radius);self.canvas.pop_layer();}
+    fn icon(&mut self,kind:Icon,r:Rect,c:u32){self.clip(r,0.,(c>>24)as f32/255.);dotisle_render::draw::icon(&mut self.canvas,kind,r.x,r.y,r.w,c&0xffffff);self.canvas.pop_layer();}
+    fn collect(&mut self,draw:impl FnOnce(&mut Self))->VScene{let outer=std::mem::take(&mut self.canvas);draw(self);std::mem::replace(&mut self.canvas,outer)}
+    pub fn set_font_family(&mut self,family:&str){self.text.set_family(family);}
+    pub unsafe fn measure_line(&mut self,text:&str,size:f64)->Result<f64>{Ok(self.text.measure(text,size as f32,false))}
+    pub fn status_indicator(&mut self,label:&str,dot:Rect,text:Rect)->Rect{let center=self.text.ink_center_y(label,vr(text),9.,false);Rect::new(dot.x,center-dot.h/2.,dot.w,dot.h)}
+    pub fn compact_metrics(&self,font:f64,double:bool,scale:f64)->(f64,f64,f64){crate::compact::group_metrics(font,self.body_line_spacing,scale,double)}
+    pub fn compact_height(&self,font:f64,double:bool,scale:f64)->f64{crate::compact::capsule_height(font,self.body_line_spacing,scale,double)}
+    fn decode(bytes:&[u8])->std::result::Result<(ImageData,Vec<u8>,u32,u32),Box<dyn std::error::Error>>{
+        let mut reader=image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;reader.limits(image::Limits::default());let image=reader.decode()?.thumbnail(512,512).to_rgba8();let(w,h)=image.dimensions();let rgba=image.into_raw();let mut bgra=rgba.clone();for p in bgra.chunks_exact_mut(4){let a=p[3]as u32;let red=p[0];p[0]=(p[2]as u32*a/255)as u8;p[1]=(p[1]as u32*a/255)as u8;p[2]=(red as u32*a/255)as u8;}
+        Ok((ImageData{data:Blob::new(Arc::new(rgba)),format:ImageFormat::Rgba8,alpha_type:ImageAlphaType::Alpha,width:w,height:h},bgra,w,h))
+    }
+    pub fn prepare_cover(bytes:Option<&[u8]>)->std::result::Result<Option<PreparedCover>,String>{
+        let decoded=bytes.map(Self::decode).transpose().map_err(|e|e.to_string())?;
+        Ok(decoded.map(|(image,bgra,width,height)|{let small=image::RgbaImage::from_raw(width,height,image.data.data().to_vec()).map(|rgba|image::imageops::thumbnail(&rgba,64,64));let seed=small.as_ref().and_then(|p|dotisle_domain::monet::seed(p.as_raw()));PreparedCover{image,bgra,width,height,seed}}))
+    }
+    pub fn apply_cover(&mut self,prepared:Option<PreparedCover>){
+        let phase=(self.flip_from+(1.-self.flip_from)*self.cover_changed.elapsed().as_secs_f64()/0.28).clamp(0.,1.);
+        if phase>=0.5||self.previous_cover.is_none(){self.previous_cover=self.cover.clone();self.flip_from=1.-phase;}else{self.flip_from=phase;}
+        self.cover=None;self.blurred_cover=None;self.preview_pixels=None;self.cover_palette=Default::default();self.cover_seed=None;
+        if let Some(p)=prepared{self.cover_seed=p.seed;if let Some(seed)=p.seed{let roles=dotisle_domain::dynamic_color::roles(seed,true,true,false);self.cover_palette=crate::cover_color::CoverPalette{background:roles.surface_container_high,accent:roles.primary};}self.paint_palette=self.cover_palette;self.preview_pixels=Some((p.bgra,p.width,p.height));self.cover=Some(p.image);}
+        self.cover_changed=Instant::now();
+    }
+    pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{let prepared=Self::prepare_cover(bytes)?;self.apply_cover(prepared);Ok(())}
+    pub unsafe fn set_notification_icon(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{self.notification_icon=bytes.map(Self::decode).transpose()?.map(|d|d.0);Ok(())}
+    pub fn material_theme(&self,material:Material,cover_background:bool)->MaterialTheme{MaterialTheme{roles:self.dynamic_resolved.map(|v|v.roles),material,cover_background,palette:self.paint_palette,pixels:self.preview_pixels.clone()}}
+    pub unsafe fn set_material_theme(&mut self,theme:&MaterialTheme)->Result<()>{if let Some(roles)=theme.roles{let mut resolved=dotisle_domain::dynamic_color::resolve(dotisle_domain::dynamic_color::Source::Custom,None,None,0x496b55,true,false);resolved.roles=roles;self.dynamic_resolved=Some(resolved);self.m3_cache=Some((resolved.seed,true,roles.ui()));}self.cover_palette=theme.palette;self.paint_palette=theme.palette;self.blurred_cover=None;self.cover=theme.pixels.as_ref().map(|(p,w,h)|{let mut rgba=p.clone();for c in rgba.chunks_exact_mut(4){let a=c[3]as u32;let blue=c[0];c[0]=if a>0{(c[2]as u32*255/a).min(255)as u8}else{0};c[1]=if a>0{(c[1]as u32*255/a).min(255)as u8}else{0};c[2]=if a>0{(blue as u32*255/a).min(255)as u8}else{0};}ImageData{data:Blob::new(Arc::new(rgba)),format:ImageFormat::Rgba8,alpha_type:ImageAlphaType::Alpha,width:*w,height:*h}});Ok(())}
+    pub fn preview_palette(&self)->(u32,u32){(self.paint_palette.background,self.paint_palette.accent)}
+    pub fn preview_art(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{if let Some(image)=&self.cover{if let Some(p)=path.parent(){std::fs::create_dir_all(p)?;}image::save_buffer(path,image.data.data(),image.width,image.height,image::ColorType::Rgba8)?;}Ok(())}
+    fn cover(&mut self,r:Rect,radius:f64,opacity:f32){if let Some(image)=self.cover.clone(){self.image(&image,r,radius,opacity);}else{let tones=self.m3_cache.map(|(_,_,c)|c).unwrap_or_else(||dotisle_domain::dynamic_color::scheme(0x496b55,true));self.fill(r,radius,0xff000000|tones.secondary_container);let size=r.w*0.56;self.icon(Icon::Music,Rect::new(r.x+(r.w-size)/2.,r.y+(r.h-size)/2.,size,size),0xff000000|tones.on_secondary_container);}}
+    fn flipping_cover(&mut self,r:Rect,s:&Scene<'_>){let radius=crate::layout::cover_corner_radius(s.radius,r.w,r.h);let t=if s.animate{(self.flip_from+(1.-self.flip_from)*s.cover_age_ms/280.).clamp(0.,1.)}else{1.};if t>=1.||self.previous_cover.is_none(){self.cover(r,radius,s.cover_opacity as f32);return}
+        let sx=(std::f64::consts::PI*t).cos().abs().max(0.018);let sy=1.-0.06*(std::f64::consts::PI*t).sin();let image=if t<0.5{self.previous_cover.clone()}else{self.cover.clone()};let part=self.collect(|a|{if let Some(image)=image{a.image(&image,r,radius,s.cover_opacity as f32);}else{a.cover(r,radius,s.cover_opacity as f32);}});let cx=r.x+r.w/2.;let cy=r.y+r.h/2.;self.canvas.append(&part,Some(Affine::translate((cx,cy))*Affine::scale_non_uniform(sx,sy)*Affine::translate((-cx,-cy))));
+    }
+    fn surface_spec(s:&Scene<'_>)->crate::surface::Surface{crate::surface::Surface{material:s.material,compact:if s.mini{s.mini_capsule}else{s.classic_capsule},reveal:s.frame.card_reveal,overlay:s.notification_mix.max(s.osd_mix),mini:s.mini,transparent:s.transparent,cover_background:s.expanded_cover_background,compact_cover_background:s.cover_background,cover_overlay:s.cover_overlay&&!s.dynamic_high_contrast,card_frost:s.acrylic_card_frost,card_opacity:if s.dynamic_high_contrast{0.}else{s.acrylic_card_opacity},capsule_frost:s.acrylic_capsule_frost,capsule_opacity:if s.dynamic_high_contrast{0.}else{s.acrylic_capsule_opacity}}}
+    fn material_surface(&mut self,r:Rect,radius:f64,s:crate::surface::Surface){
+        let p=s.paint(self.paint_palette);let gradient=Gradient::new_linear((r.x,r.y),(r.x,r.y+r.h)).with_stops([color(p.top),color(p.bottom)]);self.canvas.fill(Fill::NonZero,Affine::IDENTITY,&gradient,None,&RoundedRect::from_rect(vr(r),radius));
+        if p.cover_alpha>0.001{if let Some(image)=self.cover.clone(){let blur=p.cover_blur.max(0.).round()as u32;if self.blurred_cover.as_ref().is_none_or(|(key,_)|*key!=blur){if let Some(rgba)=image::RgbaImage::from_raw(image.width,image.height,image.data.data().to_vec()){let small=image::imageops::thumbnail(&rgba,128,128);let ratio=small.width()as f32/image.width as f32;let blurred=image::imageops::blur(&small,blur as f32*ratio);let(w,h)=blurred.dimensions();let mut pixels=blurred.into_raw();
+                    // Keep the frosted artwork a dark M3E surface: a near-white cover would otherwise lift the card past white text contrast.
+                    for c in pixels.chunks_exact_mut(4){c[0]=(c[0]as u32*58/100)as u8;c[1]=(c[1]as u32*58/100)as u8;c[2]=(c[2]as u32*58/100)as u8;}
+                    self.blurred_cover=Some((blur,ImageData{data:Blob::new(Arc::new(pixels)),width:w,height:h,..image.clone()}));}}let image=self.blurred_cover.as_ref().map(|(_,i)|i.clone()).unwrap_or(image);self.image(&image,r,radius,p.cover_alpha as f32);let scrim=((80.+36.*(1.-p.amount))as u32)<<24;self.fill(r,radius,scrim|crate::cover_color::mix(0x10171a,self.paint_palette.background,0.4*p.tint));}}
+        if p.frost>0.001{let frost=Gradient::new_linear((r.x,r.y),(r.x,r.y+r.h)).with_stops([color(((p.frost*15.)as u32)<<24|0xffffff),color(0x00ffffff)]);self.canvas.fill(Fill::NonZero,Affine::IDENTITY,&frost,None,&RoundedRect::from_rect(vr(r),radius));}
+        let edge=Rect::new(r.x+0.5,r.y+0.5,r.w-1.,r.h-1.);self.outline(edge,(radius-0.5).max(0.),((18.+30.*p.reflection)as u32)<<24|0xffffff,0.8);
+    }
+    fn music_lyric(&mut self,text:&str,r:Rect,size:f64,align:f64,ink:u32,s:&Scene<'_>){let weight=if s.music_mix>3.5&&size>=20.{500}else{400};let width=self.text.measure_weighted(text,size as f32,weight).min(r.w);let x=r.x+(r.w-width)*align;let phase=if s.animate{(s.lyric_age_ms/180.).clamp(0.,1.)}else{1.};let y=r.y+4.*(1.-phase).powi(3);let boundary=x+width*s.highlight.clamp(0.,1.);
+        for (clip,c) in [(Rect::new(r.x,r.y,(boundary-r.x).max(0.),r.h+5.),s.progress_color),(Rect::new(boundary,r.y,(r.x+r.w-boundary).max(0.),r.h+5.),ink)]{if clip.w>0.{self.clip(clip,0.,phase as f32);self.text.line_weighted(&mut self.canvas,text,vr(Rect::new(x,y,width,r.h)),size as f32,c,weight,0.);self.canvas.pop_layer();}}
+    }
+    fn compact_music(&mut self,s:&Scene<'_>){let tones=self.m3(s);let c=s.layout.capsule;let cover=s.layout.compact_cover(s.layout_scale);self.cover(cover,6.,s.cover_opacity as f32);let double=!s.compact_secondary.is_empty();let(h,line,second)=self.compact_metrics(s.font_size,double,s.layout_scale);let y=c.y+(c.h-h)/2.;let viewport=Rect::new(c.x+42.,y,c.w-76.,line);let phase=if s.animate{(s.lyric_age_ms/180.).clamp(0.,1.)}else{1.};
+        if phase<1.&&!s.previous_lyric.is_empty(){self.clip(Rect::new(viewport.x,c.y,viewport.w,c.h),0.,(1.-phase)as f32);self.text_at(s.previous_lyric,Rect::new(viewport.x,y-5.*phase,viewport.w,line),s.font_size,500,0xff000000|tones.on_surface,if double{0.5}else{0.});self.canvas.pop_layer();}
+        self.music_lyric(s.lyric,viewport,s.font_size,if double{0.5}else{0.},0xff000000|tones.on_surface,s);
+        if double{self.text_at(s.compact_secondary,Rect::new(viewport.x,y+line+1.,viewport.w,second),(s.font_size*0.78).clamp(9.,11.5),400,0xff000000|tones.on_surface_variant,0.5);}
+        for(i,h)in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+c.h/2.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.progress_color&0xffffff));}
+    }
+    fn compact_view(&mut self,s:&Scene<'_>){let mut compact=*s;compact.expressive_dark=true;let s=&compact;if s.mini{let tones=self.m3(s);let c=s.layout.capsule;let accent=if s.panel.is_some(){0xff000000|tones.primary}else{s.progress_color};let moving=s.panel.map(|p|p.running).unwrap_or(s.playing);let breath=if moving&&s.animate{0.68+0.32*(s.time_ms/2800.*std::f64::consts::TAU).sin()}else{0.8};let dot=3.2+breath*1.2;self.fill(Rect::new(c.x+11.-dot/2.,c.y+(c.h-dot)/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(accent&0xffffff));let label=s.panel.map(|p|format!("{}  {}",p.title,p.value)).unwrap_or_else(||s.lyric.to_string());self.text_at(&label,Rect::new(c.x+22.,c.y,c.w-44.,c.h),crate::compact::mini_font_size(s.font_size),500,if s.mini_glass{s.mini_ink}else{0xff000000|tones.on_surface},0.5);return}
+        if let Some(p)=s.panel{let tones=self.m3(s);let c=s.layout.capsule;let cy=c.y+c.h/2.;let accent=0xff000000|tones.primary;if p.kind==3{self.update_ring(c.x+22.,cy,10.,p.progress,s.time_ms,s.animate,accent);}else{self.icon(if p.kind==1{Icon::Focus}else if p.kind==2{Icon::Check}else{Icon::Import},Rect::new(c.x+12.,cy-10.,20.,20.),accent);}if p.kind==3{self.text_at(&p.title,Rect::new(c.x+42.,cy-16.,c.w-56.,19.),11.,600,0xff000000|tones.on_surface,0.);self.text_at(&p.subtitle,Rect::new(c.x+42.,cy+4.,c.w-56.,14.),9.,400,accent,0.);}else{self.text_at(&p.value,Rect::new(c.x+40.,cy-17.,c.w-70.,19.),14.,600,0xff000000|tones.on_surface,0.5);self.text_at(&p.title,Rect::new(c.x+40.,cy+3.,c.w-70.,13.),9.,400,accent,0.5);}if p.kind!=3{let a=if p.running&&s.animate{0.7+0.3*(s.time_ms/2400.*std::f64::consts::TAU).sin()}else{0.65};self.fill(Rect::new(c.x+c.w-18.,cy-3.,6.,6.),3.,((255.*a)as u32)<<24|(accent&0xffffff));}}else{let tones=self.m3(s);let mut music=*s;music.progress_color=s.progress_color;if s.lyric_cover_color{let mut accent=s.progress_color;for _ in 0..12{if crate::cover_color::contrast(accent,tones.container)>=3.{break}accent=0xff000000|crate::cover_color::mix(accent,tones.on_surface,0.15);}music.progress_color=accent;}self.compact_music(&music);}
+    }
+    fn button(&mut self,id:i32,r:Rect,s:&Scene<'_>){let disabled=([3,4,5].contains(&id)&&!s.has_track)||(id==2&&!s.floating)||(id==9&&!s.favorite_enabled)||(id==6&&!s.translation_button);let mut c=s.component_color;if disabled{c=0x4d000000|(c&0xffffff);}if id==6&&s.translation_enabled&&!disabled{self.fill(r,12.,0x30000000|(c&0xffffff));}let feedback=s.feedback.get(id as usize).copied().unwrap_or(0.);if feedback>0.001&&!disabled&&![3,5].contains(&id){self.fill(r,12.,((feedback*255.)as u32)<<24|0xffffff);}let press=1.;
+        // Opaque paired skip targets stay readable even over changing acrylic artwork.
+        if [3,5].contains(&id)&&!disabled{let colors=dotisle_domain::music_controls::skip_colors(self.paint_palette.background,c);c=0xff000000|colors.foreground;self.fill(r,r.w/2.,0xff000000|colors.background);if feedback>0.001{self.fill(r,r.w/2.,((feedback*255.)as u32)<<24|colors.foreground);}}let size=if id==4{24.}else{if [3,5].contains(&id){22.}else{20.}}*press;let icon=Rect::new(r.x+(r.w-size)/2.,r.y+(r.h-size)/2.,size,size);
+        if id==4{
+            let mix=if s.animate{s.play_shape.clamp(0.,1.)}else{if s.playing{1.}else{0.}};
+            let inset=(feedback as f64*9.).min(1.5);let body=Rect::new(r.x+inset,r.y+inset,r.w-inset*2.,r.h-inset*2.);
+            self.fill(body,body.h*(0.5-0.22*mix),c);
+            let ink=if crate::cover_color::contrast(c,0x17201d)>crate::cover_color::contrast(c,0xffffff){0xff17201d}else{0xffffffff};
+            if mix<0.999{self.icon(Icon::Play,icon,(((1.-mix)*255.)as u32)<<24|(ink&0xffffff));}
+            if mix>0.001{self.icon(Icon::Pause,icon,((mix*255.)as u32)<<24|(ink&0xffffff));}
+            return
+        }
+        match id{3=>self.icon(Icon::Prev,icon,c),4=>self.icon(if s.playing{Icon::Pause}else{Icon::Play},icon,c),5=>self.icon(Icon::Next,icon,c),7=>self.icon(Icon::Settings,icon,c),2=>self.icon(Icon::Move,icon,c),6=>{if !disabled{self.icon(Icon::Translate,icon,c);}},9=>self.icon(Icon::Heart,icon,c),_=>{}}
+    }
+    fn music_expanded(&mut self,s:&Scene<'_>){let w=s.layout.card.w;let g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale,s.font_size);let secondary=0xb8000000|(s.text_color&0xffffff);let immersion=(s.music_mix-3.).clamp(0.,1.);if g.cover.w>0.&&immersion<0.999{self.clip(g.cover,0.,(1.-immersion)as f32);self.flipping_cover(g.cover,s);self.canvas.pop_layer();}
+        self.text_at(s.title,g.title,16.-2.*immersion,600,0xff000000|(s.text_color&0xffffff),g.align);if !s.mini{self.text_at(s.artist,g.artist,10.,400,secondary,g.align);}
+        if immersion>0.5{
+            let size=(s.font_size+2.)+(s.font_size+6.).clamp(20.,23.)*immersion-(s.font_size+2.)*immersion;
+            let chars=s.lyric.chars().collect::<Vec<_>>();let mut split=chars.len();
+            if self.text.measure_weighted(s.lyric,size as f32,500)>g.lyric.w{let(mut low,mut high)=(1,chars.len());while low<high{let n=(low+high+1)/2;let part=chars[..n].iter().collect::<String>();if self.text.measure_weighted(&part,size as f32,500)<=g.lyric.w{low=n}else{high=n-1}}split=low;if let Some(i)=chars[..split].iter().rposition(|c|c.is_whitespace()){if i>split/2{split=i;}}}
+            let first=chars[..split].iter().collect::<String>();let second=chars[split..].iter().collect::<String>();let rows=if second.trim().is_empty(){1}else{2};let line=30.;let context=(1.-s.controls_opacity)as f32;let next=if s.next_context!=s.secondary{s.next_context}else{""};let text=lyric_core::music_layout::immersive_text_geometry(g.height,rows,!s.previous_context.is_empty(),!s.secondary.is_empty(),!next.is_empty(),s.controls_opacity);let mut band=g.lyric;band.y=text.current_y;
+            if context>0.001{self.clip(Rect::new(0.,0.,w,g.height),0.,context);self.text_line(s.previous_context,Rect::new(24.,text.previous_y,w-48.,18.),12.,400,0x60000000|(s.text_color&0xffffff));self.text_line(next,Rect::new(24.,text.next_y,w-48.,22.),14.,400,0x78000000|(s.text_color&0xffffff));self.canvas.pop_layer();}
+            let mut lyric=*s;if rows==1{lyric.highlight=s.highlight;self.music_lyric(&first,Rect::new(band.x,band.y,band.w,line),size,0.,s.text_color,&lyric);}
+            else{let weight=split as f64/chars.len().max(1)as f64;lyric.highlight=(s.highlight/weight.max(0.001)).clamp(0.,1.);self.music_lyric(&first,Rect::new(band.x,band.y,band.w,line),size,0.,s.text_color,&lyric);lyric.highlight=((s.highlight-weight)/(1.-weight).max(0.001)).clamp(0.,1.);self.music_lyric(second.trim(),Rect::new(band.x,band.y+line+2.,band.w,line),size,0.,s.text_color,&lyric);}
+            self.text_at(s.secondary,Rect::new(g.secondary.x,text.secondary_y,g.secondary.w,18.),10.5,400,secondary,0.);
+        }else{self.music_lyric(s.lyric,g.lyric,s.font_size+2.,g.align,s.text_color,s);}
+        if !s.mini{if immersion<=0.5{self.text_at(s.secondary,g.secondary,10.5,400,secondary,g.align);}let status=if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"};if g.align>=0.5{let tw=self.text.measure_weighted(status,9.,400).min(g.status_text.w);let total=4.+6.+tw;let x=g.status_text.x+(g.status_text.w-total)*0.5;let dot=self.status_indicator(status,Rect::new(x,g.status_dot.y,4.,4.),Rect::new(x+10.,g.status_text.y,tw+2.,g.status_text.h));self.fill(dot,dot.w/2.,s.progress_color);self.text_line(status,Rect::new(x+10.,g.status_text.y,tw+2.,g.status_text.h),9.,400,secondary);}else{let dot=self.status_indicator(status,g.status_dot,g.status_text);self.fill(dot,dot.w/2.,s.progress_color);self.text_line(status,g.status_text,9.,400,secondary);}}
+        if s.controls_opacity<=0.001{return}self.clip(Rect::new(0.,0.,w,g.height),0.,s.controls_opacity as f32);let rail=if s.seek_offer{0x2e000000|(s.component_color&0xffffff)}else{0x48000000|(s.component_color&0xffffff)};let mid=g.track.y+g.track.h/2.;let end=g.track.x+g.track.w*s.progress.clamp(0.,1.);
+        let thumb=if s.pressed==10{14.}else{12.};
+        self.line(((end+5.).min(g.track.x+g.track.w),mid),(g.track.x+g.track.w,mid),rail,3.);
+        if end>g.track.x{
+            let amount=if s.animate{s.play_shape.clamp(0.,1.)}else{0.};let mut path=BezPath::new();let length=end-g.track.x;let count=(length/3.).ceil().max(1.)as usize;
+            for i in 0..=count{let x=g.track.x+length*i as f64/count as f64;let edge=((x-g.track.x)/10.).min((end-x)/10.).clamp(0.,1.);let y=mid+1.6*amount*edge*((x-g.track.x)/24.*std::f64::consts::TAU-s.time_ms/1000.*2.).sin();if i==0{path.move_to((x,y));}else{path.line_to((x,y));}}
+            self.canvas.stroke(&Stroke::new(3.).with_caps(Cap::Round),Affine::IDENTITY,color(s.component_color),None,&path);
+        }
+        self.fill(Rect::new(end-1.5,mid-thumb/2.,3.,thumb),1.5,s.component_color);
+        self.text_line(&time(s.elapsed),g.elapsed,9.,400,secondary);self.text_at(&if s.duration>0.{format!("−{}",time((s.duration-s.elapsed).max(0.)))}else{"--:--".into()},g.total,9.,400,secondary,1.);if s.seek_offer{let tones=self.m3(s);let r=g.seek_chip;if s.seek_confirm{let(cancel,confirm)=lyric_core::music_layout::seek_confirm_pair(r);let fb_cancel=s.feedback.get(14).copied().unwrap_or(0.);let fb_confirm=s.feedback.get(15).copied().unwrap_or(0.);self.fill(cancel,cancel.h/2.,0xff000000|tones.secondary_container);if fb_cancel>0.001{self.fill(cancel,cancel.h/2.,((fb_cancel*255.)as u32)<<24|(tones.on_secondary_container&0xffffff));}self.text_at("取消",cancel,10.5,600,0xff000000|tones.on_secondary_container,0.5);self.fill(confirm,confirm.h/2.,0xff000000|tones.primary);if fb_confirm>0.001{self.fill(confirm,confirm.h/2.,((fb_confirm*255.)as u32)<<24|(tones.on_primary&0xffffff));}self.text_at("重新连接",confirm,10.5,600,0xff000000|tones.on_primary,0.5);}else{let fb=s.feedback.get(14).copied().unwrap_or(0.);self.fill(r,r.h/2.,0xff000000|tones.secondary_container);if fb>0.001{self.fill(r,r.h/2.,((fb*255.)as u32)<<24|(tones.on_secondary_container&0xffffff));}self.text_at("重新连接进度",Rect::new(r.x,r.y,r.w,r.h),11.,600,0xff000000|tones.on_secondary_container,0.5);}}for(id,r)in g.buttons{if r.w>0.{self.button(id,r,s);}}if s.translation_tooltip&&s.hover==6&&s.translation_button{if let Some((_,r))=g.buttons.iter().find(|(id,_)|*id==6){let tw=128.;let x=(r.x+r.w/2.-tw/2.).clamp(12.,w-tw-12.);let tip=Rect::new(x,r.y-38.,tw,30.);self.fill(tip,10.,0xffe4ece7);self.text_at(if s.translation_enabled{"隐藏翻译 · 已开启"}else{"显示翻译 · 已关闭"},Rect::new(tip.x,tip.y+6.,tip.w,18.),11.,500,0xff19261e,0.5);}}self.canvas.pop_layer();
+    }
+    fn tool_button(&mut self,id:i32,r:Rect,label:&str,s:&Scene<'_>){self.m3_button(id,r,label,s,id==30)}
+    fn tool_expanded(&mut self,s:&Scene<'_>,p:&crate::activities::Panel){self.expressive_tools(s,p)}
+    fn expanded_view(&mut self,s:&Scene<'_>){let mut expanded=*s;expanded.mini=false;let s=&expanded;if let Some(p)=s.panel{self.tool_expanded(s,p)}else{self.music_expanded(s)}}
+    fn satellite(&mut self,s:&Scene<'_>){let mut compact=*s;compact.expressive_dark=true;let s=&compact;let r=s.layout.satellite();let reveal=(1.-s.frame.card_reveal/0.06).clamp(0.,1.);if reveal<=0.{return}self.clip(Rect::new(r.x-24.,r.y-24.,r.w+48.,r.h+48.),0.,reveal as f32);let tones=self.m3(s);let mut surface=Self::surface_spec(s);surface.reveal=0.;surface.overlay=0.;self.canvas.draw_blurred_rounded_rect(Affine::translate((0.,5.)),vr(r),color(0x38000000),r.h/2.,22./3.);self.material_surface(r,r.h/2.,surface);let cx=r.x+r.w/2.;let cy=r.y+r.h/2.;let c=0xff000000|tones.on_secondary_container;
+        // Secondary activity state is supplied by the owner; the icon never guesses from the primary panel.
+        match s.auxiliary_kind{3=>{if s.auxiliary_update_completed{self.icon(Icon::Check,Rect::new(cx-9.,cy-9.,18.,18.),0xff9bd5ae);}else{self.update_ring(cx,cy,9.,s.auxiliary_update_progress,s.time_ms,s.animate&&s.auxiliary_running,0xff9bd5ae);}},1=>{self.ring(cx,cy,8.,c,1.4);let angle=if s.animate&&s.auxiliary_running{-std::f64::consts::FRAC_PI_2+s.auxiliary_elapsed/60000.*std::f64::consts::TAU}else{-std::f64::consts::FRAC_PI_2};self.line((cx,cy),(cx+angle.cos()*5.,cy+angle.sin()*5.),c,1.4);self.line((cx,cy),(cx+4.,cy+2.),c,1.4);},2=>self.icon(Icon::Check,Rect::new(cx-9.,cy-9.,18.,18.),c),_=>{for(i,base)in [8.,14.,10.].iter().enumerate(){let h=if s.animate&&s.auxiliary_running{6.+(s.time_ms/270.+i as f64*1.4).sin().abs()*9.}else{*base*0.65};self.fill(Rect::new(cx-6.+i as f64*5.,cy-h/2.,2.,h),1.,c);}}}self.canvas.pop_layer();
+    }
+    fn notification_content(&mut self,n:&crate::notifications::Notice,r:Rect,dark:bool){let tones=self.m3_cache.map(|(_,_,c)|c).unwrap_or_else(||dotisle_domain::dynamic_color::scheme(0x496b55,dark));let icon=Rect::new(r.x+18.,r.y+(r.h-40.)/2.,40.,40.);if let Some(kind)=n.app_id.strip_prefix("LyricIsland.Device."){let tones=self.m3_cache.map(|(_,_,c)|c).unwrap_or_else(||dotisle_domain::monet::scheme(0x496b55,dark));self.fill(icon,14.,0xff000000|tones.secondary_container);self.device_glyph(Rect::new(icon.x+7.,icon.y+7.,26.,26.),kind,0xff000000|tones.on_secondary_container);}
+        else if let Some(im)=self.notification_icon.clone(){self.image(&im,icon,10.,1.);}else{self.fill(icon,10.,0xff3188ee);self.text_at(&n.app_name.chars().next().unwrap_or('•').to_string(),Rect::new(icon.x,icon.y+2.,40.,34.),22.,600,0xffffffff,0.5);}
+        self.text_line(&n.app_name,Rect::new(r.x+76.,r.y+10.,r.w-160.,17.),11.5,500,(0xff000000|tones.on_surface_variant));self.text_line("现在",Rect::new(r.x+r.w-70.,r.y+12.,32.,14.),10.,400,(0xff000000|tones.on_surface_variant));self.text_line(&n.title,Rect::new(r.x+76.,r.y+27.,r.w-100.,21.),14.,600,(0xff000000|tones.on_surface));let lines=self.wrap(&n.body,12.5,r.w-100.);for(i,line)in lines.iter().take(2).enumerate(){self.text_line(line,Rect::new(r.x+76.,r.y+49.+i as f64*16.,r.w-100.,18.),12.5,400,(0xff000000|tones.on_surface_variant));}self.icon(Icon::Close,Rect::new(r.x+r.w-28.,r.y+11.,16.,16.),(0xff000000|tones.on_surface_variant));
+    }
+    fn wrap(&mut self,text:&str,size:f64,width:f64)->Vec<String>{let mut lines=vec![];let mut line=String::new();for c in text.chars(){let mut next=line.clone();next.push(c);if !line.is_empty()&&(c=='\n'||self.text.measure(&next,size as f32,false)>width){lines.push(std::mem::take(&mut line));}if c!='\n'{line.push(c);}}if !line.is_empty(){lines.push(line);}lines}
+    pub unsafe fn notification_height(&mut self,n:&crate::notifications::Notice,width:f64)->Result<f64>{Ok(if n.body.trim().is_empty(){64.}else if self.wrap(&n.body,12.5,width-100.).len()<=1{80.}else{96.})}
+    fn osd_content(&mut self,n:&crate::notifications::Notice,r:Rect,dark:bool){let roles=self.dynamic_resolved.map(|v|v.roles).unwrap_or_else(||dotisle_domain::dynamic_color::roles(0x496b55,true,false,false));let icon=Rect::new(r.x+12.,r.y+(r.h-30.)/2.,30.,30.);self.fill(icon,10.,0x1affffff);let kind=n.app_id.strip_prefix("LyricIsland.System.").unwrap_or("");let on=if kind=="Mic"{n.body=="已静音"}else{n.body=="已开启"};let tint=0xff000000|if kind=="Mic"&&on{roles.error}else if on{roles.primary}else{roles.on_surface_variant};self.device_glyph(Rect::new(icon.x+5.,icon.y+5.,20.,20.),if kind=="Mic"&&on{"MicOff"}else{kind},tint);self.text_line(&n.title,Rect::new(r.x+50.,r.y+13.,70.,18.),12.5,600,(0xff000000|roles.on_surface));self.text_line(&n.body,Rect::new(r.x+122.,r.y+14.,r.w-134.,15.),10.5,500,tint);}
+    pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{self.text.set_family(s.font_family);self.prepare_dynamic(s);let(mut themed,compact)=cover_scenes(s,Some(self.paint_palette));if s.expanded_cover_background{if let Some(resolved)=self.dynamic_resolved{themed.text_color=0xff000000|resolved.roles.on_surface;}}let s=&themed;self.canvas=VScene::new();let(base,base_radius)=s.layout.morph_shape_with_radii(s.frame.card_reveal,s.capsule_radius,s.radius);let p=s.frame.card_reveal;let(shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base,base_radius)};let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};self.clip(s.layout.host,0.,s.opacity);
+        self.canvas.draw_blurred_rounded_rect(Affine::translate((0.,5.)),vr(shape),color(if s.mini&&p<0.01{0x0a000000}else{0x38000000}),radius,22./3.);
+        let mut surface=Self::surface_spec(s);
+        let immersion=(s.music_mix-3.).clamp(0.,1.);
+        if s.panel.is_none()&&s.notification.is_none()&&s.osd.is_none()&&immersion>0.&&!s.dynamic_high_contrast{
+            surface.material=Material::Acrylic;surface.cover_background=s.expanded_cover_background;surface.cover_overlay=s.cover_overlay;surface.card_frost=surface.card_frost+(64.-surface.card_frost)*immersion;surface.card_opacity=surface.card_opacity+(62.-surface.card_opacity)*immersion;
+        }
+        let saved_palette=self.paint_palette;if s.panel.is_some()||s.notification.is_some()||s.osd.is_some(){surface.cover_overlay=false;surface.card_opacity=0.;surface.cover_background=true;if let Some(r)=self.dynamic_resolved{self.paint_palette.background=r.roles.surface_container;}}
+        self.material_surface(shape,radius,surface);self.paint_palette=saved_palette;
+        let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;if alpha>0.001{let part=self.collect(|a|{let w=s.layout.card.w;if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;let layer=a.collect(|a|a.expanded_view(&neighbor));a.canvas.append(&layer,Some(Affine::translate((s.swipe_offset-s.swipe_offset.signum()*w,s.frame.content_offset_y))));}if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;let layer=a.collect(|a|a.expanded_view(&old));a.canvas.append(&layer,Some(Affine::translate((s.switch_offset-s.switch_direction*w,s.frame.content_offset_y))));}let layer=a.collect(|a|a.expanded_view(s));a.canvas.append(&layer,Some(Affine::translate((s.switch_offset+s.swipe_offset,s.frame.content_offset_y))));});let scale=(base.w/s.layout.card.w).min(base.h/s.layout.card.h);let tx=base.x+(base.w-s.layout.card.w*scale)/2.;let ty=base.y+(base.h-s.layout.card.h*scale)/2.;self.clip(shape,radius,alpha as f32);self.canvas.append(&part,Some(Affine::translate((tx,ty))*Affine::scale(scale)));self.canvas.pop_layer();}
+        let alpha=(1.-blend(p,0.06,0.46))*music_alpha;if alpha>0.001{let part=self.collect(|a|{let w=s.layout.capsule.w;if s.drag_active{let mut neighbor=compact;neighbor.panel=s.drag_panel;let layer=a.collect(|a|a.compact_view(&neighbor));a.canvas.append(&layer,Some(Affine::translate((s.swipe_offset-s.swipe_offset.signum()*w,0.))));}if s.switching&&s.switch_outgoing{let mut old=compact;old.panel=s.previous_panel;let layer=a.collect(|a|a.compact_view(&old));a.canvas.append(&layer,Some(Affine::translate((s.switch_offset-s.switch_direction*w+s.swipe_offset,0.))));}let layer=a.collect(|a|a.compact_view(&compact));a.canvas.append(&layer,Some(Affine::translate((s.switch_offset+s.swipe_offset,0.))));});self.clip(shape,radius,alpha as f32);self.canvas.append(&part,Some(Affine::translate((base.x-s.layout.capsule.x,base.y-s.layout.capsule.y))));self.canvas.pop_layer();}
+        if !s.mini&&s.component_count>1&&s.notification.is_none()&&s.osd.is_none(){self.satellite(&compact);}        if let Some(n)=s.notification{self.clip(shape,radius,s.notification_mix as f32);self.notification_content(n,shape,s.expressive_dark);self.canvas.pop_layer();}if let Some(n)=s.osd{self.clip(shape,radius,s.osd_mix as f32);self.osd_content(n,shape,s.expressive_dark);self.canvas.pop_layer();}self.canvas.pop_layer();
+        let result=self.gpu.draw(&self.canvas,self.dpi as f64/96.,present).map_err(err);
+
+        result
+    }
+    pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,surface:crate::surface::Surface,present:bool)->Result<()>{self.canvas=VScene::new();let r=Rect::new(16.,12.+offset,240.,44.);self.clip(Rect::new(0.,0.,272.,80.),0.,opacity as f32);let _=surface;let c=self.dynamic_resolved.map(|v|v.roles.ui()).unwrap_or_else(||dotisle_domain::dynamic_color::scheme(0x496b55,true));self.fill(r,22.,0xff000000|c.container);self.outline(r,22.,0xff000000|c.outline,0.8);self.osd_content(n,r,true);self.canvas.pop_layer();
+        let result=self.gpu.draw(&self.canvas,self.dpi as f64/96.,present).map_err(err);
+
+        result
+    }
+    pub fn resize(&mut self,width:u32,height:u32,dpi:f32){self.gpu.resize(width,height);self.width=width;self.height=height;self.dpi=dpi;}
+    pub fn wait_idle(&self){self.gpu.wait_idle();}
+    pub fn colors_moving(&self,now:f64)->bool{self.color_motion.moving(now)}
+    pub unsafe fn snapshot(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{self.gpu.snapshot(path)}
+    /// The takeover window cannot rebuild Material roles, so the app hands it the window-sized
+    /// material plus the roles, geometry and font that painted the island card.
+    pub unsafe fn capture_update_appearance(&mut self,s:&Scene<'_>,directory:&Path,window:(i32,i32,i32,i32),job:&str)->std::result::Result<(),Box<dyn std::error::Error>>{
+        self.text.set_family(s.font_family);self.prepare_dynamic(s);
+        self.canvas=VScene::new();
+        let mut surface=Self::surface_spec(s);
+        let immersion=(s.music_mix-3.).clamp(0.,1.);
+        if s.panel.is_none()&&s.notification.is_none()&&s.osd.is_none()&&immersion>0.&&!s.dynamic_high_contrast{
+            surface.material=Material::Acrylic;surface.cover_background=s.expanded_cover_background;surface.cover_overlay=s.cover_overlay;surface.card_frost=surface.card_frost+(64.-surface.card_frost)*immersion;surface.card_opacity=surface.card_opacity+(62.-surface.card_opacity)*immersion;
+        }surface.cover_overlay=false;surface.card_opacity=0.;surface.cover_background=true;if let Some(r)=self.dynamic_resolved{self.paint_palette.background=r.roles.surface_container;}self.material_surface(s.layout.card,s.radius,surface);
+        self.gpu.draw(&self.canvas,self.dpi as f64/96.,false)?;
+        std::fs::create_dir_all(directory)?;
+        self.gpu.snapshot(&directory.join("background.png"))?;
+        let c=self.m3(s);let hex=|value:u32|format!("#{:06x}",value&0xffffff);
+        let exported=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let appearance=serde_json::json!({"version":1,"jobId":job,"exportedAtMs":exported,
+            "scale":self.dpi as f64/96.,"window":{"x":window.0,"y":window.1,"width":window.2,"height":window.3},
+            "card":{"x":s.layout.card.x,"y":s.layout.card.y,"width":s.layout.card.w,"height":s.layout.card.h},
+            "radius":s.radius,"fontFamily":s.font_family,"animate":true,"timeMs":0.,
+            "roles":{"primary":hex(c.primary),"onPrimary":hex(c.on_primary),"onSurface":hex(c.on_surface),"onSurfaceVariant":hex(c.on_surface_variant),"outline":hex(c.outline)}});
+        std::fs::write(directory.join("appearance.json"),serde_json::to_vec_pretty(&appearance)?)?;
+        Ok(())
+    }
+    pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{let samples=["晚风轻轻，音乐刚好 DotIsle 0123456789 译","景色は移ろい瞬く間に変わる","ひらがな カタカナ 日本語 한국어"];Ok(serde_json::json!({"renderer":"Vello + Parley","family":"Noto Sans SC","lineSpacing":self.body_line_spacing,"baseline":self.body_baseline,"samples":samples.map(|s|serde_json::json!({"text":s,"width":self.text.measure(s,16.,false)}))}))}
+    pub unsafe fn icon_bounds(&self)->Result<serde_json::Value>{Ok(serde_json::json!({"renderer":"Vello paths","transportSize":24,"secondarySize":16}))}
+}
+fn time(s:f64)->String{let s=s.max(0.)as u64;format!("{:02}:{:02}",s/60,s%60)}
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Material{Classic,Acrylic,Glass}
 impl Material{
-    /// Expanded cards keep separate preferences for each size, independent of the strip.
-    pub fn expanded(settings:&serde_json::Value,mini:bool)->Self{
-        Self::from_setting(settings[if mini{"MiniExpandedMaterial"}else{"IslandMaterial"}].as_str().unwrap_or("Acrylic"))
+    /// Both capsule modes open the same card and use the same material preference.
+    pub fn expanded(settings:&serde_json::Value,_mini:bool)->Self{
+        Self::from_setting(settings["IslandMaterial"].as_str().unwrap_or("Acrylic"))
     }
     pub fn from_setting(value:&str)->Self{match value{"Classic"=>Self::Classic,"Glass"=>Self::Glass,_=>Self::Acrylic}}
 }
 #[derive(Clone,PartialEq)]
 pub struct MaterialTheme{
-    pub material:Material,pub cover_background:bool,pub palette:crate::cover_color::CoverPalette,
+    pub roles:Option<dotisle_domain::dynamic_color::Roles>,pub material:Material,pub cover_background:bool,pub palette:crate::cover_color::CoverPalette,
     pub pixels:Option<(Vec<u8>,u32,u32)>,
 }
 impl MaterialTheme{
-    pub fn new(material:Material,cover_background:bool)->Self{Self{material,cover_background,palette:Default::default(),pixels:None}}
+    pub fn new(material:Material,cover_background:bool)->Self{Self{roles:None,material,cover_background,palette:Default::default(),pixels:None}}
 }
 #[derive(Clone,Copy)]
 pub struct Scene<'a>{
-    pub mini:bool,pub mini_glass:bool,pub classic_capsule:Material,pub mini_capsule:Material,pub mini_ink:u32,pub mini_outline:u32,
+    pub play_shape:f64,pub capsule_radius:f64,pub update_phase:&'a str,pub feedback:[f32;64],pub dynamic_source:&'a str,pub dynamic_system_seed:Option<u32>,pub dynamic_custom_seed:u32,pub dynamic_high_contrast:bool,pub font_family:&'a str,pub expressive_dark:bool,pub mini:bool,pub mini_glass:bool,pub classic_capsule:Material,pub mini_capsule:Material,pub mini_ink:u32,pub mini_outline:u32,
+    /// Hides the expanded card's 译 button in painting and in hit testing together.
+    pub translation_button:bool,pub translation_enabled:bool,pub translation_tooltip:bool,
     pub tool_theme:crate::theme_accent::Accent,
     pub drag_panel:Option<&'a crate::activities::Panel>,pub drag_active:bool,pub switch_outgoing:bool,pub switch_direction:f64,
-    pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_kind:u8,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
-    pub material:Material,pub lyric_cover_color:bool,pub cover_background:bool,pub demo:bool,pub animate:bool,
+    pub panel:Option<&'a crate::activities::Panel>,pub previous_panel:Option<&'a crate::activities::Panel>,pub component_count:usize,pub auxiliary_update_progress:f64,pub auxiliary_update_completed:bool,pub auxiliary_kind:u8,pub auxiliary_running:bool,pub auxiliary_elapsed:f64,pub switching:bool,pub switch_offset:f64,pub swipe_offset:f64,
+    pub material:Material,pub lyric_cover_color:bool,pub cover_background:bool,pub expanded_cover_background:bool,pub cover_overlay:bool,pub demo:bool,pub animate:bool,
+    pub acrylic_card_frost:f64,pub acrylic_card_opacity:f64,pub acrylic_capsule_frost:f64,pub acrylic_capsule_opacity:f64,
     pub notification:Option<&'a crate::notifications::Notice>,pub notification_rect:Rect,pub notification_radius:f64,pub notification_mix:f64,
     pub osd:Option<&'a crate::notifications::Notice>,pub osd_rect:Rect,pub osd_radius:f64,pub osd_mix:f64,
     pub layout:Layout,pub frame:Frame,pub radius:f64,pub resizing:bool,pub time_ms:f64,
+    pub previous_context:&'a str,pub next_context:&'a str,pub controls_opacity:f64,
     pub lyric:&'a str,pub previous_lyric:&'a str,pub compact_secondary:&'a str,pub previous_compact_secondary:&'a str,pub lyric_age_ms:f64,pub secondary:&'a str,
     pub title:&'a str,pub artist:&'a str,pub playing:bool,pub highlight:f64,
+    /// The player reports a live timeline but cannot be seeked; the card offers an enable flow.
+    pub seek_offer:bool,
+    /// The offer is expanded into a clear restart/cancel decision.
+    pub seek_confirm:bool,
     pub progress:f64,pub elapsed:f64,pub duration:f64,pub font_size:f64,
-    pub fluid_motion:bool,pub music_layout:crate::layout::MusicLayout,pub music_mix:f64,
+    pub music_layout:crate::layout::MusicLayout,pub music_mix:f64,
     pub text_color:u32,pub component_color:u32,pub progress_color:u32,
     pub hover:i32,pub pressed:i32,pub opacity:f32,
     pub transparent:bool,pub floating:bool,pub favorite_enabled:bool,pub has_track:bool,pub layout_scale:f64,
     pub activity_scales:[f64;3],pub activity_opacity:f64,pub cover_opacity:f64,pub cover_age_ms:f64,
     pub outgoing_opacity:f64,pub outgoing_y:f64,
 }
-pub struct Renderer{
-    reading_glass:bool,
-    preview_pixels:Option<(Vec<u8>,u32,u32)>,
-    surface_brush:Option<(u32,u32,Rect,ID2D1LinearGradientBrush)>,highlight_brush:Option<(Rect,ID2D1LinearGradientBrush)>,
-    cover_palette:crate::cover_color::CoverPalette,shadow_shape:Option<(Rect,f64)>,
-    notification_icon:Option<ID2D1Bitmap1>,device_bitmaps:HashMap<String,ID2D1Bitmap1>,
-    factory:ID2D1Factory1,pub dc:ID2D1DeviceContext,swap:IDXGISwapChain1,
-    _device:ID3D11Device,_composition:IDCompositionDevice,_target:IDCompositionTarget,_visual:IDCompositionVisual,
-    screen:ID2D1Bitmap1,compact:ID2D1Bitmap1,expanded:ID2D1Bitmap1,shadow:ID2D1Bitmap1,
-    poster_cover:Option<ID2D1Bitmap1>,poster_blur:ID2D1Effect,blur:ID2D1Effect,shadow_fx:ID2D1Effect,brush:ID2D1SolidColorBrush,
-    write:IDWriteFactory,body_fonts:IDWriteFontCollection,system_fonts:IDWriteFontCollection,fallback:IDWriteFontFallback,body_family:String,japanese_family:String,
-    pub body_line_spacing:f64,pub body_baseline:f64,
-    icons:HashMap<String,ID2D1TransformedGeometry>,layouts:HashMap<String,IDWriteTextLayout>,measured:HashMap<String,f64>,cover:Option<ID2D1Bitmap1>,previous_cover:Option<ID2D1Bitmap1>,cover_changed:std::time::Instant,flip_from:f64,pub width:u32,pub height:u32,pub dpi:f32,
+
+/// Lyric highlighting follows its own preference, independently of surface tint.
+pub(crate) fn cover_scenes<'a>(s:&Scene<'a>,palette:Option<crate::cover_color::CoverPalette>)->(Scene<'a>,Scene<'a>){
+    let mut expanded=*s;let mut compact=*s;
+    if let Some(palette)=palette{let accent=0xff000000|palette.accent;
+        if s.expanded_cover_background{expanded.component_color=accent;}
+        if s.cover_background{compact.component_color=accent;}
+        if s.lyric_cover_color{expanded.progress_color=accent;compact.progress_color=accent;}
+    }
+    (expanded,compact)
 }
-impl Renderer{
-    pub unsafe fn verify_font(&mut self)->Result<serde_json::Value>{
-        let mut rows=vec![];self.dc.BeginDraw();
-        for weight in [400,500,600]{
-            let text="晚风轻轻，音乐刚好 DotIsle 0123456789 译";
-            self.text(text,Rect::new(0.,0.,1000.,32.),16.,weight,0)?;
-            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,weight,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
-            let runs=crate::font_probe::inspect(self.layouts.get(&key).unwrap())?;
-            rows.push(serde_json::json!({"requestedWeight":weight,"runs":runs}));
-        }
-        let mut languages=vec![];
-        for text in ["景色は移ろい瞬く間に変わる", "ひらがな カタカナ 日本語 한국어"]{
-            self.text(text,Rect::new(0.,0.,1000.,32.),16.,500,0)?;
-            let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,1000.,32.,16.,500,"Noto Sans SC",DWRITE_TEXT_ALIGNMENT_LEADING.0,None::<f64>);
-            languages.push(serde_json::json!({"text":text,"runs":crate::font_probe::inspect(self.layouts.get(&key).unwrap())?}));
-        }
-        self.dc.EndDraw(None,None)?;Ok(serde_json::json!({"family":self.body_family,"lineSpacing":self.body_line_spacing,"baseline":self.body_baseline,"weights":rows,"languageSamples":languages}))
-    }
-    pub unsafe fn new(hwnd:HWND,width:u32,height:u32,dpi:f32,font:&Path)->Result<Self>{
-        let mut device=None;
-        if D3D11CreateDevice(None,D3D_DRIVER_TYPE_HARDWARE,HMODULE::default(),D3D11_CREATE_DEVICE_BGRA_SUPPORT,None,D3D11_SDK_VERSION,Some(&mut device),None,None).is_err(){
-            D3D11CreateDevice(None,D3D_DRIVER_TYPE_WARP,HMODULE::default(),D3D11_CREATE_DEVICE_BGRA_SUPPORT,None,D3D11_SDK_VERSION,Some(&mut device),None,None)?;
-        }
-        let device=device.unwrap();let dxgi:IDXGIDevice=device.cast()?;let adapter=dxgi.GetAdapter()?;let dxgi_factory:IDXGIFactory2=adapter.GetParent()?;
-        let desc=DXGI_SWAP_CHAIN_DESC1{Width:width,Height:height,Format:DXGI_FORMAT_B8G8R8A8_UNORM,SampleDesc:DXGI_SAMPLE_DESC{Count:1,Quality:0},BufferUsage:DXGI_USAGE_RENDER_TARGET_OUTPUT,BufferCount:2,Scaling:DXGI_SCALING_STRETCH,SwapEffect:DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,AlphaMode:DXGI_ALPHA_MODE_PREMULTIPLIED,..Default::default()};
-        let swap=dxgi_factory.CreateSwapChainForComposition(&device,&desc,None)?;
-        let composition:IDCompositionDevice=DCompositionCreateDevice(&dxgi)?;let target=composition.CreateTargetForHwnd(hwnd,true)?;let visual=composition.CreateVisual()?;visual.SetContent(&swap)?;target.SetRoot(&visual)?;
-        let factory:ID2D1Factory1=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,None)?;
-        let d2device=factory.CreateDevice(&dxgi)?;let dc=d2device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;dc.SetDpi(dpi,dpi);dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        let surface:IDXGISurface=swap.GetBuffer(0)?;
-        let props=D2D1_BITMAP_PROPERTIES1{pixelFormat:D2D1_PIXEL_FORMAT{format:DXGI_FORMAT_B8G8R8A8_UNORM,alphaMode:D2D1_ALPHA_MODE_PREMULTIPLIED},dpiX:dpi,dpiY:dpi,bitmapOptions:D2D1_BITMAP_OPTIONS_TARGET|D2D1_BITMAP_OPTIONS_CANNOT_DRAW,..Default::default()};
-        let screen=dc.CreateBitmapFromDxgiSurface(&surface,Some(&props))?;
-        let props=D2D1_BITMAP_PROPERTIES1{bitmapOptions:D2D1_BITMAP_OPTIONS_TARGET,..props};
-        let bitmap=||dc.CreateBitmap(D2D_SIZE_U{width,height},None,0,&props);
-        let compact=bitmap()?;let expanded=bitmap()?;let shadow=bitmap()?;
-        let brush=dc.CreateSolidColorBrush(&color(0xffffffff),None)?;
-        let write:IDWriteFactory=DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-        let fw:IDWriteFactory5=write.cast()?;let builder=fw.CreateFontSetBuilder()?;
-        let font_path=font.to_string_lossy().encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-        let file=write.CreateFontFileReference(PCWSTR(font_path.as_ptr()),None)?;builder.AddFontFile(&file)?;
-        let japanese_path=font.with_file_name("NotoSansJP.ttf").to_string_lossy().encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-        builder.AddFontFile(&write.CreateFontFileReference(PCWSTR(japanese_path.as_ptr()),None)?)?;
-        let body_fonts:IDWriteFontCollection=fw.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?.cast()?;
-        let poster_blur=dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
-        poster_blur.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&12_f32.to_ne_bytes())?;
-        poster_blur.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,D2D1_PROPERTY_TYPE_ENUM,&(D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes())?;
-        let blur=dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;let shadow_fx=dc.CreateEffect(&CLSID_D2D1Shadow)?;
-        dc.SetTarget(&screen);let mut system_fonts=None;write.GetSystemFontCollection(&mut system_fonts,false)?;let system_fonts=system_fonts.unwrap();let fallback=write.cast::<IDWriteFactory2>()?.GetSystemFontFallback()?;
-        let mut index=0;let mut body_family=String::new();
-        for name in ["Noto Sans SC","Noto Sans SC Thin"]{let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut found=windows::core::BOOL(0);body_fonts.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut index,&mut found)?;if found.as_bool(){body_family=name.into();break}}
-        if body_family.is_empty(){return Err(windows::core::Error::new(windows::core::HRESULT(0x80070057u32 as i32),"随包中文字体不是 Noto Sans SC"))}
-        let mut japanese_family=String::new();
-        for name in ["Noto Sans JP","Noto Sans JP Thin"]{let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut i=0;let mut found=windows::core::BOOL(0);body_fonts.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut i,&mut found)?;if found.as_bool(){japanese_family=name.into();break}}
-        if japanese_family.is_empty(){return Err(windows::core::Error::new(windows::core::HRESULT(0x80070057u32 as i32),"随包日文字体不是 Noto Sans JP"))}
-        let face=body_fonts.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STRETCH_NORMAL,DWRITE_FONT_STYLE_NORMAL)?.CreateFontFace()?;
-        let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);
-        let body_line_spacing=(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64)/metrics.designUnitsPerEm as f64;
-        let body_baseline=metrics.ascent as f64/metrics.designUnitsPerEm as f64;
-        dc.SetTarget(&screen);dc.BeginDraw();dc.Clear(Some(&color(0)));dc.EndDraw(None,None)?;swap.Present(0,DXGI_PRESENT(0)).ok()?;composition.Commit()?;
-        Ok(Self{preview_pixels:None,reading_glass:false,factory,dc,swap,_device:device,_composition:composition,_target:target,_visual:visual,screen,compact,expanded,shadow,brush,write,body_fonts,system_fonts,fallback,body_family,japanese_family,body_line_spacing,body_baseline,icons:HashMap::new(),layouts:HashMap::new(),measured:HashMap::new(),cover:None,previous_cover:None,cover_changed:std::time::Instant::now()-std::time::Duration::from_secs(1),flip_from:0.,surface_brush:None,highlight_brush:None,cover_palette:Default::default(),shadow_shape:None,notification_icon:None,device_bitmaps:HashMap::new(),width,height,dpi,poster_cover:None,poster_blur,blur,shadow_fx})
-    }
-    pub fn material_theme(&self,material:Material,cover_background:bool)->MaterialTheme{
-        MaterialTheme{material,cover_background,palette:self.cover_palette,pixels:self.preview_pixels.clone()}
-    }
-    pub unsafe fn set_material_theme(&mut self,theme:&MaterialTheme)->Result<()>{
-        self.cover_palette=theme.palette;self.poster_cover=None;
-        self.cover=if let Some((pixels,width,height))=&theme.pixels{
-            let props=D2D1_BITMAP_PROPERTIES1{pixelFormat:D2D1_PIXEL_FORMAT{format:DXGI_FORMAT_B8G8R8A8_UNORM,alphaMode:D2D1_ALPHA_MODE_PREMULTIPLIED},dpiX:96.,dpiY:96.,..Default::default()};
-            Some(self.dc.CreateBitmap(D2D_SIZE_U{width:*width,height:*height},Some(pixels.as_ptr().cast()),width*4,&props)?)
-        }else{None};Ok(())
-    }
-    /// The same painter is used by cards, queued notifications and both system-hint placements.
-    unsafe fn material_surface(&mut self,shape:Rect,radius:f64,surface:crate::surface::Surface)->Result<()>{
-        let paint=surface.paint(self.cover_palette);let(top,bottom)=(paint.top,paint.bottom);
-        if !self.surface_brush.as_ref().is_some_and(|(a,b,r,_)|*a==top&&*b==bottom&&*r==shape){
-            let stops=[D2D1_GRADIENT_STOP{position:0.,color:color(top)},D2D1_GRADIENT_STOP{position:1.,color:color(bottom)}];
-            let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
-            let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x,shape.y+shape.h)},None,&collection)?;
-            self.surface_brush=Some((top,bottom,shape,brush));
-        }
-        self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.surface_brush.as_ref().unwrap().3);
-        // Blur only artwork. The frosted reading plane and a restrained tint keep the pane
-        // dense enough to read while its cover-derived colour remains visible.
-        if paint.frost>0.001{
-            self.clip(shape,radius,paint.frost as f32)?;
-            if surface.cover_background{if let Some(cover)=&self.cover{
-                if self.poster_cover.as_ref()!=Some(cover){self.poster_blur.SetInput(0,cover,true);self.poster_cover=Some(cover.clone());}
-                let output=self.poster_blur.GetOutput()?;let bounds=self.dc.GetImageLocalBounds(&output)?;
-                let width=(bounds.right-bounds.left)as f64;let height=(bounds.bottom-bounds.top)as f64;
-                let scale=(shape.w/width.max(1.)).max(shape.h/height.max(1.));
-                self.dc.SetTransform(&matrix(scale,shape.x+(shape.w-width*scale)/2.-bounds.left as f64*scale,shape.y+(shape.h-height*scale)/2.-bounds.top as f64*scale));
-                self.dc.DrawImage(&output,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);self.dc.SetTransform(&identity());
-            }}
-            // The dense acrylic scrim follows whichever material owns the plane right now, so
-            // an acrylic strip stays as readable as an acrylic card while it opens.
-            let acrylic=(if surface.compact==Material::Acrylic{1.-paint.amount}else{0.})+(if surface.material==Material::Acrylic{paint.amount}else{0.});
-            let scrim_alpha=(0x55 as f64+(0xc9 as f64-0x55 as f64)*acrylic.clamp(0.,1.)).round()as u32;
-            let scrim=scrim_alpha<<24;
-            self.fill(shape,radius,scrim|crate::cover_color::mix(0x10171a,self.cover_palette.background,0.4));self.dc.PopLayer();
-        }
-        let edge=(((34.+68.*paint.reflection)as u32)<<24)|0x00ffffff;
-        self.brush.SetColor(&color(edge));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);
-        if paint.reflection>0.001{
-            if !self.highlight_brush.as_ref().is_some_and(|(r,_)|*r==shape){
-                let stops=[
-                    D2D1_GRADIENT_STOP{position:0.,color:color(0x36ffffff)},
-                    D2D1_GRADIENT_STOP{position:0.36,color:color(0x0effffff)},
-                    D2D1_GRADIENT_STOP{position:0.42,color:color(0x02ffffff)},
-                    D2D1_GRADIENT_STOP{position:1.,color:color(0x00ffffff)}];
-                let collection=self.dc.cast::<ID2D1RenderTarget>()?.CreateGradientStopCollection(&stops,D2D1_GAMMA_2_2,D2D1_EXTEND_MODE_CLAMP)?;
-                let brush=self.dc.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES{startPoint:point(shape.x,shape.y),endPoint:point(shape.x+shape.w*0.12,shape.y+shape.h)},None,&collection)?;
-                self.highlight_brush=Some((shape,brush));
-            }
-            self.clip(shape,radius,paint.reflection as f32)?;
-            self.dc.FillRoundedRectangle(&rounded(shape,radius),&self.highlight_brush.as_ref().unwrap().1);
-            let inset=Rect::new(shape.x+1.5,shape.y+1.5,(shape.w-3.).max(1.),(shape.h-3.).max(1.));
-            self.brush.SetColor(&color(0x38000000));self.dc.DrawRoundedRectangle(&rounded(inset,(radius-1.5).max(1.)),&self.brush,0.7,None);
-            self.dc.PopLayer();
-        }Ok(())
-    }
-    pub fn preview_palette(&self)->(u32,u32){(self.cover_palette.background,self.cover_palette.accent)}
-    pub fn preview_art(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
-        if let Some((pixels,width,height))=&self.preview_pixels{
-            let mut pixels=pixels.clone();for p in pixels.chunks_exact_mut(4){p.swap(0,2);}
-            if let Some(parent)=path.parent(){std::fs::create_dir_all(parent)?;}
-            image::save_buffer_with_format(path,&pixels,*width,*height,image::ColorType::Rgba8,image::ImageFormat::Png)?;
-        }Ok(())
-    }
-    pub unsafe fn set_cover(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{self.load_cover(bytes,true)}
-    /// `theme` runs the Monet palette; notification icons skip it so they never recolour the music card.
-    unsafe fn load_cover(&mut self,bytes:Option<&[u8]>,theme:bool)->std::result::Result<(),Box<dyn std::error::Error>>{
-        use windows::Win32::{Graphics::Imaging::*,System::Com::{CoCreateInstance,CLSCTX_INPROC_SERVER}};
-        let phase=(self.flip_from+(1.-self.flip_from)*self.cover_changed.elapsed().as_secs_f64()/0.28).clamp(0.,1.);
-        if phase>=0.5||self.previous_cover.is_none(){self.previous_cover=self.cover.clone();self.flip_from=1.-phase;}else{self.flip_from=phase;}
-        self.cover_changed=std::time::Instant::now();
-        self.cover=None;self.cover_palette=Default::default();if theme{self.preview_pixels=None;}if let Some(bytes)=bytes{
-            let factory:IWICImagingFactory=CoCreateInstance(&CLSID_WICImagingFactory,None,CLSCTX_INPROC_SERVER)?;
-            let stream=factory.CreateStream()?;stream.InitializeFromMemory(bytes)?;
-            let decoder=factory.CreateDecoderFromStream(&stream,std::ptr::null(),WICDecodeMetadataCacheOnLoad)?;let frame=decoder.GetFrame(0)?;
-            let (mut width,mut height)=(0,0);frame.GetSize(&mut width,&mut height)?;
-            if width==0||height==0{return Err("封面尺寸无效".into())}
-            let scale=192./width.max(height)as f64;
-            let scaled_width=(width as f64*scale).round().clamp(1.,192.)as u32;
-            let scaled_height=(height as f64*scale).round().clamp(1.,192.)as u32;
-            let scaler=factory.CreateBitmapScaler()?;scaler.Initialize(&frame,scaled_width,scaled_height,WICBitmapInterpolationModeFant)?;
-            let converter=factory.CreateFormatConverter()?;converter.Initialize(&scaler,&GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,None,0.,WICBitmapPaletteTypeCustom)?;
-            let mut pixels=vec![0u8;scaled_width as usize*scaled_height as usize*4];converter.CopyPixels(std::ptr::null(),scaled_width*4,&mut pixels)?;
-            if theme{self.cover_palette=crate::cover_color::palette(&pixels);self.preview_pixels=Some((pixels,scaled_width,scaled_height));}
-            self.cover=Some(self.dc.CreateBitmapFromWicBitmap(&converter,None)?);
-            // Restart the flip clock after decode + palette so their cost never eats the animation's first frames.
-            self.cover_changed=std::time::Instant::now();
-        }Ok(())
-    }
-    fn contrast_outline(c:u32)->u32{let l=((c>>16)&255)*3+((c>>8)&255)*6+(c&255);if l>1280{0x88000000}else{0x88ffffff}}
-    unsafe fn fill(&self,r:Rect,radius:f64,c:u32){self.brush.SetColor(&color(c));self.dc.FillRoundedRectangle(&rounded(r,radius),&self.brush);}
-    unsafe fn line(&self,a:(f64,f64),b:(f64,f64),c:u32,width:f32){if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width+1.2,None);}self.brush.SetColor(&color(c));self.dc.DrawLine(point(a.0,a.1),point(b.0,b.1),&self.brush,width,None);}
-    unsafe fn clip(&self,r:Rect,radius:f64,opacity:f32)->Result<()>{
-        let geometry=self.factory.CreateRoundedRectangleGeometry(&rounded(r,radius))?;
-        let mut params=D2D1_LAYER_PARAMETERS1{contentBounds:D2D_RECT_F{left:-100000.,top:-100000.,right:100000.,bottom:100000.},geometricMask:std::mem::ManuallyDrop::new(Some(geometry.cast()?)),maskAntialiasMode:D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,maskTransform:identity(),opacity,opacityBrush:std::mem::ManuallyDrop::new(None),layerOptions:D2D1_LAYER_OPTIONS1_NONE};
-        self.dc.PushLayer(&params,None);std::mem::ManuallyDrop::drop(&mut params.geometricMask);Ok(())
-    }
-    /// True glyph-run width for one line, in layout units.
-    ///
-    /// `compact_content` runs every frame, so the DirectWrite layout is cached by
-    /// text and size instead of being rebuilt per frame. The family, weight and
-    /// fallback chain match `text_family` exactly, so a measured width is the
-    /// same width the glyphs are later drawn at.
-    pub unsafe fn measure_line(&mut self,text:&str,size:f64)->Result<f64>{
-        let key=format!("{text}|{size}");if let Some(width)=self.measured.get(&key){return Ok(*width)}
-        let family=self.language_family(text);let name=family.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let format=self.write.CreateTextFormat(PCWSTR(name.as_ptr()),if family==self.body_family||family==self.japanese_family{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,w!("zh-CN"))?;format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;let chars=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&chars,&format,32768.,200.)?;layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;let mut metrics=DWRITE_TEXT_METRICS::default();layout.GetMetrics(&mut metrics)?;let width=metrics.widthIncludingTrailingWhitespace as f64;
-        if self.measured.len()>256{self.measured.clear()}self.measured.insert(key,width);Ok(width)
-    }
-    unsafe fn text(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32)->Result<()>{
-        self.text_family(text,r,size,weight,c,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,None)
-    }
-    unsafe fn language_family(&self,text:&str)->String{
-        if text.chars().any(|c|matches!(c as u32,0x3040..=0x30ff|0x31f0..=0x31ff|0xff66..=0xff9f)){return self.japanese_family.clone()}
-        let choices:&[&str]=if text.chars().any(|c|matches!(c as u32,0xac00..=0xd7af|0x1100..=0x11ff|0x3130..=0x318f)){&["Malgun Gothic"]}else{&[]};
-        for name in choices{let utf16=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut index=0;let mut exists=windows::core::BOOL(0);if self.system_fonts.FindFamilyName(PCWSTR(utf16.as_ptr()),&mut index,&mut exists).is_ok()&&exists.as_bool(){return name.to_string()}}
-        self.body_family.clone()
-    }
-    unsafe fn baseline_ratio(&self,family:&str)->f64{
-        if family==self.body_family{return self.body_baseline/self.body_line_spacing}
-        let collection=if family==self.japanese_family{&self.body_fonts}else{&self.system_fonts};
-        let name=family.encode_utf16().chain(Some(0)).collect::<Vec<_>>();let mut index=0;let mut exists=windows::core::BOOL(0);
-        let result=(||->Result<f64>{collection.FindFamilyName(PCWSTR(name.as_ptr()),&mut index,&mut exists)?;let face=collection.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STRETCH_NORMAL,DWRITE_FONT_STYLE_NORMAL)?.CreateFontFace()?;let mut metrics=DWRITE_FONT_METRICS::default();face.GetMetrics(&mut metrics);Ok(metrics.ascent as f64/(metrics.ascent as f64+metrics.descent as f64+metrics.lineGap as f64).max(1.))})();
-        result.unwrap_or(self.body_baseline/self.body_line_spacing)
-    }
-    unsafe fn text_family(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32,family:&str,system:bool,alignment:DWRITE_TEXT_ALIGNMENT,line_height:Option<f64>)->Result<()>{
-        if text.is_empty()||r.w<=0.{return Ok(())}let key=format!("{}|{}|{}|{}|{}|{}|{}|{:?}",text,r.w,r.h,size,weight,family,alignment.0,line_height);
-        if !self.layouts.contains_key(&key){
-            if self.layouts.len()>192{self.layouts.clear()}
-            let resolved=if system{family.to_string()}else{self.language_family(text)};let private=!system&&(resolved==self.body_family||resolved==self.japanese_family);let baseline=self.baseline_ratio(&resolved);
-            let family=resolved.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-            let format=self.write.CreateTextFormat(PCWSTR(family.as_ptr()),if private{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT(weight),DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,if resolved==self.japanese_family||resolved.starts_with("Yu ")||resolved=="Meiryo"{w!("ja-JP")}else{w!("zh-CN")})?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            if !system&&line_height!=Some(-1.){format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;let height=line_height.unwrap_or(size*self.body_line_spacing);format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,height as f32,(height*baseline)as f32)?;}
-            format.SetTextAlignment(alignment)?;
-            let ellipsis=self.write.CreateEllipsisTrimmingSign(&format)?;format.SetTrimming(&DWRITE_TRIMMING{granularity:DWRITE_TRIMMING_GRANULARITY_CHARACTER,..Default::default()},&ellipsis)?;
-            let utf16=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&utf16,&format,r.w as f32,if line_height==Some(-1.){r.h as f32}else{r.h.max(size*self.body_line_spacing)as f32})?;
-            if !system{layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;layout.cast::<IDWriteTextLayout4>()?.SetFontAxisValues(&[DWRITE_FONT_AXIS_VALUE{axisTag:DWRITE_FONT_AXIS_TAG_WEIGHT,value:weight as f32}],DWRITE_TEXT_RANGE{startPosition:0,length:utf16.len()as u32})?;}self.layouts.insert(key.clone(),layout);
-        }
-        let layout=self.layouts.get(&key).unwrap();let (dx,dy)=if line_height==Some(-1.){let overhang=layout.GetOverhangMetrics()?;((overhang.left-overhang.right)as f64/2.,(overhang.top-overhang.bottom)as f64/2.)}else{(0.,0.)};
-        if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));for (x,y) in [(0.,0.5)]{self.dc.DrawTextLayout(point(r.x+dx+x,r.y+dy+y),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);}}
-        self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x+dx,r.y+dy),layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);Ok(())
-    }
-    /// Cache actual glyph outlines so both icons share one visible height and
-    /// physical-pixel center, independently of font line metrics and hinting.
-    unsafe fn centered_icon(&mut self,text:&str,r:Rect,size:f64,c:u32,family:&str,body:bool)->Result<()>{
-        let key=format!("{text}|{family}|{size}|{}|{}|{}|{}",r.x,r.y,r.w,r.h);
-        if !self.icons.contains_key(&key){
-            let collection=if body{&self.body_fonts}else{&self.system_fonts};
-            let mut index=0;let mut exists=windows::core::BOOL(0);
-            for name in [if body{self.body_family.as_str()}else{family},"Segoe MDL2 Assets"]{
-                let encoded=name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();collection.FindFamilyName(PCWSTR(encoded.as_ptr()),&mut index,&mut exists)?;if exists.as_bool(){break}
-            }
-            if !exists.as_bool(){return Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x80070057u32 as i32)))}
-            let mut face=collection.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STRETCH_NORMAL,DWRITE_FONT_STYLE_NORMAL)?.CreateFontFace()?;
-            if body{face=face.cast::<IDWriteFontFace5>()?.GetFontResource()?.CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE,&[DWRITE_FONT_AXIS_VALUE{axisTag:DWRITE_FONT_AXIS_TAG_WEIGHT,value:400.}])?.cast()?;}
-            let codepoints=text.chars().map(|c|c as u32).collect::<Vec<_>>();let mut glyphs=vec![0u16;codepoints.len()];face.GetGlyphIndices(codepoints.as_ptr(),codepoints.len()as u32,glyphs.as_mut_ptr())?;
-            let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;face.GetGlyphRunOutline(64.,glyphs.as_ptr(),None,None,glyphs.len()as u32,false,false,&sink)?;sink.Close()?;
-            let ink=path.GetBounds(None)?;let height=(ink.bottom-ink.top).max(0.001);let scale=size as f32/height;
-            let dpi=self.dpi as f64/96.;let cx=((r.x+r.w/2.)*dpi).round()/dpi;let cy=((r.y+r.h/2.)*dpi).round()/dpi;
-            let transform=Matrix3x2{M11:scale,M22:scale,M31:cx as f32-(ink.left+ink.right)*0.5*scale,M32:cy as f32-(ink.top+ink.bottom)*0.5*scale,..Default::default()};
-            let geometry=self.factory.CreateTransformedGeometry(&path,&transform)?;self.icons.insert(key.clone(),geometry);
-        }
-        if self.reading_glass{self.brush.SetColor(&color(Self::contrast_outline(c)));self.dc.DrawGeometry(self.icons.get(&key).unwrap(),&self.brush,1.3,None);}
-        self.brush.SetColor(&color(c));self.dc.FillGeometry(self.icons.get(&key).unwrap(),&self.brush,None);Ok(())
-    }
-    pub unsafe fn icon_bounds(&self)->Result<serde_json::Value>{
-        let mut rows=vec![];for (key,geometry) in &self.icons{let r=geometry.GetBounds(None)?;rows.push(serde_json::json!({"glyph":key.split('|').next(),"top":r.top,"bottom":r.bottom,"centerY":(r.top+r.bottom)/2.,"height":r.bottom-r.top}));}Ok(serde_json::json!(rows))
-    }
-    unsafe fn cover_with_opacity(&mut self,x:f64,y:f64,size:f64,opacity:f32,demo:bool)->Result<()>{
-        self.cover_with_radius(x,y,size,size/6.,opacity,demo)
-    }
-    unsafe fn cover_with_radius(&mut self,x:f64,y:f64,size:f64,radius:f64,opacity:f32,demo:bool)->Result<()>{
-        let r=Rect::new(x,y,size,size);self.clip(r,radius,1.)?;self.fill(r,0.,if demo{0xff26324a}else if size>24.{0xff244b42}else{0xff242a31});
-        if let Some(b)=&self.cover {let s=b.GetSize();let edge=s.width.min(s.height);let source=D2D_RECT_F{left:(s.width-edge)/2.,top:(s.height-edge)/2.,right:(s.width+edge)/2.,bottom:(s.height+edge)/2.};self.dc.DrawBitmap(b,Some(&rect(r)),opacity,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
-        else if demo{
-            let center=point(x+size*0.5,y+size*0.5);let disc=D2D1_ELLIPSE{point:center,radiusX:(size*0.36)as f32,radiusY:(size*0.36)as f32};
-            self.brush.SetColor(&color(0xff101723));self.dc.FillEllipse(&disc,&self.brush);
-            self.brush.SetColor(&color(0x804e617c));
-            for radius in [0.30,0.25,0.20]{let groove=D2D1_ELLIPSE{point:center,radiusX:(size*radius)as f32,radiusY:(size*radius)as f32};self.dc.DrawEllipse(&groove,&self.brush,(size*0.008).max(0.45)as f32,None);}
-            self.brush.SetColor(&color(0xffb1e8d1));self.dc.FillEllipse(&D2D1_ELLIPSE{point:center,radiusX:(size*0.105)as f32,radiusY:(size*0.105)as f32},&self.brush);
-            self.brush.SetColor(&color(0xff1a2638));self.dc.FillEllipse(&D2D1_ELLIPSE{point:center,radiusX:(size*0.025)as f32,radiusY:(size*0.025)as f32},&self.brush);
-        }
-        else{self.text_family("♫",r,size*13./24.,400,0xffc5f0dd,"Segoe UI Symbol",true,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
-        self.dc.PopLayer();Ok(())
-    }
-    unsafe fn flipping_cover(&mut self,r:Rect,s:&Scene<'_>)->Result<()>{
-        let radius=crate::layout::cover_corner_radius(s.radius,r.w,r.h);
-        let t=if s.animate{(self.flip_from+(1.-self.flip_from)*s.cover_age_ms/280.).clamp(0.,1.)}else{1.};
-        if t>=1.||self.previous_cover.is_none(){return self.cover_with_radius(r.x,r.y,r.w,radius,s.cover_opacity as f32,s.demo)}
-        let sx=(std::f64::consts::PI*t).cos().abs().max(0.018);let sy=1.-0.06*(std::f64::consts::PI*t).sin();
-        let draw=Rect::new(r.x+r.w*(1.-sx)/2.,r.y+r.h*(1.-sy)/2.,r.w*sx,r.h*sy);
-        let bitmap=if t<0.5{self.previous_cover.clone()}else{self.cover.clone()};
-        self.clip(draw,radius*sx.min(sy),s.cover_opacity as f32)?;self.fill(draw,radius*sx.min(sy),0xff1b2026);
-        if let Some(bitmap)=bitmap{let size=bitmap.GetSize();let edge=size.width.min(size.height);let source=D2D_RECT_F{left:(size.width-edge)/2.,top:(size.height-edge)/2.,right:(size.width+edge)/2.,bottom:(size.height+edge)/2.};self.dc.DrawBitmap(&bitmap,Some(&rect(draw)),1.,D2D1_INTERPOLATION_MODE_LINEAR,Some(&source),None);}
-        self.fill(draw,radius*sx.min(sy),(((1.-sx)*60.)as u32)<<24);self.dc.PopLayer();Ok(())
-    }
-    unsafe fn button(&mut self,id:i32,x:f64,y:f64,size:f64,scene:&Scene<'_>){
-        let disabled=(id==2&&!scene.floating)||(id==9&&!scene.favorite_enabled)||([3,4,5].contains(&id)&&!scene.has_track);
-        let with_alpha=|c:u32|if disabled{0x4d000000|(c&0xffffff)}else{c};
-        if id==4{self.fill(Rect::new(x,y,size,size),size/2.,with_alpha(scene.component_color))}
-        if scene.hover==id{self.fill(Rect::new(x,y,size,size),size/2.,0x18ffffff)}
-        let scale=if scene.pressed==id&&!disabled{0.94}else{1.};let ox=x+(size-16.*scale)/2.;let oy=y+(size-16.*scale)/2.;let c=with_alpha(if id==4{if crate::cover_color::contrast(scene.component_color,0xffffff)>crate::cover_color::contrast(scene.component_color,0){0xffffffff}else{0xff090f18}}else{scene.component_color});
-        let l=|a:(f64,f64),b:(f64,f64)|self.line((ox+a.0*scale,oy+a.1*scale),(ox+b.0*scale,oy+b.1*scale),c,if id==4{2.}else{1.4});
-        match id{
-            2=>{l((8.,1.),(8.,15.));l((1.,8.),(15.,8.));for (a,b) in [((5.,4.),(8.,1.)),((8.,1.),(11.,4.)),((4.,5.),(1.,8.)),((1.,8.),(4.,11.)),((5.,12.),(8.,15.)),((8.,15.),(11.,12.)),((12.,5.),(15.,8.)),((15.,8.),(12.,11.))]{l(a,b)}},
-            3=>{l((3.,2.),(3.,14.));l((14.,2.),(5.,8.));l((5.,8.),(14.,14.));l((14.,14.),(14.,2.));},
-            4=>{if scene.playing{l((5.,2.),(5.,14.));l((11.,2.),(11.,14.));}else{l((4.,2.),(13.,8.));l((13.,8.),(4.,14.));l((4.,14.),(4.,2.));}},
-            5=>{l((13.,2.),(13.,14.));l((2.,2.),(11.,8.));l((11.,8.),(2.,14.));l((2.,14.),(2.,2.));},
-            6=>{let _=self.centered_icon("译",Rect::new(x,y,size,size),13.,c,"Noto Sans SC",true);},
-            7=>{let _=self.centered_icon("\u{e713}",Rect::new(x,y,size,size),13.,c,"Segoe Fluent Icons",false);},
-            9=>{let result=(||->Result<()>{let path=self.factory.CreatePathGeometry()?;let sink=path.Open()?;let p=|x:f64,y:f64|point(ox+x*scale,oy+y*scale);sink.BeginFigure(p(8.,14.),D2D1_FIGURE_BEGIN_HOLLOW);for v in [[4.,11.,1.,8.,1.,5.],[1.,1.,6.,0.,8.,4.],[10.,0.,15.,1.,15.,5.],[15.,8.,12.,11.,8.,14.]]{sink.AddBezier(&D2D1_BEZIER_SEGMENT{point1:p(v[0],v[1]),point2:p(v[2],v[3]),point3:p(v[4],v[5])});}sink.EndFigure(D2D1_FIGURE_END_CLOSED);sink.Close()?;self.brush.SetColor(&color(c));self.dc.DrawGeometry(&path,&self.brush,1.4,None);Ok(())})();let _=result;},_=>{}
-        }
-    }
-    /// Height of the collapsed lyric group and the secondary line size for a
-    /// given font size. Delegates to `compact` so the shell sizes the capsule
-    /// with exactly the numbers used to place the two lines.
-    pub fn compact_metrics(&self,font_size:f64,double:bool,scale:f64)->(f64,f64,f64){
-        crate::compact::group_metrics(font_size,self.body_line_spacing,scale,double)
-    }
-    /// Capsule height that fits the collapsed group with symmetric padding.
-    pub fn compact_height(&self,font_size:f64,double:bool,scale:f64)->f64{
-        crate::compact::capsule_height(font_size,self.body_line_spacing,scale,double)
-    }
-    unsafe fn compact_content(&mut self,s:&Scene<'_>)->Result<()>{
-        let c=s.layout.capsule;let cover=s.layout.compact_cover(s.layout_scale);self.cover_with_opacity(cover.x,cover.y,cover.w,s.cover_opacity as f32,s.demo)?;
-        let round=|v:f64|(v*s.layout_scale).round_ties_even()/s.layout_scale;
-        let double=!s.compact_secondary.is_empty();let(group_h,line_h,secondary_h)=self.compact_metrics(s.font_size,double,s.layout_scale);let secondary_size=(s.font_size*0.78).clamp(9.,11.5);
-        let line_y=c.y+round((c.h-group_h)/2.);
-        let viewport=Rect::new(c.x+round(7.)+30.+round(5.),c.y,c.w-14.-30.-22.-10.,c.h);self.dc.PushAxisAlignedClip(&rect(viewport),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        let t=(s.lyric_age_ms/180.).clamp(0.,1.);let ease=1.-(1.-t).powi(3);let dy=(1.-ease)*5.;let alignment=if double{DWRITE_TEXT_ALIGNMENT_CENTER}else{DWRITE_TEXT_ALIGNMENT_LEADING};
-        if t<1.&&!s.previous_lyric.is_empty(){self.text_family(s.previous_lyric,Rect::new(viewport.x,line_y+s.outgoing_y+(-5.-s.outgoing_y)*ease,viewport.w,line_h),s.font_size,500,((255.*s.outgoing_opacity*(1.-t))as u32)<<24|0x00f1f3f5,"Noto Sans SC",false,alignment,None)?;}
-        let a=(255.*t)as u32;
-        let measured=if double{self.measure_line(s.lyric,s.font_size)?.min(viewport.w)}else{viewport.w};let text_x=if double{viewport.x+(viewport.w-measured)/2.}else{viewport.x};let boundary=((text_x+measured*s.highlight.clamp(0.,1.))*s.layout_scale).round()/s.layout_scale;
-        for (clip,c) in [(Rect::new(viewport.x,viewport.y,(boundary-viewport.x).max(0.),viewport.h),s.progress_color&0xffffff),(Rect::new(boundary,viewport.y,(viewport.x+viewport.w-boundary).max(0.),viewport.h),0x00f1f3f5)]{
-            if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(viewport.x,line_y+dy,viewport.w,line_h),s.font_size,500,(a<<24)|c,"Noto Sans SC",false,alignment,None)?;self.dc.PopAxisAlignedClip();}
-        }
-        if double{if t<1.&&!s.previous_compact_secondary.is_empty(){self.text_family(s.previous_compact_secondary,Rect::new(viewport.x,line_y+line_h+1.-5.*ease,viewport.w,secondary_h),secondary_size,400,((160.*(1.-t))as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}self.text_family(s.compact_secondary,Rect::new(viewport.x,line_y+line_h+1.+dy,viewport.w,secondary_h),secondary_size,400,((190.*t)as u32)<<24|0x00ced4dc,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_CENTER,None)?;}
-        self.dc.PopAxisAlignedClip();
-        for (i,h) in [10.,14.,8.].iter().enumerate(){let scale=s.activity_scales[i];self.fill(Rect::new(c.x+c.w-22.+i as f64*4.,c.y+c.h/2.-h*scale/2.,2.,h*scale),1.,((255.*s.activity_opacity)as u32)<<24|(s.progress_color&0xffffff));}
-        Ok(())
-    }
-    unsafe fn expanded_content(&mut self,s:&Scene<'_>)->Result<()>{
-        let w=s.layout.card.w;
-        let g=crate::layout::music_geometry(w,s.music_layout,s.music_mix,s.layout_scale,s.font_size);
-        let lyric_width=self.measure_line(s.lyric,s.font_size+2.)?.min(g.lyric.w);
-        // One anchor for every layout: 0 leading, 0.5 centred, 1 trailing. The settings
-        // preview reads the same number, so both places place the line identically.
-        let lyric_x=g.lyric.x+(g.lyric.w-lyric_width)*g.align;
-        let sub_width=self.measure_line(s.secondary,10.5)?.min(g.secondary.w);
-        let sub_x=g.secondary.x+(g.secondary.w-sub_width)*g.align;
-        let secondary=0xb8000000|(s.text_color&0xffffff);
-        // Artwork, text, status, timeline and controls all share one geometry with hit testing.
-        self.flipping_cover(g.cover,s)?;
-        self.text(s.title,Rect::new(g.title.x,g.title.y,g.title.w,g.title.h),16.,600,s.text_color)?;
-        self.text(s.artist,Rect::new(g.artist.x,g.artist.y,g.artist.w,g.artist.h),10.,400,secondary)?;
-        let lyric_t=(s.lyric_age_ms/180.).clamp(0.,1.);let lyric_y=4.*(1.-lyric_t).powi(3);
-        let boundary=lyric_x+lyric_width*s.highlight.clamp(0.,1.);
-        for (clip,ink) in [(Rect::new(lyric_x,g.lyric.y,(boundary-lyric_x).max(0.),g.lyric.h+5.),s.progress_color),(Rect::new(boundary,g.lyric.y,(lyric_x+lyric_width-boundary).max(0.),g.lyric.h+5.),s.text_color)]{if clip.w>0.{self.dc.PushAxisAlignedClip(&rect(clip),D2D1_ANTIALIAS_MODE_ALIASED);self.text_family(s.lyric,Rect::new(lyric_x,g.lyric.y+lyric_y,lyric_width,g.lyric.h),s.font_size+2.,500,((255.*lyric_t)as u32)<<24|(ink&0xffffff),"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(g.lyric.h))?;self.dc.PopAxisAlignedClip();}}
 
-        self.text(s.secondary,Rect::new(sub_x,g.secondary.y,sub_width,g.secondary.h),10.5,400,secondary)?;
-        let breath=if s.playing&&s.animate{0.68+0.32*(s.time_ms/2600.*std::f64::consts::TAU).sin()}else{1.};
-        let dot=4.+if s.playing&&s.animate{0.8*breath}else{0.};
-        // Use the secondary lyric's actual baseline on the side layout, including language fallback.
-        let secondary_line=10.5*self.body_line_spacing;let split=g.split.clamp(0.,1.);let status_line=secondary_line;
-        let secondary_baseline=g.secondary.y+secondary_line*self.baseline_ratio(&self.language_family(s.secondary));
-        let title_baseline=g.title.y+16.*self.body_line_spacing*self.baseline_ratio(&self.language_family(s.title));
-        let mut status_rect=g.status_text;
-        status_rect.y=secondary_baseline*(1.-split)+title_baseline*split-status_line*self.baseline_ratio(&self.body_family);
-        // The dot rides the status line box instead of the static geometry, so its centre stays
-        // on the words even though the baseline is recomputed per layout and per language.
-        let cx=g.status_dot.x+g.status_dot.w/2.;let cy=status_rect.y+status_line*0.57;
-        self.fill(Rect::new(cx-dot/2.,cy-dot/2.,dot,dot),dot/2.,((255.*breath)as u32)<<24|(s.progress_color&0xffffff));
-        self.text_family(if !s.has_track{"等待播放"}else if s.playing{"正在播放"}else{"已暂停"},status_rect,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_LEADING,Some(status_line))?;
-        let track=g.track;let progress=track.w*s.progress.clamp(0.,1.);
-        self.fill(track,1.5,if s.cover_background&&self.cover.is_some(){0xff000000|crate::cover_color::mix(self.cover_palette.background,s.component_color,0.18)}else{0xff343b45});
-        self.fill(Rect::new(track.x,track.y,progress,track.h),1.5,s.component_color);
-        let size=if s.pressed==10{13.}else if s.hover==10{11.}else{7.};
-        self.fill(Rect::new(track.x+progress-size/2.,track.y+track.h/2.-size/2.,size,size),size/2.,s.component_color);
-        self.text(&time(s.elapsed),g.elapsed,9.,400,secondary)?;
-        let total=if s.duration>0.{time(s.duration)}else{"--:--".into()};
-        self.text_family(&total,g.total,9.,400,secondary,"Noto Sans SC",false,DWRITE_TEXT_ALIGNMENT_TRAILING,None)?;
-        for (id,r) in g.buttons{self.button(id,r.x,r.y,r.w,s);}
-        Ok(())
-    }
-    unsafe fn draw_layer(&self,bitmap:&ID2D1Bitmap1,blur:f64,opacity:f32,transform:Matrix3x2,clip:(Rect,f64))->Result<()>{
-        self.dc.SetTransform(&identity());self.clip(clip.0,clip.1,opacity)?;self.dc.SetTransform(&transform);
-        if blur>0.05{self.blur.SetInput(0,bitmap,true);self.blur.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&((blur/3.)as f32).to_ne_bytes())?;self.dc.DrawImage(&self.blur.GetOutput()?,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);}
-        else{self.dc.DrawImage(bitmap,None,None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);}
-        self.dc.PopLayer();self.dc.SetTransform(&identity());Ok(())
-    }
-    pub unsafe fn render(&mut self,s:&Scene<'_>,present:bool)->Result<()>{
-        let mut themed=*s;if s.panel.is_some()&&s.material==Material::Classic{themed.cover_background=false;}if self.cover.is_some(){let accent=0xff000000|self.cover_palette.accent;if themed.cover_background{themed.component_color=accent;}if s.lyric_cover_color{themed.progress_color=accent;}}let s=&themed;
-        let (base_shape,base_radius)=s.layout.morph_shape(s.frame.card_reveal,s.radius,s.fluid_motion);let p=s.frame.card_reveal;
-        let (shape,radius)=if s.notification.is_some(){(s.notification_rect,s.notification_radius)}else if s.osd.is_some(){(s.osd_rect,s.osd_radius)}else{(base_shape,base_radius)};
-        let music_alpha=if s.notification.is_some(){1.-s.notification_mix}else if s.osd.is_some(){1.-s.osd_mix}else{1.};
-        if (1.-blend(p,0.06,0.46))*music_alpha>0.001 {self.dc.SetTarget(&self.compact);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.capsule.w;
-            if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,0.));self.compact_view(&neighbor)?;}
-            if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width+s.swipe_offset,0.));self.compact_view(&old)?;}
-            self.dc.SetTransform(&matrix(1.,s.switch_offset+s.swipe_offset,0.));self.compact_view(s)?;self.dc.EndDraw(None,None)?;}
-        if s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha>0.001 {self.dc.SetTarget(&self.expanded);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));let width=s.layout.card.w;
-            if s.drag_active{let mut neighbor=*s;neighbor.panel=s.drag_panel;self.dc.SetTransform(&matrix(1.,s.swipe_offset-s.swipe_offset.signum()*width,s.frame.content_offset_y));self.expanded_view(&neighbor)?;}
-            if s.switching&&s.switch_outgoing{let mut old=*s;old.panel=s.previous_panel;self.dc.SetTransform(&matrix(1.,s.switch_offset-s.switch_direction*width,s.frame.content_offset_y));self.expanded_view(&old)?;}
-            self.dc.SetTransform(&matrix(1.,s.switch_offset+s.swipe_offset,s.frame.content_offset_y));self.expanded_view(s)?;self.dc.EndDraw(None,None)?;}
-        if self.shadow_shape!=Some((shape,radius)){self.dc.SetTarget(&self.shadow);self.dc.BeginDraw();self.dc.SetTransform(&identity());self.dc.Clear(Some(&color(0)));self.fill(shape,radius,0x01000000);self.brush.SetColor(&color(0xff000000));self.dc.DrawRoundedRectangle(&rounded(shape,radius),&self.brush,1.,None);self.dc.EndDraw(None,None)?;self.shadow_shape=Some((shape,radius));}
-        self.dc.SetTarget(&self.screen);self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));self.dc.SetTransform(&identity());
-        // One opacity layer for pause/show fades. Geometry remains fixed.
-        self.clip(Rect::new(0.,0.,s.layout.host.w,s.layout.host.h),0.,s.opacity)?;
-        self.shadow_fx.SetInput(0,&self.shadow,true);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,D2D1_PROPERTY_TYPE_FLOAT,&(22_f32/3.).to_ne_bytes())?;
-        let shadow_color=[0_f32,0.,0.,if s.mini&&p<0.01&&s.notification_mix.max(s.osd_mix)<0.01{0.04}else{0.22}];let bytes=std::slice::from_raw_parts(shadow_color.as_ptr()as *const u8,16);self.shadow_fx.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32,D2D1_PROPERTY_TYPE_VECTOR4,bytes)?;
-        self.dc.DrawImage(&self.shadow_fx.GetOutput()?,Some(&point(0.,5.)),None,D2D1_INTERPOLATION_MODE_LINEAR,D2D1_COMPOSITE_MODE_SOURCE_OVER);
-        self.material_surface(shape,radius,crate::surface::Surface{
-            material:s.material,reveal:p,overlay:s.notification_mix.max(s.osd_mix),
-            compact:if s.mini{s.mini_capsule}else{s.classic_capsule},mini:s.mini,
-            transparent:s.transparent,cover_background:s.cover_background,
-        })?;
-        let content_scale=(base_shape.w/s.layout.card.w).min(base_shape.h/s.layout.card.h);
-        let tx=base_shape.x+(base_shape.w-s.layout.card.w*content_scale)/2.;let ty=base_shape.y+(base_shape.h-s.layout.card.h*content_scale)/2.;
-        let alpha=s.frame.content_opacity*blend(p,0.25,0.88)*music_alpha;
-        if alpha>0.001{self.draw_layer(&self.expanded,if s.resizing{s.frame.card_blur}else{0.},alpha as f32,matrix(content_scale,tx,ty),(shape,radius))?;}
-        let alpha=(1.-blend(p,0.06,0.46))*music_alpha;
-        if alpha>0.001{self.draw_layer(&self.compact,if s.resizing{3.*blend(p,0.06,0.4)}else{0.},alpha as f32,matrix(1.,base_shape.x-s.layout.capsule.x,base_shape.y-s.layout.capsule.y),(shape,radius))?;}
-        if !s.mini&&s.component_count>1&&s.frame.card_reveal<0.06&&s.notification.is_none()&&s.osd.is_none(){self.satellite(s)?;}
-        if let Some(notice)=s.notification{self.clip(shape,radius,s.notification_mix as f32)?;self.notification_content(notice,shape)?;self.dc.PopLayer();}
-        if let Some(osd)=s.osd{self.clip(shape,radius,s.osd_mix as f32)?;self.osd_content(osd,shape)?;self.dc.PopLayer();}
-        self.dc.PopLayer();self.dc.EndDraw(None,None)?;
-        if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;}Ok(())
-    }
-    pub unsafe fn set_notification_icon(&mut self,bytes:Option<&[u8]>)->std::result::Result<(),Box<dyn std::error::Error>>{
-        let music_cover=self.cover.take();let previous=self.previous_cover.take();let changed=self.cover_changed;let flip_from=self.flip_from;let palette=self.cover_palette;let result=self.load_cover(bytes,false);self.notification_icon=self.cover.take();self.cover=music_cover;self.previous_cover=previous;self.cover_changed=changed;self.flip_from=flip_from;self.cover_palette=palette;result
-    }
-    unsafe fn notification_layout(&mut self,text:&str,r:Rect,size:f64,weight:i32)->Result<IDWriteTextLayout>{
-        let key=format!("notice|{text}|{}|{}|{size}|{weight}",r.w,r.h);
-        if !self.layouts.contains_key(&key){
-            let resolved=self.language_family(text);let private=resolved==self.body_family||resolved==self.japanese_family;let baseline=self.baseline_ratio(&resolved);let family=resolved.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-            let format=self.write.CreateTextFormat(PCWSTR(family.as_ptr()),if private{&self.body_fonts}else{&self.system_fonts},DWRITE_FONT_WEIGHT(weight),DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size as f32,if resolved==self.japanese_family{w!("ja-JP")}else{w!("zh-CN")})?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;format.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,(size*1.32)as f32,(size*1.32*baseline)as f32)?;
-            let ellipsis=self.write.CreateEllipsisTrimmingSign(&format)?;format.SetTrimming(&DWRITE_TRIMMING{granularity:DWRITE_TRIMMING_GRANULARITY_CHARACTER,..Default::default()},&ellipsis)?;
-            let chars=text.encode_utf16().collect::<Vec<_>>();let layout=self.write.CreateTextLayout(&chars,&format,r.w as f32,r.h as f32)?;
-            layout.cast::<IDWriteTextLayout2>()?.SetFontFallback(&self.fallback)?;layout.cast::<IDWriteTextLayout4>()?.SetFontAxisValues(&[DWRITE_FONT_AXIS_VALUE{axisTag:DWRITE_FONT_AXIS_TAG_WEIGHT,value:weight as f32}],DWRITE_TEXT_RANGE{startPosition:0,length:chars.len()as u32})?;
-            if self.layouts.len()>192{self.layouts.clear()}self.layouts.insert(key.clone(),layout);
-        }
-        Ok(self.layouts.get(&key).unwrap().clone())
-    }
-    pub unsafe fn notification_height(&mut self,n:&crate::notifications::Notice,width:f64)->Result<f64>{
-        if n.body.trim().is_empty(){return Ok(64.)}
-        let layout=self.notification_layout(&n.body,Rect::new(0.,0.,width-100.,34.),12.5,400)?;
-        let mut metrics=DWRITE_TEXT_METRICS::default();layout.GetMetrics(&mut metrics)?;
-        Ok(if metrics.lineCount<=1{80.}else{96.})
-    }
-    unsafe fn notification_text(&mut self,text:&str,r:Rect,size:f64,weight:i32,c:u32)->Result<()>{
-        let layout=self.notification_layout(text,r,size,weight)?;
-        self.brush.SetColor(&color(c));self.dc.DrawTextLayout(point(r.x,r.y),&layout,&self.brush,D2D1_DRAW_TEXT_OPTIONS_CLIP);Ok(())
-    }
-    unsafe fn notification_content(&mut self,n:&crate::notifications::Notice,r:Rect)->Result<()>{
-        let x=r.x;let y=r.y;let icon=Rect::new(x+18.,y+(r.h-40.)/2.,40.,40.);self.clip(icon,10.,1.)?;
-        if n.app_id.starts_with("LyricIsland.Device"){self.device_icon(icon,n.app_id.strip_prefix("LyricIsland.Device.").unwrap_or(""))?;}else if let Some(bitmap)=&self.notification_icon{self.dc.DrawBitmap(bitmap,Some(&rect(icon)),1.,D2D1_INTERPOLATION_MODE_LINEAR,None,None);}
-        else{let initial=n.app_name.chars().next().unwrap_or('•').to_string();self.fill(icon,10.,0xff3188ee);self.text(&initial,Rect::new(icon.x+10.,icon.y+4.,24.,32.),22.,600,0xffffffff)?;}
-        self.dc.PopLayer();
-        self.notification_text(&n.app_name,Rect::new(x+76.,y+10.,r.w-160.,17.),11.5,500,0xffb6bdc8)?;
-        self.notification_text("现在",Rect::new(x+r.w-70.,y+12.,32.,14.),10.,400,0xff8f99a8)?;
-        self.notification_text(&n.title,Rect::new(x+76.,y+27.,r.w-100.,21.),14.,600,0xfff4f6f8)?;
-        self.notification_text(&n.body,Rect::new(x+76.,y+49.,r.w-100.,34.),12.5,400,0xffd2d7df)?;
-        self.line((x+r.w-24.,y+14.),(x+r.w-17.,y+21.),0xffa6afbc,1.2);self.line((x+r.w-17.,y+14.),(x+r.w-24.,y+21.),0xffa6afbc,1.2);Ok(())
-    }
-    pub unsafe fn snapshot(&self,path:&Path)->std::result::Result<(),Box<dyn std::error::Error>>{
-        let cpu=self.dc.CreateBitmap(D2D_SIZE_U{width:self.width,height:self.height},None,0,&D2D1_BITMAP_PROPERTIES1{pixelFormat:D2D1_PIXEL_FORMAT{format:DXGI_FORMAT_B8G8R8A8_UNORM,alphaMode:D2D1_ALPHA_MODE_PREMULTIPLIED},dpiX:self.dpi,dpiY:self.dpi,bitmapOptions:D2D1_BITMAP_OPTIONS_CPU_READ|D2D1_BITMAP_OPTIONS_CANNOT_DRAW,..Default::default()})?;
-        cpu.CopyFromBitmap(None,&self.screen,None)?;let map=cpu.Map(D2D1_MAP_OPTIONS_READ)?;let mut bytes=vec![0u8;(self.width*self.height*4)as usize];
-        for y in 0..self.height as usize{let row=std::slice::from_raw_parts(map.bits.add(y*map.pitch as usize),self.width as usize*4);for x in 0..self.width as usize{let src=&row[x*4..x*4+4];let dst=&mut bytes[(y*self.width as usize+x)*4..][..4];let a=src[3]as u32;for (j,k) in [2,1,0].iter().enumerate(){dst[j]=if a>0{((src[*k]as u32*255+a/2)/a).min(255)as u8}else{0};}dst[3]=src[3];}}
-        cpu.Unmap()?;image::save_buffer(path,&bytes,self.width,self.height,image::ColorType::Rgba8)?;Ok(())
-    }
-}
-fn time(s:f64)->String{let s=s.max(0.)as u64;format!("{:02}:{:02}",s/60,s%60)}
+include!("expressive.rs");
 
-
-
-
-
-
-include!("tool_renderer.rs");
-include!("mini_renderer.rs");
-
-impl Renderer{
- pub unsafe fn render_bottom_osd(&mut self,n:&crate::notifications::Notice,opacity:f64,offset:f64,surface:crate::surface::Surface,present:bool)->Result<()>{
-  self.dc.SetTarget(&self.screen);self.dc.SetTransform(&identity());self.dc.BeginDraw();self.dc.Clear(Some(&color(0)));
-  let r=Rect::new(16.,12.+offset,240.,44.);self.clip(Rect::new(0.,0.,272.,80.),0.,opacity as f32)?;
-  self.fill(Rect::new(r.x,r.y+2.,r.w,r.h),22.,0x25000000);self.material_surface(r,22.,surface)?;
-  self.osd_content(n,r)?;self.dc.PopLayer();self.dc.EndDraw(None,None)?;
-  if present{self.swap.Present(1,DXGI_PRESENT(0)).ok()?;self._composition.Commit()?;}Ok(())
- }
-}
+include!("dynamic_painter.rs");
