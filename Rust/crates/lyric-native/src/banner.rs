@@ -1,15 +1,18 @@
 //! A critically damped, interruptible notification surface. Typography is never
 //! scaled with the shell. Position and velocity survive retargets.
 use crate::{layout::Rect,notifications::Notice};
-#[derive(Clone,Copy,Default)]struct Spring{from:f64,to:f64,velocity:f64,time:f64}
-impl Spring {
-    fn sample(self,now:f64)->(f64,f64){let t=(now-self.time).max(0.);let omega=22.;let d=self.from-self.to;let b=self.velocity+omega*d;let e=(-omega*t).exp();(self.to+(d+b*t)*e,(self.velocity-omega*b*t)*e)}
-    fn retarget(&mut self,to:f64,now:f64){let (from,velocity)=self.sample(now);*self=Self{from,to,velocity,time:now};}
-    fn snap(&mut self,to:f64,now:f64){*self=Self{from:to,to,time:now,velocity:0.};}
+use lyric_core::shared_motion::{Track,Scheme,Kind,Speed};
+#[derive(Clone,Copy,Debug)]struct Spring{track:Track,to:f64}
+impl Default for Spring{fn default()->Self{Self{track:Track::default(),to:0.}}}
+impl Spring{
+ fn sample(self,now:f64)->(f64,f64){self.track.sample(now)}
+ fn retarget(&mut self,to:f64,now:f64){self.track.retarget(to,now);self.to=to;}
+ fn snap(&mut self,to:f64,now:f64){self.track.snap(to,now);self.to=to;}
 }
 pub struct Banner {pub notice:Option<Notice>,motion:[Spring;6],pub open:bool,deadline:f64,changed:f64,compact:bool}
-impl Default for Banner {fn default()->Self{Self{notice:None,motion:[Spring::default();6],open:false,deadline:0.,changed:0.,compact:false}}}
+impl Default for Banner {fn default()->Self{Self{notice:None,motion:std::array::from_fn(|i|Spring{track:Track::new(0.,if i==5{Kind::Effects}else{Kind::Spatial},Speed::Default),to:0.}),open:false,deadline:0.,changed:0.,compact:false}}}
 impl Banner {
+    pub fn configure(&mut self,scheme:Scheme,pace:f64,now:f64){for(i,s)in self.motion.iter_mut().enumerate(){s.track.configure(scheme,if i==5{Kind::Effects}else{Kind::Spatial},if self.compact{Speed::Fast}else{Speed::Default},pace,now);}}
     pub fn visible(&self)->bool{self.notice.is_some()}
     /// Whether the hold has run out. The shell asks this so a queued message can take
     /// over the open surface instead of closing it and opening it again.

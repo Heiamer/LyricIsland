@@ -6,6 +6,7 @@ pub mod media;
 pub mod netease;
 pub mod netease_control;
 mod netease_window;
+mod netease_attention;
 mod netease_cdp;
 mod media_commands;
 pub mod clock;

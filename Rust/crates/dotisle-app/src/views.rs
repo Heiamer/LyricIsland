@@ -2,7 +2,7 @@
 use vello::{Scene,kurbo::{Rect,Affine,BezPath,Stroke},peniko::{Fill}};
 use crate::{draw::{self,Icon,Text,rect},widgets::{Ui,Hit},model::{Model,Page,Action,DialogKind}};
 pub const TITLEBAR_H:f64=56.;
-#[derive(Default)]pub struct ViewState{pub tutorial_time:Option<f64>,pub selection_values:std::collections::HashMap<String,f64>,pub press_layers:Vec<f64>,pub rail_target:Option<f64>,pub switches:std::collections::HashMap<String,f64>,pub color_scheme:Option<dotisle_domain::monet::Scheme>,pub state_layers:Vec<f32>,pub page_enter:Option<f64>,pub media_position:Option<f64>,pub pointer:(f64,f64),pub focus:Option<usize>,pub pressed:Option<usize>,pub rail_y:f64,pub satellite:f64,pub cloud_open:f64,pub time:f64,pub swipe:f64,pub maximized:bool}
+#[derive(Default)]pub struct ViewState{pub tutorial_time:Option<f64>,pub selection_values:std::collections::HashMap<String,f64>,pub press_layers:Vec<f64>,pub rail_target:Option<f64>,pub switches:std::collections::HashMap<String,f64>,pub color_scheme:Option<dotisle_domain::monet::Scheme>,pub state_layers:Vec<f32>,pub page_enter:Option<f64>,pub page_effect:Option<f64>,pub media_position:Option<f64>,pub pointer:(f64,f64),pub focus:Option<usize>,pub pressed:Option<usize>,pub rail_y:f64,pub satellite:f64,pub cloud_open:f64,pub time:f64,pub swipe:f64,pub maximized:bool}
 pub struct View{pub motion_targets:Vec<(String,f64)>,pub scene:Scene,pub hits:Vec<Hit>,pub max_scroll:f64}
 fn page_icon(page:Page)->Icon{match page{Page::Home=>Icon::Home,Page::Music=>Icon::Music,Page::Focus=>Icon::Focus,Page::Todos=>Icon::Todo,Page::Island=>Icon::Island,Page::Settings=>Icon::Settings}}
 fn caption_button(ui:&mut Ui,x:f64,kind:Icon,label:&'static str,action:Action,close:bool){
@@ -40,7 +40,7 @@ pub fn render(model:&Model,text:&mut Text,width:f64,height:f64,state:&ViewState)
     ui.label(model.page.label(),x,101.,40.,s.on_surface,true,w-220.);ui.label(model.page.description(),x,159.,15.,s.on_surface_variant,false,w-220.);
     if model.page==Page::Todos{ui.button(rect(width-198.,118.,162.,52.),"新建待办",Some(Icon::Plus),Action::EditTodo(None),false,true);}
     let clip=Rect::new(x-4.,203.,width-24.,height-20.);ui.clip(clip);
-    let enter=if model.prefs.reduced_motion{1.}else{state.page_enter.unwrap_or(1.)};let e=enter.clamp(0.,1.);ui.scene.push_layer(vello::peniko::Mix::Normal,(0.82+0.18*e)as f32,Affine::IDENTITY,&clip);let y=212.-model.scroll+12.*(1.-e);
+    let enter=if model.prefs.reduced_motion{1.}else{state.page_enter.unwrap_or(1.)};let e=enter.clamp(0.,1.);ui.scene.push_layer(vello::peniko::Mix::Normal,(0.82+0.18*state.page_effect.unwrap_or(e).clamp(0.,1.))as f32,Affine::IDENTITY,&clip);let y=212.-model.scroll+12.*(1.-e);
     let bottom=match model.page{Page::Home=>home(&mut ui,model,x,y,w,state),Page::Music=>music(&mut ui,model,x,y,w,state),Page::Focus=>focus(&mut ui,model,x,y,w),Page::Todos=>todos(&mut ui,model,x,y,w),Page::Island=>crate::island_settings::render(&mut ui,model,x,y,w,state),Page::Settings=>settings(&mut ui,model,x,y,w)};
     ui.scene.pop_layer();ui.end_clip(window);
     let max_scroll=(bottom+model.scroll-(height-28.)).max(0.);
@@ -54,16 +54,10 @@ pub fn render(model:&Model,text:&mut Text,width:f64,height:f64,state:&ViewState)
 }
 fn record(ui:&mut Ui,m:&Model,r:Rect,_flower:bool){if let Some(a)=&m.artwork{draw::image(ui.scene,&a.image,r,15.);}else{draw::fill(ui.scene,r,15.,ui.s.secondary_container);let size=r.width().min(r.height())*0.32;draw::icon(ui.scene,Icon::Music,r.center().x-size/2.,r.center().y-size/2.,size,ui.s.on_surface_variant);}}
 fn player_controls(ui:&mut Ui,m:&Model,x:f64,y:f64,large:bool){
-    let s=ui.s;let size=if large{64.}else{52.};let pad=(size-44.)/2.;let colors=dotisle_domain::music_controls::skip_colors(s.primary_container,s.on_primary_container);let disc=colors.background;
-    // Pair skip ink with its actual disc, rather than the unrelated page surface role.
-    for r in [rect(x-2.,y+pad-2.,48.,48.),rect(x+size+66.,y+pad-2.,48.,48.)]{draw::fill(ui.scene,r,24.,disc);}
-    ui.s.on_surface_variant=colors.foreground;
-    ui.icon_button(rect(x,y+pad,44.,44.),Icon::Prev,"上一首",Action::Media("previous"),false,m.track());
-    ui.s=s;
+    let s=ui.s;let size=if large{64.}else{52.};let pad=(size-44.)/2.;let ink=dotisle_domain::music_controls::on_surface(s.primary_container,s.on_primary_container);
+    ui.s.on_surface_variant=ink;ui.icon_button(rect(x,y+pad,44.,44.),Icon::Prev,"上一首",Action::Media("previous"),false,m.track());ui.s=s;
     ui.icon_button(rect(x+56.,y,size,size),if m.playing(){Icon::Pause}else{Icon::Play},if m.playing(){"暂停播放"}else{"开始播放"},Action::Media("toggle"),true,m.track());
-    ui.s.on_surface_variant=colors.foreground;
-    ui.icon_button(rect(x+size+68.,y+pad,44.,44.),Icon::Next,"下一首",Action::Media("next"),false,m.track());
-    ui.s=s;
+    ui.s.on_surface_variant=ink;ui.icon_button(rect(x+size+68.,y+pad,44.,44.),Icon::Next,"下一首",Action::Media("next"),false,m.track());ui.s=s;
 }
 fn progress(ui:&mut Ui,m:&Model,r:Rect,state:&ViewState){let duration=m.snapshot["track"]["durationSeconds"].as_f64().unwrap_or(0.);let pos=state.media_position.unwrap_or_else(||m.snapshot["positionSeconds"].as_f64().unwrap_or(0.));ui.slider(r,if duration>0.{pos/duration}else{0.},m.track()&&m.snapshot["canSeek"].as_bool().unwrap_or(false),if m.playing()&&!m.prefs.reduced_motion{state.time*2.}else{0.});ui.label(&dotisle_domain::timers::format_time(pos.max(0.)as u64),r.x0,r.y1+2.,11.,ui.s.on_surface_variant,false,80.);let total=dotisle_domain::timers::format_time(duration.max(0.)as u64);ui.label(&total,r.x1-42.,r.y1+2.,11.,ui.s.on_surface_variant,false,60.);}
 fn home(ui:&mut Ui,m:&Model,x:f64,y:f64,w:f64,state:&ViewState)->f64{

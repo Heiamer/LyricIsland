@@ -32,7 +32,7 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
  println!("Jump result: {}",jump);
  let restored=restore.restore();println!("Restore result: {}",restored);backend.close();
  let success=jump["command"]["state"]=="confirmed"&&restored["command"]["state"]=="confirmed"&&jump["playing"]==before["isPlaying"]&&restored["playing"]==before["isPlaying"];
- let report=json!({"success":success,"scope":"one real loopback CDP seek and restore, production Backend queue and real native timeline acknowledgements; no OS pointer or keyboard input","before":{"track":before["track"],"position":position,"playing":before["isPlaying"],"canSeek":before["canSeek"]},"requested":target,"jump":jump,"restore":restored});
+ let report=json!({"attention":lyric_backend::netease_control::attention_diagnostics(),"success":success,"scope":"one real loopback CDP seek and restore, production Backend queue and real native timeline acknowledgements; no OS pointer or keyboard input","before":{"track":before["track"],"position":position,"playing":before["isPlaying"],"canSeek":before["canSeek"]},"requested":target,"jump":jump,"restore":restored});
  std::fs::write(directory.join("report.json"),serde_json::to_vec_pretty(&report)?)?;
  if !success{return Err("Live seek/restore did not both confirm; inspect report".into())}Ok(())
 }

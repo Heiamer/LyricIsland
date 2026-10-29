@@ -26,7 +26,7 @@ impl Backend{
         let previous_line=if frame.current_line_index>0{s.sync.current_document().and_then(|d|d.lines.get(frame.current_line_index as usize-1)).map(|line|line.text.as_str()).unwrap_or("")}else{""};
         let track=playback.track.as_ref().map(|t|json!({"id":t.id,"title":t.title,"artist":t.artist,"album":t.album,"sourceApp":t.source_app,"durationSeconds":t.duration.as_secs_f64(),"songId":t.song_id}));
         let cover=if s.cover_version!=last_cover{s.cover.as_ref().map(|b|STANDARD.encode(b))}else{None};
-        json!({"version":env!("CARGO_PKG_VERSION"),"backend":"Rust","track":track,"isPlaying":playback.is_playing,"positionSeconds":playback.position.as_secs_f64(),"rawSeconds":playback.raw_position.map(|p|p.as_secs_f64()),"sourceId":playback.source_app_user_model_id,"activeSource":s.active.as_ref().and_then(|a|a.SourceAppUserModelId().ok()).map(|s|s.to_string()),"canSeek":playback.can_seek,"seekStatus":if s.netease_ready{"网易云后台进度控制已连接"}else if s.smtc_can_seek{"系统媒体进度控制"}else{"播放器尚未提供静默进度通道"},"mediaCommand":s.media_command,"isCoverLoading":playback.is_cover_loading,"coverVersion":s.cover_version,"cover":cover,"artworkIdentity":s.artwork_identity,"durationSource":s.duration_source,"nativeStatus":s.native_status,"nativeError":s.native_error,"events":s.events,"localClock":s.clock.local,"clockStatus":s.clock.status,"lyricSource":s.sync.current_lyric_source_app(),"frame":{"previousLine":previous_line,"currentLine":frame.current_line,"nextLine":frame.next_line,"title":frame.title,"lineProgress":frame.line_progress,"currentLineIndex":frame.current_line_index,"isPureMusic":frame.is_pure_music,"wordScanProgress":frame.word_scan_progress,"currentTranslation":frame.current_translation,"nextTranslation":frame.next_translation,"hasTrackTranslation":frame.has_track_translation}})
+        json!({"version":env!("CARGO_PKG_VERSION"),"backend":"Rust","track":track,"isPlaying":playback.is_playing,"positionSeconds":playback.position.as_secs_f64(),"rawSeconds":playback.raw_position.map(|p|p.as_secs_f64()),"sourceId":playback.source_app_user_model_id,"activeSource":s.active.as_ref().and_then(|a|a.SourceAppUserModelId().ok()).map(|s|s.to_string()),"canSeek":playback.can_seek,"seekStatus":if s.netease_ready{"网易云后台进度控制已连接"}else if s.smtc_can_seek{"系统媒体进度控制"}else{"播放器尚未提供静默进度通道"},"neteaseAttention":crate::netease_attention::diagnostics(),"mediaCommand":s.media_command,"isCoverLoading":playback.is_cover_loading,"coverVersion":s.cover_version,"cover":cover,"artworkIdentity":s.artwork_identity,"durationSource":s.duration_source,"nativeStatus":s.native_status,"nativeError":s.native_error,"events":s.events,"localClock":s.clock.local,"clockStatus":s.clock.status,"lyricSource":s.sync.current_lyric_source_app(),"frame":{"previousLine":previous_line,"currentLine":frame.current_line,"nextLine":frame.next_line,"title":frame.title,"lineProgress":frame.line_progress,"currentLineIndex":frame.current_line_index,"isPureMusic":frame.is_pure_music,"wordScanProgress":frame.word_scan_progress,"currentTranslation":frame.current_translation,"nextTranslation":frame.next_translation,"hasTrackTranslation":frame.has_track_translation}})
     }
 
     pub fn enqueue(self:&Arc<Self>,action:&str,seconds:f64)->Result<u64,String>{
@@ -66,6 +66,7 @@ impl Backend{
             (session,s.playback.is_playing,s.playback.track.as_ref().map(|t|t.duration.as_secs_f64()).unwrap_or(0.),s.netease_target.clone().filter(|_|s.netease_ready&&s.netease_sample.as_ref().is_some_and(|n|(0..800).contains(&(unix_ms()-n.captured_ms)))),s.netease_sample.as_ref().map(|n|n.song_id.clone()).unwrap_or_default(),crate::netease_control::cdp_port(&s.settings)) };
         if action=="seek"{
             let seconds=crate::netease_control::bounded_target(seconds,duration)?;
+            for attempt in 0..2{
             let sent_ms=unix_ms();let mut sent=false;let mut route="SMTC";let mut dispatched_target=seconds;
             if let Some(target)=native.as_ref(){
                 let valid=||!self.closed.load(Ordering::Acquire)&&self.state.lock().is_ok_and(|s|s.track_key==key&&s.netease_target.as_ref()==Some(target)&&s.netease_sample.as_ref().is_some_and(|n|n.song_id==song_id&&(0..800).contains(&(unix_ms()-n.captured_ms))));
@@ -84,6 +85,9 @@ impl Backend{
                 }
                 if route=="SMTC"{if let Some(session)=session.as_ref(){if let Ok(t)=session.GetTimelineProperties(){if let (Ok(position),Ok(updated))=(t.Position(),t.LastUpdatedTime()){let captured=updated.UniversalTime/10000-11644473600000;if crate::netease_control::acknowledged(seconds,position.Duration as f64/10000000.,before,sent_ms,captured,unix_ms()){return Ok(true)}}}}}
                 std::thread::sleep(Duration::from_millis(40));
+            }
+            if route!="NeteaseBackground"||attempt==1{break}
+            io::log(&self.logs,"MEDIA_CMD","NetEase seek not acknowledged; retrying once after a fresh track/command check");
             }
             Err("播放器未确认进度跳转，请重试；不会用本地计时冒充成功".into())
         }else{

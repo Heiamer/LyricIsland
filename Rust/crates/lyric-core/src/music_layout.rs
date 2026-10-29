@@ -17,17 +17,14 @@ pub fn music_height(mix:f64,font:f64)->f64{220.+16.*(mix*2.).clamp(0.,1.)+(font+
 /// The v2.1.6 native layout transition: 230 ms, with zero speed at both ends.
 /// Both the island and the settings preview use this exact timing.
 pub fn music_layout_mix(from:f64,target:f64,elapsed_seconds:f64)->f64{
-    let t=(elapsed_seconds/0.23).clamp(0.,1.);
-    if t>=1.{return target}
-    let e=t*t*(3.-2.*t);
-    from+(target-from)*e
+ let spec=crate::shared_motion::Spec::token(crate::shared_motion::Scheme::Expressive,crate::shared_motion::Kind::Spatial,crate::shared_motion::Speed::Default);let(value,velocity)=spec.sample(from,target,0.,elapsed_seconds);if(value-target).abs()<0.00001&&velocity.abs()<0.0001{target}else{value}
 }
 /// The expanded music layouts. This is a layout type, not a set of switches.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum MusicLayout { Separated, SideBySide, LyricFocus, LyricRight, Immersive }
 impl MusicLayout {
     pub fn position(self)->f64{match self{Self::SideBySide=>0.,Self::Separated=>1.,Self::LyricFocus=>2.,Self::LyricRight=>3.,Self::Immersive=>4.}}
-    pub fn from_setting(value:&str)->Self{match value{"Separated"=>Self::Separated,"LyricFocus"=>Self::LyricFocus,"LyricRight"=>Self::LyricRight,"Immersive"=>Self::Immersive,_=>Self::SideBySide}}
+    pub fn from_setting(value:&str)->Self{match value{"Separated"=>Self::Separated,"LyricFocus"=>Self::LyricFocus,"Immersive"=>Self::Immersive,_=>Self::SideBySide}}
 }
 /// Everything drawing, hit testing and seek share for one expanded music card.
 ///

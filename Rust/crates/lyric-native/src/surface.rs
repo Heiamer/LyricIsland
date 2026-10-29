@@ -41,7 +41,7 @@ impl Surface{
         let top=cover_color::mix(top,0xdfefff,0.08*reflection);
         // Acrylic frosts the whole plane, so a capsule set to acrylic reads exactly like an
         // acrylic card instead of falling back to the flat classic strip.
-        let frost=match self.material{Material::Classic=>0.,Material::Acrylic=>amount,Material::Glass=>amount*0.28}
+        let frost=match self.material{Material::Acrylic=>amount,Material::Glass=>amount*0.28}
             +(if self.compact==Material::Acrylic{1.-amount}else{0.});
         // The frosted artwork layer only exists for acrylic surfaces, and it hands over from the
         // strip's pair to the card's pair exactly like the rest of the plane.
@@ -61,7 +61,7 @@ impl Surface{
 #[cfg(test)]mod tests{
     use super::*;
     #[test]fn hints_use_the_same_material_as_the_expanded_card_even_when_music_is_collapsed(){
-        for mini in [false,true]{for material in [Material::Classic,Material::Acrylic,Material::Glass]{
+        for mini in [false,true]{for material in [Material::Acrylic,Material::Glass]{
             let expanded=Surface::expanded(material,true).paint(CoverPalette::default());
             let hint=Surface{mini,reveal:0.,overlay:1.,compact:Material::Acrylic,..Surface::expanded(material,true)}.paint(CoverPalette::default());
             assert_eq!((hint.top,hint.bottom,hint.frost,hint.reflection),(expanded.top,expanded.bottom,expanded.frost,expanded.reflection));
@@ -78,19 +78,19 @@ impl Surface{
         assert_eq!(neutral.paint(CoverPalette{background:0x681c12,accent:0xffb0a0}).top,neutral.paint(CoverPalette{background:0x123568,accent:0xa0c0ff}).top);
     }
     #[test]fn switching_expanded_material_does_not_change_the_collapsed_strip(){
-        for mini in [false,true]{for compact in [Material::Classic,Material::Acrylic,Material::Glass]{
-            let surfaces=[Material::Classic,Material::Acrylic,Material::Glass].map(|material|Surface{material,compact,mini,reveal:0.,..Surface::expanded(material,true)}.paint(CoverPalette::default()));
+        for mini in [false,true]{for compact in [Material::Acrylic,Material::Glass]{
+            let surfaces=[Material::Acrylic,Material::Glass].map(|material|Surface{material,compact,mini,reveal:0.,..Surface::expanded(material,true)}.paint(CoverPalette::default()));
             for surface in &surfaces[1..]{assert_eq!((surface.top,surface.bottom,surface.frost),(surfaces[0].top,surfaces[0].bottom,surfaces[0].frost));}
         }}
     }
     #[test]fn an_acrylic_strip_reads_like_the_acrylic_card(){
         // The collapsed strip must borrow the expanded card's acrylic treatment, not invent
         // a second look: same opaque plane, same full-strength frost, no glass reflection.
-        let strip=Surface{compact:Material::Acrylic,reveal:0.,..Surface::expanded(Material::Classic,false)}.paint(CoverPalette::default());
+        let strip=Surface{compact:Material::Acrylic,reveal:0.,..Surface::expanded(Material::Acrylic,false)}.paint(CoverPalette::default());
         let card=Surface::expanded(Material::Acrylic,false).paint(CoverPalette::default());
-        let classic=Surface{compact:Material::Classic,reveal:0.,..Surface::expanded(Material::Classic,false)}.paint(CoverPalette::default());
+        
         assert_eq!(strip.frost,card.frost);
-        assert!(strip.frost>classic.frost);
+        assert!(strip.frost>0.);
         assert_eq!((strip.top,strip.bottom,strip.reflection),(card.top,card.bottom,card.reflection));
     }
     #[test]fn the_frosted_artwork_layer_only_exists_for_acrylic(){
@@ -105,8 +105,8 @@ impl Surface{
         let monet_off=Surface{cover_background:false,..card}.paint(CoverPalette::default());
         assert_eq!(monet_off.cover_alpha,full.cover_alpha);
         assert_eq!(Surface{cover_overlay:false,..card}.paint(CoverPalette::default()).cover_alpha,0.);
-        // Classic and glass never sample the artwork through this layer.
-        for material in [Material::Classic,Material::Glass]{
+        // Glass never samples the artwork through this layer.
+        for material in [Material::Glass]{
             let other=Surface{material,compact:material,..card}.paint(CoverPalette::default());
             assert_eq!(other.cover_alpha,0.);
         }

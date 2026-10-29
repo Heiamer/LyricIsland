@@ -1,6 +1,6 @@
 #![windows_subsystem="windows"]
 mod tutorial;mod tutorial_checks;
-mod expressive_checks;mod polish_checks;
+mod expressive_checks;mod polish_checks;mod physics_checks;
 mod hybrid_checks;mod preferences_ui;mod appearance;mod island_settings;mod remote;mod draw;mod widgets;mod software_update;
 mod timer_surface;mod tool_preferences;
 mod timeline;

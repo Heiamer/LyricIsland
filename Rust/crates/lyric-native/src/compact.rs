@@ -39,9 +39,9 @@ pub fn secondary<'a>(snapshot:&'a Value,translation:bool,chinese_next:bool)->&'a
 /// morph, and the vertical channel runs slightly ahead so there is room for the
 /// new line before it becomes readable.
 #[derive(Clone,Copy,Debug)]
-pub struct Resize{pub width:f64,pub height:f64,pub width_target:f64,pub height_target:f64,width_velocity:f64,height_velocity:f64}
+pub struct Resize{scheme:lyric_core::shared_motion::Scheme,pub width:f64,pub height:f64,pub width_target:f64,pub height_target:f64,width_velocity:f64,height_velocity:f64}
 impl Resize{
- pub fn new(width:f64,height:f64)->Self{Self{width,height,width_target:width,height_target:height,width_velocity:0.,height_velocity:0.}}
+ pub fn new(width:f64,height:f64)->Self{Self{scheme:lyric_core::shared_motion::Scheme::Expressive,width,height,width_target:width,height_target:height,width_velocity:0.,height_velocity:0.}}
  /// Set both targets. With animation off they land immediately, which is what
  /// 「界面动画」关闭 promises; otherwise the next tick starts from the live frame.
  pub fn target(&mut self,width:f64,height:f64,animate:bool){self.width_target=width.clamp(140.,480.);self.height_target=height.clamp(32.,240.);if !animate{self.width=self.width_target;self.height=self.height_target;self.width_velocity=0.;self.height_velocity=0.;}}
@@ -51,37 +51,16 @@ impl Resize{
  pub fn target_mini(&mut self,width:f64,height:f64,animate:bool){self.target(width,32.,animate);self.height_target=height.clamp(14.,24.);if !animate{self.height=self.height_target;}}
  pub fn moving(&self)->bool{self.width!=self.width_target||self.height!=self.height_target}
  /// Advance both axes and report whether anything visible changed.
- pub fn tick(&mut self,dt:f64,expand_ms:f64)->bool{let dt=dt.clamp(0.,0.1);let omega=resize_omega(expand_ms);
-  // Growth keeps up with the line that just became readable; contraction can
-  // take the long way round because the old line is already fading out.
-  // Growing is what keeps the new line readable, so it front-loads: 2× the natural
-  // frequency settles the wider capsule in about 110 ms. Contraction keeps the long
-  // way round because the old line is already fading out.
-  let grow=if self.width_target>self.width{2.0}else{1.7};
-  let width=advance(&mut self.width,&mut self.width_velocity,self.width_target,omega*grow,dt);
-  // Height still leads width: the capsule has to be tall enough for the second row
-  // before that row becomes readable, and the wider growth below is now fast enough
-  // that 1.4× would no longer be ahead of it.
-  let height=advance(&mut self.height,&mut self.height_velocity,self.height_target,omega*2.6,dt);
-  width||height}
+ pub fn configure(&mut self,scheme:lyric_core::shared_motion::Scheme){self.scheme=scheme;}
+ pub fn tick(&mut self,dt:f64,pace:f64)->bool{
+  use lyric_core::shared_motion::{Spec,Scheme,Kind,Speed};let pace=if pace>10.{1.}else{pace};let spec=Spec::token(self.scheme,Kind::Spatial,Speed::Default).paced(pace);
+  let width=advance(&mut self.width,&mut self.width_velocity,self.width_target,spec,dt);let height=advance(&mut self.height,&mut self.height_velocity,self.height_target,spec.paced(1.15),dt);width||height
+ }
 }
-fn advance(value:&mut f64,velocity:&mut f64,target:f64,omega:f64,dt:f64)->bool{
+fn advance(value:&mut f64,velocity:&mut f64,target:f64,spec:lyric_core::shared_motion::Spec,dt:f64)->bool{
  if (*value-target).abs()<0.05&&velocity.abs()<0.5{let changed=*value!=target;*value=target;*velocity=0.;return changed}
- let previous=*value;let d=previous-target;let b=*velocity+omega*d;let e=(-omega*dt).exp();
- let next=target+(d+b*dt)*e;
- // A reversed target may still carry velocity in the old direction. Bound the new
- // step to the path between the live position and target so it never kicks away.
- *value=next.clamp(previous.min(target),previous.max(target));
- *velocity=if *value!=next{0.}else{(*velocity-omega*b*dt)*e};true
+ let previous=*value;let(next,v)=spec.sample(previous,target,*velocity,dt);*value=next.clamp(previous.min(target),previous.max(target));*velocity=if *value!=next{0.}else{v};true
 }
-/// Natural frequency for the capsule resize.
-///
-/// It follows 「展开响应」so the capsule and the island speak the same pace, but a
-/// lyric line only lives for a few seconds: past ~420 ms the capsule would still
-/// be catching up when the next line lands. The cap keeps the resize inside a
-/// lyric-length budget while the 0.9 factor makes it read as breathing rather than
-/// twitching, without losing the tail that made the old fixed 22 rad/s feel abrupt.
-pub fn resize_omega(expand_ms:f64)->f64{let settle=(expand_ms.clamp(250.,1200.)*0.9).clamp(240.,420.)/1000.;5.83/settle}
 /// Collapsed-capsule line metrics, rounded to the physical pixel grid.
 ///
 /// The shell sizes the capsule with this and the renderer places the two lines
@@ -97,7 +76,7 @@ pub fn capsule_height(font_size:f64,line_spacing:f64,scale:f64,double:bool)->f64
  #[test]fn translation_wins_and_empty_translation_can_fall_back_to_next(){let s=json!({"frame":{"currentLine":"You","currentTranslation":"你","nextLine":"Next"}});assert_eq!(secondary(&s,true,true),"你");assert_eq!(secondary(&s,false,true),"");let s=json!({"frame":{"currentLine":"晚风轻轻","currentTranslation":"","nextLine":"音乐刚好"}});assert_eq!(secondary(&s,true,false),"");assert_eq!(secondary(&s,true,true),"音乐刚好");}
  #[test]fn resize_animates_both_axes_and_reverses_without_a_jump(){let mut r=Resize::new(260.,40.);r.target(480.,51.,true);for _ in 0..8{r.tick(1./60.,360.);}let(w,h)=(r.width,r.height);assert!(w>260.&&w<480.);assert!(h>40.&&h<51.);r.target(140.,40.,true);assert_eq!((r.width,r.height),(w,h));for _ in 0..240{r.tick(1./60.,360.);}assert!((r.width-140.).abs()<0.05);assert!((r.height-40.).abs()<0.05);}
  #[test]fn resize_targets_are_clamped_and_animation_off_snaps(){let mut r=Resize::new(260.,40.);r.target(1000.,300.,false);assert_eq!((r.width,r.height),(480.,240.));r.target(10.,10.,false);assert_eq!((r.width,r.height),(140.,32.));r.target(300.,44.,true);assert_eq!((r.width,r.height),(140.,32.));assert!(r.tick(1./60.,360.));}
- #[test]fn resize_height_leads_the_width(){assert!(resize_omega(250.)>resize_omega(1200.));let mut r=Resize::new(260.,40.);r.target(480.,60.,true);for _ in 0..12{r.tick(1./60.,360.);}let width=(r.width-260.)/220.;let height=(r.height-40.)/20.;assert!(height>width,"height {height} should lead width {width}");}
+ #[test]fn resize_height_leads_the_width(){let mut r=Resize::new(260.,40.);r.target(480.,60.,true);for _ in 0..12{r.tick(1./60.,360.);}let width=(r.width-260.)/220.;let height=(r.height-40.)/20.;assert!(height>width,"height {height} should lead width {width}");}
  #[test]fn resize_settles_inside_the_longest_lyric_pause(){let mut r=Resize::new(140.,40.);r.target(460.,51.,true);let mut elapsed=0.;while elapsed<1.2&&((r.width-r.width_target).abs()>=0.05||(r.height-r.height_target).abs()>=0.05){r.tick(1./120.,1200.);elapsed+=1./120.;}assert!(elapsed<0.95,"resize still moving after {elapsed}s");}
  #[test]fn capsule_grows_only_when_two_lines_need_the_room(){assert_eq!(capsule_height(12.5,1.448,1.,false),40.);assert_eq!(capsule_height(12.5,1.448,1.,true),40.);assert_eq!(capsule_height(17.,1.448,1.,false),40.);assert!(capsule_height(17.,1.448,1.,true)>=45.);assert!((capsule_height(17.,1.448,2.,true)-capsule_height(17.,1.448,1.,true)).abs()<=1.);}
 }

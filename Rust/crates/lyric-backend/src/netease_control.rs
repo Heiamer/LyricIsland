@@ -70,3 +70,5 @@ pub fn players()->Vec<Target>{
  }
  out
 }
+
+pub fn attention_diagnostics()->serde_json::Value{crate::netease_attention::diagnostics()}

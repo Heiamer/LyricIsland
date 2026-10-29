@@ -80,6 +80,8 @@ impl Model{
             _=>return false,
         }true
     }
+    pub fn motion_scheme(&self)->lyric_core::shared_motion::Scheme{lyric_core::shared_motion::Scheme::parse(self.setting("MotionScheme").as_str().unwrap_or("Expressive"))}
+    pub fn motion_speed(&self)->f64{self.setting("MotionSpeed").as_f64().unwrap_or(1.).clamp(0.5,2.)}
     pub fn dynamic_color(&self)->dotisle_domain::dynamic_color::Resolved{let key=if self.prefs.dark{"SettingsDarkAccentColor"}else{"SettingsLightAccentColor"};let fixed=self.native_state["settings"][key].as_str().and_then(|s|u32::from_str_radix(s.trim_start_matches('#'),16).ok()).unwrap_or(self.prefs.seed);let source=if self.prefs.monet{dotisle_domain::dynamic_color::Source::parse(self.setting("ControlCenterColorSource").as_str().unwrap_or("Content"))}else{dotisle_domain::dynamic_color::Source::Custom};dotisle_domain::dynamic_color::resolve_center(source,self.artwork.as_ref().and_then(|a|a.seed),self.native_state["systemAccent"].as_u64().map(|v|v as u32),fixed,self.prefs.dark,self.setting("DynamicColorHighContrast").as_bool().unwrap_or(false))}
     pub fn scheme(&self)->monet::Scheme{self.dynamic_color().roles.ui()}
     pub fn setting(&self,key:&str)->Value{if let Some(v)=self.preview_values.get(key){return v.clone()}let s=&self.native_state["settings"];if let Some(k)=key.strip_prefix("Motion"){s["Motion"][k].clone()}else if let Some(k)=key.strip_prefix("Spring"){s["Motion"]["Spring"][k].clone()}else{s[key].clone()}}

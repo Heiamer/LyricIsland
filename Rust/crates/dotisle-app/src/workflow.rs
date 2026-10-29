@@ -319,8 +319,9 @@ fn stage_row_full(ui:&mut Ui,index:usize,stage:&DraftStage,count:usize,x:f64,y:f
     if index+1<count{draw::line(ui.scene,(x+38.,y+52.),(x+38.,y+h+8.),s.outline,1.4);}
     let name=if stage.name.trim().is_empty(){format!("阶段 {}",index+1)}else{stage.name.clone()};
     let edit_width=(w-296.-68.-12.).max(120.);
-    let edit=ui.hit(rect(x+60.,y+4.,edit_width+56.,56.),"编辑阶段",Action::WorkflowStageEdit(index),true);
-    ui.state(rect(x+60.,y+4.,edit_width+56.,56.),14.,edit,s.on_surface);
+    let edit_rect=rect(x+60.,y+4.,edit_width+8.,56.);let edit=ui.hit(edit_rect,"编辑阶段",Action::WorkflowStageEdit(index),true);
+    // Keep the editable label separate from the stepper; no full-row grey state layer.
+    if edit.is_some()&&ui.focus==edit{draw::outline(ui.scene,edit_rect,14.,s.primary,2.);}
     ui.label(&name,x+68.,y+11.,16.,s.on_surface,true,edit_width);
     ui.label(&format!("{} 分钟",stage.minutes),x+68.,y+37.,12.,s.on_surface_variant,false,edit_width);
     let pill=rect(x+w-296.,y+14.,176.,36.);draw::fill(ui.scene,pill,18.,s.high);

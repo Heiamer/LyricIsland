@@ -1,5 +1,6 @@
 //! Transport colours are paired against their actual filled target, including state layers.
 use crate::monet::contrast;
+pub fn on_surface(surface:u32,preferred:u32)->u32{if contrast(surface,preferred)>=4.5{preferred&0xffffff}else if contrast(surface,0xffffff)>contrast(surface,0){0xffffff}else{0}}
 #[derive(Clone,Copy,Debug)]pub struct SkipColors{pub background:u32,pub foreground:u32}
 fn mix(a:u32,b:u32,t:f64)->u32{let c=|s:u32|{let a=((a>>s)&255)as f64;let b=((b>>s)&255)as f64;(a+(b-a)*t).round()as u32};c(16)<<16|c(8)<<8|c(0)}
 pub fn skip_colors(surface:u32,preferred:u32)->SkipColors{

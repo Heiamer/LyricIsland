@@ -20,20 +20,20 @@ fn supported(target:&Target)->bool{
 }
 fn class(window:HWND,name:&str)->bool{unsafe{let mut text=[0u16;256];let n=GetClassNameW(window,&mut text);n>0&&String::from_utf16_lossy(&text[..n as usize])==name}}
 fn owned(window:HWND,pid:u32)->bool{unsafe{let mut owner=0;GetWindowThreadProcessId(window,Some(&mut owner));owner==pid&&IsWindow(Some(window)).as_bool()}}
-#[derive(Default)]struct Windows{pid:u32,roots:Vec<HWND>,hosts:Vec<HWND>,renderers:Vec<HWND>}
+#[derive(Default)]struct Windows{pid:u32,roots:Vec<HWND>,hosts:Vec<HWND>,widgets:Vec<HWND>,renderers:Vec<HWND>}
 unsafe extern "system" fn top(window:HWND,p:LPARAM)->BOOL{
  let found=&mut*(p.0 as*mut Windows);
  if owned(window,found.pid)&&class(window,"OrpheusBrowserHost")&&!GetWindow(window,GW_OWNER).is_ok_and(|h|!h.0.is_null()){found.roots.push(window);}BOOL(1)
 }
 unsafe extern "system" fn children(window:HWND,p:LPARAM)->BOOL{
  let found=&mut*(p.0 as*mut Windows);
- if owned(window,found.pid){if class(window,"CefBrowserWindow"){found.hosts.push(window);}if class(window,"Chrome_RenderWidgetHostHWND"){found.renderers.push(window);}}BOOL(1)
+ if owned(window,found.pid){if class(window,"CefBrowserWindow"){found.hosts.push(window);}if class(window,"Chrome_WidgetWin_0"){found.widgets.push(window);}if class(window,"Chrome_RenderWidgetHostHWND"){found.renderers.push(window);}}BOOL(1)
 }
-fn windows(pid:u32)->Option<(HWND,HWND,Option<HWND>)>{unsafe{
+fn windows(pid:u32)->Option<(HWND,HWND,HWND,Option<HWND>)>{unsafe{
  let mut found=Windows{pid,..Default::default()};let p=LPARAM(&mut found as*mut _ as isize);let _=EnumWindows(Some(top),p);
  if found.roots.len()!=1{return None}let root=found.roots[0];if !IsWindowEnabled(root).as_bool(){return None}
- let _=EnumChildWindows(Some(root),Some(children),p);if found.hosts.len()!=1||found.renderers.len()>1{return None}
- Some((root,found.hosts[0],found.renderers.first().copied()))
+ let _=EnumChildWindows(Some(root),Some(children),p);if found.hosts.len()!=1||found.widgets.len()!=1||found.renderers.len()>1{return None}
+ Some((root,found.hosts[0],found.widgets[0],found.renderers.first().copied()))
 }}
 struct Dpi(DPI_AWARENESS_CONTEXT);
 impl Dpi{fn enter()->Self{Self(unsafe{SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)})}}
@@ -52,6 +52,24 @@ impl Drop for ChildSize{fn drop(&mut self){unsafe{
   let _=SetWindowPos(self.host,None,0,0,self.width,self.height,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_ASYNCWINDOWPOS);
  }
 }}}
+/// Chromium forwards renderer mouse events through its widget HWND. A background
+/// mouse-down can activate that widget, which makes Windows flash the root taskbar.
+/// Guard only that child with NOACTIVATE; never disable the player or alter its root.
+struct NoActivate{pid:u32,widget:HWND,added:bool}
+impl NoActivate{fn enter(pid:u32,host:HWND,widget:HWND)->Result<Self,String>{unsafe{
+ if !owned(widget,pid)||!class(widget,"Chrome_WidgetWin_0")||!IsChild(host,widget).as_bool(){return Err("网易云后台控件层级已变化，已取消进度操作".into())}
+ // Refuse a hung browser before making any temporary property change.
+ let mut result=0;SendMessageTimeoutW(widget,WM_NULL,WPARAM(0),LPARAM(0),SMTO_ABORTIFHUNG|SMTO_BLOCK,150,Some(&mut result)).0.ne(&0).then_some(()).ok_or("网易云正在忙，已取消后台操作")?;
+ let old=GetWindowLongPtrW(widget,GWL_EXSTYLE);let added=old&WS_EX_NOACTIVATE.0 as isize==0;
+ let guard=Self{pid,widget,added};
+ if added{SetWindowLongPtrW(widget,GWL_EXSTYLE,old|WS_EX_NOACTIVATE.0 as isize);if GetWindowLongPtrW(widget,GWL_EXSTYLE)&WS_EX_NOACTIVATE.0 as isize==0{return Err("无法保护网易云后台焦点，已取消进度操作".into())}}
+ Ok(guard)
+}}}
+impl Drop for NoActivate{fn drop(&mut self){unsafe{
+ if self.added&&owned(self.widget,self.pid)&&class(self.widget,"Chrome_WidgetWin_0"){
+  let style=GetWindowLongPtrW(self.widget,GWL_EXSTYLE);SetWindowLongPtrW(self.widget,GWL_EXSTYLE,style&!(WS_EX_NOACTIVATE.0 as isize));
+ }
+}}}
 fn bounds(width:i32,height:i32,dpi:u32,fraction:f64)->Option<(i32,i32)>{
  let scale=dpi as f64/96.;if !fraction.is_finite()||!(0.0..=1.).contains(&fraction)||!(700.0..=6000.0).contains(&(width as f64/scale))||!(400.0..=3000.0).contains(&(height as f64/scale)){return None}
  let x=(fraction*width as f64).round().clamp(1.,(width-2)as f64)as i32;
@@ -63,7 +81,8 @@ pub fn seek(target:&Target,seconds:f64,duration:f64,valid:&dyn Fn()->bool)->Resu
  let seconds=crate::netease_control::bounded_target(seconds,duration)?;
  if !available(target){return Err("当前网易云界面版本尚未通过后台进度适配".into())}
  let _serial=Serial::enter()?;let _dpi=Dpi::enter();
- let (root,host,mut renderer)=windows(target.pid).ok_or("网易云窗口已变化，已取消进度操作")?;
+ let (root,host,widget,mut renderer)=windows(target.pid).ok_or("网易云窗口已变化，已取消进度操作")?;
+ let focus=NoActivate::enter(target.pid,host,widget)?;
  let mut original=RECT::default();unsafe{GetClientRect(host,&mut original)}.map_err(|e|e.to_string())?;
  let mut resize=None;
  if original.right==0||original.bottom==0{
@@ -78,9 +97,9 @@ pub fn seek(target:&Target,seconds:f64,duration:f64,valid:&dyn Fn()->bool)->Resu
   let until=Instant::now()+Duration::from_millis(900);
   while Instant::now()<until{
    if !valid(){return Err("歌曲已变化，已取消后台进度操作".into())}
-   let Some((same,_,next))=windows(target.pid)else{return Err("网易云窗口已变化，已取消后台操作".into())};
+   let Some((same,_,_,next))=windows(target.pid)else{return Err("网易云窗口已变化，已取消后台操作".into())};
    if same!=root{return Err("网易云窗口已变化，已取消后台操作".into())}
-   if let Some(next)=next{let mut r=RECT::default();if unsafe{GetClientRect(next,&mut r)}.is_ok()&&r.right>width/2&&r.bottom>height/2{renderer=Some(next);break}}
+   if let Some(next)=next{let mut r=RECT::default();if unsafe{GetClientRect(next,&mut r)}.is_ok()&&r.right>width/2&&r.bottom>height/2{renderer=Some(next);std::thread::sleep(Duration::from_millis(60));break}}
    std::thread::sleep(Duration::from_millis(20));
   }
  }
@@ -89,18 +108,34 @@ pub fn seek(target:&Target,seconds:f64,duration:f64,valid:&dyn Fn()->bool)->Resu
  let (x,y)=bounds(rect.right,rect.bottom,unsafe{GetDpiForWindow(root)}.max(96),seconds/duration).ok_or("网易云进度控件尺寸不受支持")?;
  let pos=LPARAM(((y as u32)<<16|x as u32)as isize);
  if !valid(){return Err("歌曲已变化，已取消后台进度操作".into())}
+ let focus_after_resize=NoActivate::enter(target.pid,host,widget)?;
+ crate::netease_attention::arm(root,target.pid)?;
  unsafe{
   PostMessageW(Some(renderer),WM_MOUSEMOVE,WPARAM(0),pos).map_err(|e|e.to_string())?;
-  PostMessageW(Some(renderer),WM_LBUTTONDOWN,WPARAM(1),pos).map_err(|e|e.to_string())?;
-  // Always enqueue button-up before waiting, even when the player is busy.
-  PostMessageW(Some(renderer),WM_LBUTTONUP,WPARAM(0),pos).map_err(|e|e.to_string())?;
+  let down=PostMessageW(Some(renderer),WM_LBUTTONDOWN,WPARAM(1),pos);
+  let up=PostMessageW(Some(renderer),WM_LBUTTONUP,WPARAM(0),pos);
+  down.map_err(|e|e.to_string())?;up.map_err(|e|e.to_string())?;
  }
- // Let the CEF event queue consume the paired messages before restoring 0x0.
- // The caller then confirms against a fresh native timeline, never a local clock.
- if resize.is_some(){std::thread::sleep(Duration::from_millis(180));}
- drop(resize);Ok(x as f64/rect.right as f64*duration)
+ // CEF consumes the complete posted click under NOACTIVATE before cleanup.
+ std::thread::sleep(Duration::from_millis(180));
+ let resized=resize.is_some();drop(resize);if resized{std::thread::sleep(Duration::from_millis(120));}drop(focus_after_resize);drop(focus);Ok(x as f64/rect.right as f64*duration)
 }
 #[cfg(test)]mod tests{use super::*;
  #[test]fn physical_slider_coordinates_follow_dpi_and_client_size(){assert_eq!(bounds(1056,752,96,0.5),Some((528,671)));assert_eq!(bounds(1584,1128,144,0.5),Some((792,1006)));assert_eq!(bounds(1056,752,96,0.),Some((1,671)));assert_eq!(bounds(1056,752,96,1.),Some((1054,671)));}
  #[test]fn invalid_or_mini_player_geometry_never_produces_input(){for(w,h,d,f)in[(0,0,96,0.5),(300,100,96,0.5),(1000,30,96,0.5),(1000,800,96,f64::NAN),(1000,800,96,-0.1)]{assert!(bounds(w,h,d,f).is_none());}}
+}
+
+#[cfg(test)]mod focus_guard_tests{use super::*;use windows::core::w;
+ unsafe extern "system" fn wndproc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->windows::Win32::Foundation::LRESULT{DefWindowProcW(h,m,w,l)}
+ #[test]fn focus_guard_is_child_only_and_restores_only_its_added_bit(){unsafe{
+  let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),lpszClassName:w!("Chrome_WidgetWin_0"),..Default::default()};let _=RegisterClassW(&wc);
+  let host=CreateWindowExW(WINDOW_EX_STYLE(0),w!("STATIC"),w!(""),WS_POPUP,0,0,20,20,None,None,None,None).unwrap();
+  let widget=CreateWindowExW(WS_EX_TOOLWINDOW,w!("Chrome_WidgetWin_0"),w!(""),WS_CHILD,0,0,10,10,Some(host),None,None,None).unwrap();
+  let renderer=CreateWindowExW(WINDOW_EX_STYLE(0),w!("STATIC"),w!(""),WS_CHILD,0,0,10,10,Some(widget),None,None,None).unwrap();
+  let mut pid=0;GetWindowThreadProcessId(widget,Some(&mut pid));let root_style=GetWindowLongPtrW(host,GWL_EXSTYLE);let old=GetWindowLongPtrW(widget,GWL_EXSTYLE);
+  {let _guard=NoActivate::enter(pid,host,widget).unwrap();assert_ne!(GetWindowLongPtrW(widget,GWL_EXSTYLE)&WS_EX_NOACTIVATE.0 as isize,0);assert_eq!(GetWindowLongPtrW(host,GWL_EXSTYLE),root_style);assert!(IsWindowEnabled(widget).as_bool());SetWindowLongPtrW(widget,GWL_EXSTYLE,GetWindowLongPtrW(widget,GWL_EXSTYLE)|WS_EX_TRANSPARENT.0 as isize);}
+  assert_eq!(GetWindowLongPtrW(widget,GWL_EXSTYLE),old|WS_EX_TRANSPARENT.0 as isize);
+  SetWindowLongPtrW(widget,GWL_EXSTYLE,old|WS_EX_NOACTIVATE.0 as isize);{let _guard=NoActivate::enter(pid,host,widget).unwrap();}assert_ne!(GetWindowLongPtrW(widget,GWL_EXSTYLE)&WS_EX_NOACTIVATE.0 as isize,0);
+  assert!(NoActivate::enter(pid,host,renderer).is_err());let _=DestroyWindow(host);
+ }}
 }

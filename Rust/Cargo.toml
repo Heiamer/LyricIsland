@@ -6,7 +6,7 @@ members = ["crates/dotisle-scene", "crates/lyric-core", "crates/lyric-backend", 
 exclude = ["vendor/material-colors-0.4.2", "vendor/wgpu-hal-29.0.4", "vendor/vello_hybrid-0.2.0"]
 
 [workspace.package]
-version = "3.1.5"
+version = "3.1.6"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"

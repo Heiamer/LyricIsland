@@ -6,7 +6,7 @@ defaults["AcrylicCardFrost"]=json!(40.);defaults["AcrylicCardOpacity"]=json!(60.
 defaults["AcrylicCapsuleFrost"]=json!(40.);defaults["AcrylicCapsuleOpacity"]=json!(0.);
 defaults["ExpandedMonetEnabled"]=json!(true);defaults["ExpandedCoverOverlay"]=json!(true);
 defaults["AcrylicAdjustTarget"]=json!("Card");
-defaults["SoundLibraryVersion"]=json!(2);for p in ["Notification","Todo","Device"]{defaults[format!("{p}SoundSource")]=json!("Builtin");}defaults["CapsuleCornerRadius"]=Value::Null;defaults["SwipeUpHide"]=json!(true);defaults["GestureTutorialSeen"]=json!(false);defaults}
+defaults["GlassRefractionEnabled"]=json!(true);defaults["MotionPhysicsVersion"]=json!(1);defaults["SoundLibraryVersion"]=json!(2);for p in ["Notification","Todo","Device"]{defaults[format!("{p}SoundSource")]=json!("Builtin");}defaults["CapsuleCornerRadius"]=Value::Null;defaults["SwipeUpHide"]=json!(true);defaults["GestureTutorialSeen"]=json!(false);defaults}
 pub fn load(path:&std::path::Path)->Value {
     let stored=lyric_backend::io::read_settings(path);let mut s=defaults();
     let legacy_material=stored.get("IslandGlassMaterial").and_then(Value::as_bool);
@@ -51,20 +51,21 @@ pub fn load(path:&std::path::Path)->Value {
     for prefix in ["Notification","Todo","Device"]{if stored[format!("{prefix}SoundSource")].is_null(){s[format!("{prefix}SoundSource")]=json!(if stored[format!("{prefix}SoundPath")].as_str().is_some_and(|p|!p.is_empty()){"Custom"}else{"Builtin"});}}
     if stored["SoundLibraryVersion"].as_u64().unwrap_or(0)<2{s=crate::sound::reset_builtin(&s);}
     migrate_materials(&stored,&mut s);
-    if !["Classic","Acrylic","Glass"].contains(&s["ClassicCapsuleMaterial"].as_str().unwrap_or("")){s["ClassicCapsuleMaterial"]=json!("Acrylic");}
-    if !["Classic","Acrylic","Glass"].contains(&s["MiniMaterial"].as_str().unwrap_or("")){s["MiniMaterial"]=json!("Acrylic");}
-    if !["Classic","Acrylic","Glass"].contains(&s["MiniExpandedMaterial"].as_str().unwrap_or("")){s["MiniExpandedMaterial"]=json!("Acrylic");}
+    if !["Acrylic","Glass"].contains(&s["ClassicCapsuleMaterial"].as_str().unwrap_or("")){s["ClassicCapsuleMaterial"]=json!("Acrylic");}
+    if !["Acrylic","Glass"].contains(&s["MiniMaterial"].as_str().unwrap_or("")){s["MiniMaterial"]=json!("Acrylic");}
+    if !["Acrylic","Glass"].contains(&s["MiniExpandedMaterial"].as_str().unwrap_or("")){s["MiniExpandedMaterial"]=json!("Acrylic");}
     if !["Classic","Mini"].contains(&s["IslandSizeMode"].as_str().unwrap_or("")){s["IslandSizeMode"]=json!("Classic");}
-    if !["Classic","Acrylic","Glass"].contains(&s["IslandMaterial"].as_str().unwrap_or("")){s["IslandMaterial"]=json!("Acrylic");}
+    if !["Acrylic","Glass"].contains(&s["IslandMaterial"].as_str().unwrap_or("")){s["IslandMaterial"]=json!("Acrylic");}
     for (key,fallback) in [("SettingsLightAccentColor","#2563EB"),("SettingsDarkAccentColor","#6EA8FF")]{
         let valid=s[key].as_str().is_some_and(|v|v.len()==7&&v.starts_with('#')&&v[1..].bytes().all(|b|b.is_ascii_hexdigit()));
         if !valid{s[key]=json!(fallback);}
     }
+    for key in ["ClassicCapsuleMaterial","MiniMaterial","IslandMaterial","MiniExpandedMaterial"]{if s[key]=="Classic"{s[key]=json!("Acrylic");}}
     // Validate persisted numbers before they enter geometry or a spring denominator.
     for (k,min,max,fallback) in [("AutoCompactMaxWidth",140.,480.,420.),("CompactWidth",140.,480.,260.),("FontSize",11.,20.,14.),("CenterX",0.,1.,0.5),("TopFraction",0.,1.,0.08)]{s[k]=json!(s[k].as_f64().filter(|v|v.is_finite()).unwrap_or(fallback).clamp(min,max));}
     for (k,min,max,fallback) in [("Gap",0.,24.,8.),("Duration",250.,1200.,480.),("CollapseDuration",150.,700.,440.),("Radius",8.,48.,30.)]{s["Motion"][k]=json!(s["Motion"][k].as_f64().unwrap_or(fallback).clamp(min,max));}
-    for (k,min,max,fallback) in [("Stiffness",100.,1000.,420.),("Damping",10.,80.,30.),("Mass",0.3,2.,0.8)]{s["Motion"]["Spring"][k]=json!(s["Motion"]["Spring"][k].as_f64().unwrap_or(fallback).clamp(min,max));}
-    if !["Separated","SideBySide","LyricFocus","LyricRight"].contains(&s["MusicExpandedLayout"].as_str().unwrap_or("")){s["MusicExpandedLayout"]=json!("SideBySide");}
+    s["Motion"]["Curve"]=Value::Null;s["Motion"]["Scheme"]=json!(if s["Motion"]["Scheme"]=="Standard"{"Standard"}else{"Expressive"});s["Motion"]["Speed"]=json!(s["Motion"]["Speed"].as_f64().filter(|v|v.is_finite()).unwrap_or(1.).clamp(0.5,2.));s["MotionPhysicsVersion"]=json!(1);
+    if !["Separated","SideBySide","LyricFocus"].contains(&s["MusicExpandedLayout"].as_str().unwrap_or("")){s["MusicExpandedLayout"]=json!("SideBySide");}
     if !["Island","Bottom"].contains(&s["SystemStateHintPlacement"].as_str().unwrap_or("")){s["SystemStateHintPlacement"]=json!("Island");}
     s
 }
@@ -101,11 +102,11 @@ pub fn is_acrylic_value(key:&str)->bool{["AcrylicCardFrost","AcrylicCardOpacity"
 pub fn is_paint_setting(key:&str)->bool{is_acrylic_value(key)||["CoverBackground","ExpandedMonetEnabled","ExpandedCoverOverlay","LyricColorFromCover","ExpandedTextColor","ExpandedComponentColor","LyricProgressColor","AcrylicAdjustTarget"].contains(&key)}
 pub fn validate_setting(v:Value)->Result<Value,String>{
     let key=v["key"].as_str().ok_or("missing key")?;let value=&v["value"];let mut settings=v["settings"].clone();if !settings.is_object(){return Err("invalid settings".into())}
-    let range=match key{"CapsuleCornerRadius"=>Some((0.,48.)),"DeviceVolume"|"NotificationVolume"|"TodoVolume"=>Some((0.,100.)),"AutoCompactMaxWidth"|"CompactWidth"=>Some((140.,480.)),"FontSize"=>Some((11.,20.)),"OffsetMilliseconds"=>Some((-5000.,5000.)),"NotificationHistoryDays"=>Some((1.,30.)),"MotionGap"=>Some((0.,24.)),"MotionDuration"=>Some((250.,1200.)),"MotionCollapseDuration"=>Some((150.,700.)),"MotionRadius"=>Some((8.,48.)),"SpringStiffness"=>Some((100.,1000.)),"SpringDamping"=>Some((10.,80.)),"SpringMass"=>Some((0.3,2.)),"AcrylicCardFrost"|"AcrylicCardOpacity"|"AcrylicCapsuleFrost"|"AcrylicCapsuleOpacity"=>Some((0.,100.)),_=>None};
-    let value=if key=="IslandDynamicSeedColor"{let c=value.as_str().ok_or("invalid colour")?;if c.len()!=7||!c.starts_with('#')||!c[1..].bytes().all(|b|b.is_ascii_hexdigit()){return Err("invalid colour".into())}json!(c.to_uppercase())}else if key=="ControlCenterColorSource"||key=="IslandColorSource"{let source=value.as_str().ok_or("invalid colour source")?;if !["Content","System","Custom"].contains(&source){return Err("invalid colour source".into())}if key=="ControlCenterColorSource"{settings["ControlCenterMonetEnabled"]=json!(true);}json!(source)}else if key=="IslandFontFamily"{let name=value.as_str().ok_or("invalid font")?;if !["Noto Sans SC","Microsoft YaHei UI","Noto Serif SC"].contains(&name){return Err("unsupported font".into())}json!("Noto Sans SC")}else if key=="MotionCurve"{if value.is_null(){Value::Null}else{let c:[f64;4]=serde_json::from_value(value.clone()).map_err(|_|"invalid curve")?;if !lyric_core::motion_curve::valid(c){return Err("curve control points outside range".into())}json!(c)}}else if let Some((min,max))=range{let n=value.as_f64().ok_or("invalid number")?;if !n.is_finite()||n<min||n>max{return Err("number outside range".into())}if key=="OffsetMilliseconds"{json!(n.round() as i32)}else if key=="NotificationHistoryDays"{json!(n.round() as u32)}else{json!(n)}}else if key=="IslandSizeMode"{let s=value.as_str().ok_or("invalid size mode")?;if !["Classic","Mini"].contains(&s){return Err("invalid size mode".into())}json!(s)}else if key=="MiniMaterial"{let s=value.as_str().ok_or("invalid mini material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid mini material".into())}json!(s)}else if key=="ClassicCapsuleMaterial"{let s=value.as_str().ok_or("invalid capsule material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid capsule material".into())}json!(s)}else if key=="IslandMaterial"||key=="MiniExpandedMaterial"{let s=value.as_str().ok_or("invalid material")?;if !["Classic","Acrylic","Glass"].contains(&s){return Err("invalid material".into())}json!(s)}
+    let range=match key{"CapsuleCornerRadius"=>Some((0.,48.)),"DeviceVolume"|"NotificationVolume"|"TodoVolume"=>Some((0.,100.)),"AutoCompactMaxWidth"|"CompactWidth"=>Some((140.,480.)),"FontSize"=>Some((11.,20.)),"OffsetMilliseconds"=>Some((-5000.,5000.)),"NotificationHistoryDays"=>Some((1.,30.)),"MotionSpeed"=>Some((0.5,2.)),"MotionGap"=>Some((0.,24.)),"MotionDuration"=>Some((250.,1200.)),"MotionCollapseDuration"=>Some((150.,700.)),"MotionRadius"=>Some((8.,48.)),"SpringStiffness"=>Some((100.,1000.)),"SpringDamping"=>Some((10.,80.)),"SpringMass"=>Some((0.3,2.)),"AcrylicCardFrost"|"AcrylicCardOpacity"|"AcrylicCapsuleFrost"|"AcrylicCapsuleOpacity"=>Some((0.,100.)),_=>None};
+    let value=if key=="MotionScheme"{let v=value.as_str().ok_or("动效方案无效")?;if !["Expressive","Standard"].contains(&v){return Err("动效方案无效".into())}json!(v)}else if key=="IslandDynamicSeedColor"{let c=value.as_str().ok_or("invalid colour")?;if c.len()!=7||!c.starts_with('#')||!c[1..].bytes().all(|b|b.is_ascii_hexdigit()){return Err("invalid colour".into())}json!(c.to_uppercase())}else if key=="ControlCenterColorSource"||key=="IslandColorSource"{let source=value.as_str().ok_or("invalid colour source")?;if !["Content","System","Custom"].contains(&source){return Err("invalid colour source".into())}if key=="ControlCenterColorSource"{settings["ControlCenterMonetEnabled"]=json!(true);}json!(source)}else if key=="IslandFontFamily"{let name=value.as_str().ok_or("invalid font")?;if !["Noto Sans SC","Microsoft YaHei UI","Noto Serif SC"].contains(&name){return Err("unsupported font".into())}json!("Noto Sans SC")}else if key=="MotionCurve"{if value.is_null(){Value::Null}else{let c:[f64;4]=serde_json::from_value(value.clone()).map_err(|_|"invalid curve")?;if !lyric_core::motion_curve::valid(c){return Err("curve control points outside range".into())}Value::Null}}else if let Some((min,max))=range{let n=value.as_f64().ok_or("invalid number")?;if !n.is_finite()||n<min||n>max{return Err("number outside range".into())}if key=="OffsetMilliseconds"{json!(n.round() as i32)}else if key=="NotificationHistoryDays"{json!(n.round() as u32)}else{json!(n)}}else if key=="IslandSizeMode"{let s=value.as_str().ok_or("invalid size mode")?;if !["Classic","Mini"].contains(&s){return Err("invalid size mode".into())}json!(s)}else if key=="MiniMaterial"{let s=value.as_str().ok_or("invalid mini material")?;if !["Acrylic","Glass"].contains(&s){return Err("invalid mini material".into())}json!(s)}else if key=="ClassicCapsuleMaterial"{let s=value.as_str().ok_or("invalid capsule material")?;if !["Acrylic","Glass"].contains(&s){return Err("invalid capsule material".into())}json!(s)}else if key=="IslandMaterial"||key=="MiniExpandedMaterial"{let s=value.as_str().ok_or("invalid material")?;if !["Acrylic","Glass"].contains(&s){return Err("invalid material".into())}json!(s)}
     // Which surface the acrylic sliders edit; the two value pairs are stored independently.
     else if key=="AcrylicAdjustTarget"{let s=value.as_str().ok_or("invalid acrylic target")?;if !["Card","Capsule"].contains(&s){return Err("invalid acrylic target".into())}json!(s)}
-    else if ["DynamicColorHighContrast","ControlCenterMonetEnabled","MiniAutoContrast","LyricColorFromCover","AutoCheckUpdatesEnabled","DeviceRemindersEnabled","DeviceSoundEnabled","SwipeActivities","SwipeUpHide","GestureTutorialSeen","TodoRemindersEnabled","TodoIslandEnabled","AutoCompactWidth","CompactTranslation","ChineseTwoLine","NotificationSoundEnabled","TodoSoundEnabled","Floating","Translation","TranslationButton","Animation","HoverExpand","ClickAnywhereExpand","WordHighlight","AlwaysOnTop","AutoStart","OnlineSongInfo","HideWhenPaused","NotificationsEnabled","PauseNotifications","NotificationClickOpenApp","MusicClickOpenApp","NotificationBlacklistEnabled","NotificationWhitelistEnabled","NotificationHistoryEnabled","CoverBackground","ExpandedMonetEnabled","ExpandedCoverOverlay","FocusCountUp","FocusPauseOnLock","AppEntryRemindersEnabled","AppUsageRemindersEnabled","HeadphoneConnectionRemindersEnabled","SpeakerConnectionRemindersEnabled","GamepadConnectionRemindersEnabled","MouseConnectionRemindersEnabled","KeyboardConnectionRemindersEnabled","DeviceDisconnectRemindersEnabled","SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&key){json!(value.as_bool().ok_or("invalid bool")?)}
+    else if ["GlassRefractionEnabled","DynamicColorHighContrast","ControlCenterMonetEnabled","MiniAutoContrast","LyricColorFromCover","AutoCheckUpdatesEnabled","DeviceRemindersEnabled","DeviceSoundEnabled","SwipeActivities","SwipeUpHide","GestureTutorialSeen","TodoRemindersEnabled","TodoIslandEnabled","AutoCompactWidth","CompactTranslation","ChineseTwoLine","NotificationSoundEnabled","TodoSoundEnabled","Floating","Translation","TranslationButton","Animation","HoverExpand","ClickAnywhereExpand","WordHighlight","AlwaysOnTop","AutoStart","OnlineSongInfo","HideWhenPaused","NotificationsEnabled","PauseNotifications","NotificationClickOpenApp","MusicClickOpenApp","NotificationBlacklistEnabled","NotificationWhitelistEnabled","NotificationHistoryEnabled","CoverBackground","ExpandedMonetEnabled","ExpandedCoverOverlay","FocusCountUp","FocusPauseOnLock","AppEntryRemindersEnabled","AppUsageRemindersEnabled","HeadphoneConnectionRemindersEnabled","SpeakerConnectionRemindersEnabled","GamepadConnectionRemindersEnabled","MouseConnectionRemindersEnabled","KeyboardConnectionRemindersEnabled","DeviceDisconnectRemindersEnabled","SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"].contains(&key){json!(value.as_bool().ok_or("invalid bool")?)}
     else if key=="DeviceSound"||key=="NotificationSound"||key=="TodoSound"{let name=value.as_str().ok_or("invalid sound")?;if dotisle_domain::sound_catalog::find(name).is_none(){return Err("invalid sound".into())}json!(name)}
     else if key=="DeviceSoundPath"||key=="NotificationSoundPath"||key=="TodoSoundPath"{let path=value.as_str().ok_or("invalid path")?;crate::sound::validate_file(path)?;json!(path)}
     // The settings window's own appearance. The capsule is dark by design, so this never reaches
@@ -138,7 +139,7 @@ pub fn validate_setting(v:Value)->Result<Value,String>{
     else if key=="ControlCenterStartPage"{let s=value.as_str().ok_or("invalid start page")?;if !["overview","notifications","todos","timers","island","settings","about"].contains(&s){return Err("invalid start page".into())}json!(s)}
     // Layout values stay typed and are validated before they enter live geometry.
     else if key=="SystemStateHintPlacement"{let s=value.as_str().ok_or("invalid placement")?;if !["Island","Bottom"].contains(&s){return Err("invalid placement".into())}json!(s)}
-    else if key=="MusicExpandedLayout"{let s=value.as_str().ok_or("invalid layout")?;if !["Separated","SideBySide","LyricFocus","LyricRight"].contains(&s){return Err("invalid layout".into())}json!(s)}
+    else if key=="MusicExpandedLayout"{let s=value.as_str().ok_or("invalid layout")?;if !["Separated","SideBySide","LyricFocus"].contains(&s){return Err("invalid layout".into())}json!(s)}
     else if key.ends_with("Color"){let s=value.as_str().ok_or("invalid color")?;if !["TodoDefaultColor","ExpandedTextColor","ExpandedComponentColor","LyricProgressColor","SettingsLightAccentColor","SettingsDarkAccentColor"].contains(&key)||!s.starts_with('#')||s.len()!=7||!s[1..].bytes().all(|b|b.is_ascii_hexdigit()){return Err("invalid color".into())}json!(s.to_uppercase())}
     else if key=="NeteaseCdpPort"{let raw=value.as_str().ok_or("端口需要 1024–65535 的数字")?;let port=raw.trim().parse::<u16>().ok().filter(|p|(1024..=65535).contains(p)).ok_or("端口需要 1024–65535 的数字")?;json!(port.to_string())}
     else if key=="IgnoredSources"||key=="AllowedSources"||key=="NotificationAllowedApps"||key=="NotificationBlockedApps"{let a=value.as_array().ok_or("invalid source list")?;if a.len()>32{return Err("source list too long".into())}let mut out=vec![];for s in a{let s=s.as_str().ok_or("invalid source")?.trim();if s.is_empty()||s.encode_utf16().count()>256{return Err("invalid source".into())}if !out.iter().any(|v:&String|v.eq_ignore_ascii_case(s)){out.push(s.to_string())}}json!(out)}else{return Err("unknown setting".into())};
@@ -151,7 +152,7 @@ pub fn validate_setting(v:Value)->Result<Value,String>{
 
 
 #[cfg(test)]mod unified_osd_tests{use super::*;
-#[test]fn mini_material_has_an_independent_clear_default_and_three_choices(){let d=defaults();assert_eq!(d["IslandSizeMode"],"Classic");assert_eq!(d["IslandMaterial"],"Acrylic");assert_eq!(d["MiniMaterial"],"Acrylic");for value in ["Classic","Acrylic","Glass"]{let s=validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).unwrap();assert_eq!(s["MiniMaterial"],value);assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).is_err());}}
+#[test]fn mini_material_has_an_independent_clear_default_and_three_choices(){let d=defaults();assert_eq!(d["IslandSizeMode"],"Classic");assert_eq!(d["IslandMaterial"],"Acrylic");assert_eq!(d["MiniMaterial"],"Acrylic");for value in ["Acrylic","Glass"]{let s=validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).unwrap();assert_eq!(s["MiniMaterial"],value);assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"MiniMaterial","value":value,"settings":d})).is_err());}}
 #[test]fn one_osd_switch_controls_all_legacy_aliases(){let s=validate_setting(json!({"key":"SystemStateHintsEnabled","value":false,"settings":defaults()})).unwrap();for key in ["SystemStateHintsEnabled","CapsLockHintEnabled","NumLockHintEnabled","MicrophoneMuteHintEnabled","TouchpadHintEnabled"]{assert_eq!(s[key],false);}let s=validate_setting(json!({"key":"CapsLockHintEnabled","value":true,"settings":s})).unwrap();assert_eq!(s["SystemStateHintsEnabled"],true);assert_eq!(s["TouchpadHintEnabled"],true);assert!(validate_setting(json!({"key":"SystemStateHintsEnabled","value":"true","settings":s})).is_err());}
 }
 
@@ -211,7 +212,7 @@ use super::*;
     use super::*;
     #[test] fn material_defaults_to_acrylic_and_accepts_three_values() {
         let s=defaults();assert_eq!(s["AutoStart"],true);assert_eq!(s["IslandMaterial"],"Acrylic");
-        for value in ["Classic","Acrylic","Glass"]{
+        for value in ["Acrylic","Glass"]{
             let updated=validate_setting(json!({"key":"IslandMaterial","value":value,"settings":s.clone()})).unwrap();
             assert_eq!(updated["IslandMaterial"],value);
         }
@@ -222,14 +223,14 @@ use super::*;
         std::fs::write(&p,r#"{"AutoStart":false,"IslandGlassMaterial":true,"Motion":{"Duration":600,"CollapseDuration":550}}"#).unwrap();
         let s=load(&p);assert_eq!(s["IslandMaterial"],"Acrylic");assert_eq!(s["AutoStart"],false);assert_eq!(s["Motion"]["Duration"],600.);
         std::fs::write(&p,r#"{"IslandGlassMaterial":false}"#).unwrap();
-        let s=load(&p);assert_eq!(s["IslandMaterial"],"Classic");
+        let s=load(&p);assert_eq!(s["IslandMaterial"],"Acrylic");
         std::fs::write(&p,r#"{"IslandMaterial":"Glass","IslandGlassMaterial":false}"#).unwrap();
         let s=load(&p);assert_eq!(s["IslandMaterial"],"Glass");
         let _=std::fs::remove_file(p);
     }
 }
 
-#[cfg(test)]mod classic_capsule_tests{use super::*;#[test]fn capsule_material_is_independent_and_validated(){let d=defaults();assert_eq!(d["ClassicCapsuleMaterial"],"Acrylic");for material in ["Classic","Acrylic","Glass"]{let s=validate_setting(json!({"key":"ClassicCapsuleMaterial","value":material,"settings":d})).unwrap();assert_eq!(s["ClassicCapsuleMaterial"],material);assert_eq!(s["MiniMaterial"],"Acrylic");assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("Black"),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"ClassicCapsuleMaterial","value":value,"settings":d})).is_err());}}}
+#[cfg(test)]mod classic_capsule_tests{use super::*;#[test]fn capsule_material_is_independent_and_validated(){let d=defaults();assert_eq!(d["ClassicCapsuleMaterial"],"Acrylic");for material in ["Acrylic","Glass"]{let s=validate_setting(json!({"key":"ClassicCapsuleMaterial","value":material,"settings":d})).unwrap();assert_eq!(s["ClassicCapsuleMaterial"],material);assert_eq!(s["MiniMaterial"],"Acrylic");assert_eq!(s["IslandMaterial"],"Acrylic");}for value in [json!(true),json!("Black"),json!("glass"),json!("LiquidGlass")]{assert!(validate_setting(json!({"key":"ClassicCapsuleMaterial","value":value,"settings":d})).is_err());}}}
 
 #[cfg(test)] mod expanded_material_tests{
     use super::*;
@@ -246,7 +247,7 @@ use super::*;
         let path=std::env::temp_dir().join(format!("dotisle-mini-card-{}.json",std::process::id()));
         let mut settings=defaults();
         assert_eq!(settings["MiniExpandedMaterial"],"Acrylic");
-        for classic in ["Classic","Acrylic","Glass"]{for mini in ["Classic","Acrylic","Glass"]{
+        for classic in ["Acrylic","Glass"]{for mini in ["Acrylic","Glass"]{
             settings=validate_setting(json!({"key":"IslandMaterial","value":classic,"settings":settings})).unwrap();
             settings=validate_setting(json!({"key":"MiniExpandedMaterial","value":mini,"settings":settings})).unwrap();
             std::fs::write(&path,serde_json::to_vec(&settings).unwrap()).unwrap();settings=load(&path);
@@ -264,7 +265,7 @@ use super::*;
         let path=std::env::temp_dir().join(format!("dotisle-retired-material-{}.json",std::process::id()));
         for (stored,mini) in [
             (json!({"IslandMaterial":"LiquidGlass","MiniMaterial":"LiquidGlass","ClassicCapsuleMaterial":"LiquidGlass"}),"Glass"),
-            (json!({"MiniMaterial":"Classic"}),"Classic"),
+            (json!({"MiniMaterial":"Classic"}),"Acrylic"),
             (json!({"MiniMaterial":"LiquidGlass","MiniExpandedMaterial":"Acrylic"}),"Acrylic"),
             (json!({"MiniMaterial":"Glass","MiniExpandedMaterial":"invalid"}),"Acrylic"),
             (json!({}),"Acrylic")
@@ -283,7 +284,7 @@ use super::*;
         assert_eq!(settings["ClassicCapsuleMaterial"],"Acrylic");
         assert_eq!(settings["MiniMaterial"],"Acrylic");
         for key in ["ClassicCapsuleMaterial","MiniMaterial"]{
-            for value in ["Classic","Acrylic","Glass"]{
+            for value in ["Acrylic","Glass"]{
                 settings=validate_setting(json!({"key":key,"value":value,"settings":settings})).unwrap();
                 assert_eq!(settings[key],value);
             }
@@ -301,7 +302,7 @@ use super::*;
     #[test]fn legacy_implicit_tint_is_disabled_once_and_explicit_opt_in_persists(){
         let path=std::env::temp_dir().join(format!("dotisle-monet-migration-{}.json",std::process::id()));
         std::fs::write(&path,r#"{"CoverBackground":true,"IslandFluidMotion":false,"IslandMaterial":"Glass","MiniMaterial":"Classic"}"#).unwrap();
-        let migrated=load(&path);assert_eq!(migrated["CoverBackground"],false);assert_eq!(migrated["IslandMaterial"],"Glass");assert_eq!(migrated["MiniMaterial"],"Classic");assert!(migrated.get("IslandFluidMotion").is_none());
+        let migrated=load(&path);assert_eq!(migrated["CoverBackground"],false);assert_eq!(migrated["IslandMaterial"],"Glass");assert_eq!(migrated["MiniMaterial"],"Acrylic");assert!(migrated.get("IslandFluidMotion").is_none());
         let enabled=validate_setting(json!({"key":"CoverBackground","value":true,"settings":migrated})).unwrap();std::fs::write(&path,serde_json::to_vec(&enabled).unwrap()).unwrap();assert_eq!(load(&path)["CoverBackground"],true);
         let disabled=validate_setting(json!({"key":"CoverBackground","value":false,"settings":enabled})).unwrap();std::fs::write(&path,serde_json::to_vec(&disabled).unwrap()).unwrap();assert_eq!(load(&path)["CoverBackground"],false);
         assert!(validate_setting(json!({"key":"CoverBackground","value":"true","settings":disabled})).is_err());let _=std::fs::remove_file(path);
@@ -347,7 +348,7 @@ use super::*;
         std::fs::write(&file,r#"{"MusicControlTheme":"Alcove","AlcoveThemeUnlocked":true,"MusicExpandedLayout":"LyricRight"}"#).unwrap();
         let loaded=load(&file);
         assert!(loaded.get("MusicControlTheme").is_none());assert!(loaded.get("AlcoveThemeUnlocked").is_none());
-        assert_eq!(loaded["MusicExpandedLayout"],"LyricRight");
+        assert_eq!(loaded["MusicExpandedLayout"],"SideBySide");
         assert!(validate_setting(json!({"key":"MusicControlTheme","value":"Alcove","settings":loaded.clone()})).is_err());
         assert!(validate_setting(json!({"key":"AlcoveThemeUnlocked","value":true,"settings":loaded.clone()})).is_err());
         let _=std::fs::remove_file(file);
@@ -380,7 +381,11 @@ use super::*;
  #[test]fn centre_monet_and_lyric_colour_are_independent_and_persist_false(){let d=defaults();let s=validate_setting(json!({"key":"ControlCenterMonetEnabled","value":false,"settings":d})).unwrap();assert_eq!(s["ExpandedMonetEnabled"],true);assert_eq!(s["LyricColorFromCover"],true);let s=validate_setting(json!({"key":"LyricColorFromCover","value":false,"settings":s})).unwrap();assert_eq!(s["ControlCenterMonetEnabled"],false);assert_eq!(s["ExpandedMonetEnabled"],true);}
  #[test]fn right_layout_and_shared_expanded_material_are_persisted(){
  let path=std::env::temp_dir().join(format!("dotisle-immersive-{}.json",std::process::id()));
- let s=validate_setting(json!({"key":"MusicExpandedLayout","value":"LyricRight","settings":defaults()})).unwrap();let s=validate_setting(json!({"key":"MiniExpandedMaterial","value":"Glass","settings":s})).unwrap();assert_eq!(s["IslandMaterial"],"Glass");assert_eq!(s["MiniExpandedMaterial"],"Glass");std::fs::write(&path,serde_json::to_vec(&s).unwrap()).unwrap();let loaded=load(&path);let _=std::fs::remove_file(path);assert_eq!(loaded["MusicExpandedLayout"],"LyricRight");assert_eq!(loaded["IslandMaterial"],"Glass");
+ let s=validate_setting(json!({"key":"MusicExpandedLayout","value":"LyricFocus","settings":defaults()})).unwrap();let s=validate_setting(json!({"key":"MiniExpandedMaterial","value":"Glass","settings":s})).unwrap();assert_eq!(s["IslandMaterial"],"Glass");assert_eq!(s["MiniExpandedMaterial"],"Glass");std::fs::write(&path,serde_json::to_vec(&s).unwrap()).unwrap();let loaded=load(&path);let _=std::fs::remove_file(path);assert_eq!(loaded["MusicExpandedLayout"],"LyricFocus");assert_eq!(loaded["IslandMaterial"],"Glass");
 }
 #[test]fn only_verified_outline_font_choices_are_accepted(){for name in ["Noto Sans SC","Noto Serif SC","Microsoft YaHei UI"]{let s=validate_setting(json!({"key":"IslandFontFamily","value":name,"settings":defaults()})).unwrap();assert_eq!(s["IslandFontFamily"],"Noto Sans SC");}assert!(validate_setting(json!({"key":"IslandFontFamily","value":"SimSun","settings":defaults()})).is_err());}
+}
+
+#[cfg(test)]mod physics_migration_tests{use super::*;
+ #[test]fn legacy_materials_layout_and_curve_migrate_without_losing_other_preferences(){let file=std::env::temp_dir().join(format!("dotisle-316-migration-{}.json",std::process::id()));std::fs::write(&file,r##"{"ClassicCapsuleMaterial":"Classic","MiniMaterial":"Classic","IslandMaterial":"Classic","MusicExpandedLayout":"LyricRight","NotificationVolume":19,"TodoSoundPath":"C:/retained.wav","Motion":{"Curve":[0,0,1,1],"Radius":24,"Gap":6}}"##).unwrap();let s=load(&file);let _=std::fs::remove_file(file);for key in ["ClassicCapsuleMaterial","MiniMaterial","IslandMaterial","MiniExpandedMaterial"]{assert_eq!(s[key],"Acrylic");}assert_eq!(s["MusicExpandedLayout"],"SideBySide");assert!(s["Motion"]["Curve"].is_null());assert_eq!(s["Motion"]["Scheme"],"Expressive");assert_eq!(s["Motion"]["Radius"],24.);assert_eq!(s["Motion"]["Gap"],6.);assert_eq!(s["NotificationVolume"],19);assert_eq!(s["TodoSoundPath"],"C:/retained.wav");assert!(validate_setting(json!({"key":"IslandMaterial","value":"Classic","settings":s.clone()})).is_err());assert!(validate_setting(json!({"key":"MusicExpandedLayout","value":"LyricRight","settings":s.clone()})).is_err());assert!(validate_setting(json!({"key":"GlassRefractionEnabled","value":false,"settings":s})).is_ok());}
 }

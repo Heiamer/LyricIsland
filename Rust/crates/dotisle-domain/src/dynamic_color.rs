@@ -9,6 +9,8 @@ macro_rules! roles{($($name:ident),*$(,)?)=>{
  #[derive(Clone,Copy,Debug,PartialEq)]pub struct Roles{$(pub $name:u32,)*}
  impl Roles{fn from(s:&DynamicScheme)->Self{Self{$($name:rgb(s.$name()),)*}}
  pub fn mix(self,other:Self,t:f64)->Self{Self{$($name:mix_rgb(self.$name,other.$name,t),)*}}
+ pub fn colours(self)->Vec<u32>{vec![$(self.$name,)*]}
+ pub fn from_colours(colours:&[u32])->Self{let mut i=0;Self{$($name:{let value=colours[i];i+=1;value},)*}}
 }
 }}
 roles!(primary,on_primary,primary_container,on_primary_container,secondary,on_secondary,secondary_container,on_secondary_container,tertiary,on_tertiary,tertiary_container,on_tertiary_container,error,on_error,error_container,on_error_container,surface,on_surface,surface_dim,surface_bright,surface_container_lowest,surface_container_low,surface_container,surface_container_high,surface_container_highest,on_surface_variant,outline,outline_variant,inverse_surface,inverse_on_surface,inverse_primary,scrim,surface_tint,primary_fixed,primary_fixed_dim,on_primary_fixed,on_primary_fixed_variant,secondary_fixed,secondary_fixed_dim,on_secondary_fixed,on_secondary_fixed_variant,tertiary_fixed,tertiary_fixed_dim,on_tertiary_fixed,on_tertiary_fixed_variant);
@@ -33,12 +35,12 @@ pub fn resolve_center(requested:Source,content:Option<u32>,system:Option<u32>,cu
  if r.used==Source::Content{r.roles=roles(r.seed,dark,false,high);}r
 }
 pub fn scheme(seed:u32,dark:bool)->Scheme{roles(seed,dark,false,false).ui()}
-/// Interruptible 200 ms source transition. Roles are regenerated together at every sampled seed.
-#[derive(Default,Clone,Copy,Debug)]pub struct SeedMotion{from:u32,target:u32,at:f64,ready:bool}
+/// All colour channels use non-oscillating Material effects springs.
+#[derive(Default,Clone,Debug)]pub struct SeedMotion{track:Option<lyric_core::shared_motion::ColorTrack>,target:u32}
 impl SeedMotion{
- pub fn update(&mut self,target:u32,now:f64,animate:bool)->bool{if !self.ready||!animate{self.from=target;self.target=target;self.at=now-1.;self.ready=true;return false}if target!=self.target{self.from=self.sample(now);self.target=target;self.at=now;}self.moving(now)}
- pub fn moving(&self,now:f64)->bool{self.ready&&self.from!=self.target&&now-self.at<0.2}
- pub fn sample(&self,now:f64)->u32{if self.ready&&now<=self.at{return self.from}if !self.moving(now){return self.target}let t=lyric_core::motion_curve::sample(lyric_core::motion_curve::EMPHASIZED,((now-self.at)/0.2).clamp(0.,1.)).0;let a=material_colors::hct::Hct::new(Argb::from_u32(0xff000000|self.from));let b=material_colors::hct::Hct::new(Argb::from_u32(0xff000000|self.target));let dh=(b.get_hue()-a.get_hue()+540.).rem_euclid(360.)-180.;rgb(material_colors::hct::Hct::from(a.get_hue()+dh*t,a.get_chroma()+(b.get_chroma()-a.get_chroma())*t,a.get_tone()+(b.get_tone()-a.get_tone())*t).into())}
+ pub fn update(&mut self,target:u32,now:f64,animate:bool)->bool{if self.track.is_none(){self.track=Some(lyric_core::shared_motion::ColorTrack::new(target));self.target=target;return false}if target!=self.target||!animate{self.track.as_mut().unwrap().retarget(target,now,animate);self.target=target;}self.moving(now)}
+ pub fn sample(&self,now:f64)->u32{self.track.as_ref().map(|t|t.sample(now)).unwrap_or(self.target)}
+ pub fn moving(&self,now:f64)->bool{self.track.as_ref().is_some_and(|t|t.moving(now))}
 }
 #[cfg(test)]mod tests{use super::*;
  #[test]fn all_sources_resolve_with_explicit_stable_fallbacks(){let a=resolve(Source::Content,None,Some(0xff0000),0x426b83,false,false);assert_eq!(a.used,Source::Custom);assert_eq!(a.seed,0x426b83);assert!(a.fallback);let b=resolve(Source::System,Some(0x123456),Some(0x654321),0x426b83,false,false);assert_eq!(b.seed,0x654321);assert!(!b.fallback);}
@@ -49,18 +51,16 @@ impl SeedMotion{
 
 // Interpolate already-resolved roles. HCT solving must never run once per frame.
 fn mix_rgb(a:u32,b:u32,t:f64)->u32{let c=|shift:u32|{let a=((a>>shift)&255)as f64;let b=((b>>shift)&255)as f64;(a+(b-a)*t).round().clamp(0.,255.)as u32};(c(16)<<16)|(c(8)<<8)|c(0)}
-#[derive(Default)]pub struct RoleMotion{from:Option<Roles>,target:Option<Roles>,at:f64}
+#[derive(Default)]pub struct RoleMotion{channels:Vec<lyric_core::shared_motion::ColorTrack>,target:Option<Roles>}
 impl RoleMotion{
  pub fn update(&mut self,roles:Roles,now:f64,animate:bool)->bool{
-  if self.target.is_none()||!animate||self.target.is_some_and(|old|crate::monet::contrast(old.on_surface,roles.on_surface)>4.){self.from=Some(roles);self.target=Some(roles);self.at=now-1.;return false}
-  let old=self.target.unwrap();
-  if old.primary!=roles.primary||old.surface!=roles.surface||old.secondary!=roles.secondary||old.on_surface!=roles.on_surface||old.outline!=roles.outline{self.from=Some(self.sample(now));self.target=Some(roles);self.at=now;}
-  self.moving(now)
+  let snap=self.target.is_none()||!animate||self.target.is_some_and(|old|crate::monet::contrast(old.on_surface,roles.on_surface)>4.);
+  if snap{self.channels=roles.colours().into_iter().map(lyric_core::shared_motion::ColorTrack::new).collect();self.target=Some(roles);return false}
+  if self.target!=Some(roles){for(track,rgb)in self.channels.iter_mut().zip(roles.colours()){track.retarget(rgb,now,true);}self.target=Some(roles);}self.moving(now)
  }
- pub fn sample(&self,now:f64)->Roles{let target=self.target.expect("roles initialized");if !self.moving(now){return target}let t=((now-self.at)/0.2).clamp(0.,1.);self.from.unwrap_or(target).mix(target,1.-(1.-t).powi(3))}
- pub fn moving(&self,now:f64)->bool{now-self.at<0.2&&self.target.is_some()}
+ pub fn sample(&self,now:f64)->Roles{let _=self.target.expect("roles initialized");Roles::from_colours(&self.channels.iter().map(|t|t.sample(now)).collect::<Vec<_>>())}
+ pub fn moving(&self,now:f64)->bool{self.channels.iter().any(|t|t.moving(now))}
 }
-
 #[cfg(test)]mod role_motion_tests{
  use super::*;
  #[test]fn retargets_the_live_roles_without_rebuilding_a_scheme(){let mut m=RoleMotion::default();let a=roles(0x536da5,true,false,false);let b=roles(0xa45c37,true,false,false);let c=roles(0x39a46a,true,false,false);m.update(a,0.,false);m.update(b,1.,true);let mid=m.sample(1.08);m.update(c,1.08,true);assert_eq!(m.sample(1.08),mid);assert_eq!(m.sample(2.),c);}

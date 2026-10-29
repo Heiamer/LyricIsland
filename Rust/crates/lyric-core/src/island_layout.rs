@@ -11,7 +11,7 @@ impl Layout {
     /// the same live spring, so reversing the gesture never swaps coordinate spaces.
     pub fn morph_shape(self,p:f64,r:f64)->(Rect,f64){self.morph_shape_with_radii(p,self.capsule.h/2.,r)}
     pub fn morph_shape_with_radii(self,p:f64,closed_radius:f64,r:f64)->(Rect,f64){
-        let p=p.clamp(0.,1.);let x=blend(p,0.10,0.88);let y=blend(p,0.22,1.);
+        let over=(p-p.clamp(0.,1.)).clamp(-0.04,0.04)*0.4;let p=p.clamp(0.,1.);let x=blend(p,0.10,0.88)+over;let y=blend(p,0.22,1.)+over;
         let a=self.capsule;let b=self.card;// A restrained parabolic toss: lift as a capsule, unfold, then settle.
         // One live progress parameter makes collapse retrace this exact path.
         let arc=(std::f64::consts::PI*p).sin();

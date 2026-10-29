@@ -7,9 +7,9 @@ fn luminance(r:u8,g:u8,b:u8)->f64{let linear=|v:u8|{let s=v as f64/255.;if s<=0.
 fn dark_text(luma:f64,current:bool)->bool{if luma>=0.22{true}else if luma<=0.13{false}else{current}}
 
 pub struct Adaptive{
-    checked:Instant,pending:Option<bool>,pub sampled:Option<f64>,pub dark:bool,mix:f64,
+    checked:Instant,pending:Option<bool>,pub sampled:Option<f64>,pub dark:bool,mix:f64,motion:lyric_core::shared_motion::Spring,
 }
-impl Default for Adaptive{fn default()->Self{Self{checked:Instant::now()-Duration::from_secs(1),pending:None,sampled:None,dark:false,mix:0.}}}
+impl Default for Adaptive{fn default()->Self{Self{checked:Instant::now()-Duration::from_secs(1),pending:None,sampled:None,dark:false,mix:0.,motion:lyric_core::shared_motion::Spring::effects(0.,lyric_core::shared_motion::Speed::Fast)}}}
 impl Adaptive{
     pub fn ink(&self)->u32{0xff000000|crate::cover_color::mix(0xf4f6f8,0x10141c,self.mix)}
     pub fn outline(&self)->u32{if self.mix>0.5{0xc0ffffff}else{0xe0000000}}
@@ -26,7 +26,7 @@ impl Adaptive{
     }
     pub fn tick(&mut self,seconds:f64,animate:bool)->bool{
         let target=if self.dark{1.}else{0.};let before=self.mix;
-        self.mix=if animate{self.mix+(target-self.mix)*(1.-(-seconds.min(0.1)*28.).exp())}else{target};
+        self.motion.target=target;self.motion.tick(seconds,!animate);self.mix=self.motion.value;
         if (self.mix-target).abs()<0.002{self.mix=target;}(before-self.mix).abs()>0.00001
     }
 }

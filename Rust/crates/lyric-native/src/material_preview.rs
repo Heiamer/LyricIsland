@@ -14,9 +14,9 @@ pub unsafe fn surfaces(a:&mut App,dir:&Path)->Result<(),Box<dyn std::error::Erro
     let palette=r.preview_palette();let mut rows=vec![];
     for mini in [false,true]{
         a.settings["IslandSizeMode"]=json!(if mini{"Mini"}else{"Classic"});
-        a.settings["MiniMaterial"]=json!("Classic");a.settings["ClassicCapsuleMaterial"]=json!("Classic");
+        a.settings["MiniMaterial"]=json!("Acrylic");a.settings["ClassicCapsuleMaterial"]=json!("Acrylic");
         a.layout.card.w=if mini{420.}else{400.};a.layout.card.h=if mini{120.}else{220.};a.layout.card.x=(a.layout.host.w-a.layout.card.w)/2.;
-        for (label,material) in [("Classic",Material::Classic),("Acrylic",Material::Acrylic),("Glass",Material::Glass)]{
+        for (label,material) in [("Acrylic",Material::Acrylic),("Glass",Material::Glass)]{
             a.settings["IslandMaterial"]=json!(label);a.settings["MiniExpandedMaterial"]=json!(label);a.frame=Frame::expanded();
             let prefix=format!("{}-{label}",if mini{"mini"}else{"classic"});
             let mut scene=a.scene();scene.lyric_age_ms=1000.;r.render(&scene,false)?;save(&r,dir,format!("{prefix}-card.png"),a.layout.card,&mut rows)?;

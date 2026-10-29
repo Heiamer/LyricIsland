@@ -37,7 +37,7 @@ fn main()->Result<(),Box<dyn std::error::Error>>{
  let paused=if pause{let target=(position+4.).clamp(1.,duration-2.);match backend.enqueue("seek",target){Ok(id)=>command(&backend,id),Err(e)=>json!({"error":e})}}else{json!({"error":"SMTC pause unavailable"})};
  let restored=restore.finish();backend.close();
  let success=results.len()==10&&results.iter().all(|r|r["command"]["state"]=="confirmed"&&r["command"]["route"]=="NeteaseBackground")&&paused["command"]["state"]=="confirmed"&&paused["playing"]==false&&restored["position"]["command"]["state"]=="confirmed";
- let report=json!({"success":success,"scope":"production Backend with intentionally unused CDP port, 10 alternating seeks, paused seek and restoration","before":{"songId":restore.id,"position":position,"playing":restore.playing},"results":results,"pauseConfirmed":pause,"pausedSeek":paused,"restored":restored});
+ let report=json!({"attention":lyric_backend::netease_control::attention_diagnostics(),"success":success,"scope":"production Backend with intentionally unused CDP port, 10 alternating seeks, paused seek and restoration","before":{"songId":restore.id,"position":position,"playing":restore.playing},"results":results,"pauseConfirmed":pause,"pausedSeek":paused,"restored":restored});
  std::fs::write(dir.join("report.json"),serde_json::to_vec_pretty(&report)?)?;println!("{}",json!({"success":success,"count":results.len(),"pausedSeek":paused,"restored":restored}));
  if !success{return Err("Background acceptance failed; see report".into())}Ok(())
 }
