@@ -8,17 +8,20 @@
 
 音乐歌词 · 通知与设备 · 待办清单 · 番茄钟 · 倒计时 · 秒表
 
-[下载安装版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Setup.exe) · [下载便携版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Portable.zip) · [本版更新说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Notes.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
+[下载安装版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Setup.exe) · [下载便携版](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Portable.zip) · [本版更新说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Notes.md) · [反馈问题](https://github.com/Heiamer/LyricIsland/issues)
 
 </div>
 
-## 3.1.2 正式版 · 安装包、手势教程与静默进度
+## 3.1.6 正式版 · 物理弹簧与轻量玻璃
 
-本版补回 2.2.3 的完整手势教学，并按当前模式与开关调整步骤。进入「灵动岛 → 交互与提示 → 再看一次」即可重看；教程采用原生 M3 Expressive 演示，不操作真实托盘或播放器。五种音乐展开缩略图同步校正，沉浸预览移入后显示控件。详见 [手势教程说明](GESTURE-TUTORIAL.md)。
+- 统一 Material 3 官方 Expressive / Standard 弹簧参数，支持连续反向、形状过渡与减少动态效果。
+- 胶囊、播放按钮、通知连续形变；清理切歌圆底、流程灰色悬停块和刻度。
+- 玻璃采用沿轮廓的细描边折射，中央文字与按钮保持清晰。
+- 移除经典材质与封面靠右布局，旧设置自动迁移，保留经典尺寸模式。
 
-### 网易云静默进度控制
+**已知问题：网易云后台调节进度仍可能闪烁任务栏或弹出主界面，尚未彻底解决，后续继续处理。**
 
-在 3.1.1 基础上改用仅本机 CDP 静默控制网易云进度；已在网易云 3.1.42 播放中完成一次跳转并恢复，客户端全程保持最小化，未观察到弹窗或抢焦点。展开卡片、概览及音乐页共享该通道。请先通过 `Start-NetEase-SilentControl.cmd` 启动网易云，完整说明见 `NETEASE-SEEKFIX.md`。通道未开启时不会通过唤起播放器窗口的协议回退。
+[完整发布说明与下载](https://github.com/Heiamer/LyricIsland/releases/tag/v3.1.6) · [连续形变预览](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-IslandMorph.gif)
 
 ## 3.1.1 更新
 
@@ -31,7 +34,7 @@
 
 ## 界面预览
 
-以下为程序原生渲染的演示画面，歌曲与歌词为示例数据。
+以下为历史版本的原生渲染示例，歌曲与歌词为演示数据；当前版本预览见上方发布页。
 
 ![沉浸歌词：默认与悬停状态](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.1/DotIsle-3.1.1-Music.png)
 
@@ -45,11 +48,11 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [DotIsle-3.1.2-Setup.exe](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Setup.exe) | 推荐下载。标准安装向导，支持开始菜单、应用卸载与数据保留。 |
-| [DotIsle-3.1.2-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Portable.zip) | 免安装。解压完整目录后运行 `LyricIsland.exe`。 |
-| [DotIsle-3.1.2-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Source.zip) | 与本轮构建对应的完整源码、字体、许可证和构建文档。 |
-| [DotIsle-3.1.2-SHA256.txt](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-SHA256.txt) | 交付文件的 SHA256 校验值。 |
-| [DotIsle-3.1.2-Validation.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Validation.zip) | 测试报告、原生渲染截图和打包验收结果。 |
+| [DotIsle-3.1.2-Setup.exe](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Setup.exe) | 推荐下载。标准安装向导，支持开始菜单、应用卸载与数据保留。 |
+| [DotIsle-3.1.2-Portable.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Portable.zip) | 免安装。解压完整目录后运行 `LyricIsland.exe`。 |
+| [DotIsle-3.1.2-Source.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Source.zip) | 与本轮构建对应的完整源码、字体、许可证和构建文档。 |
+| [DotIsle-3.1.2-SHA256.txt](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-SHA256.txt) | 交付文件的 SHA256 校验值。 |
+| [DotIsle-3.1.2-Validation.zip](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Validation.zip) | 测试报告、原生渲染截图和打包验收结果。 |
 
 使用安装版时运行 Setup.exe，按向导选择目录；首次使用教程会按当前手势开关展示。
 
@@ -85,7 +88,7 @@
 
 优化包括收紧 GPU 数据纹理与分配块、去掉常驻中间画布、字体按需映射、复用着色器缓存、设置延迟启动与隐藏后退出。内存会随页面、缩放、显卡和使用时间变化，**不承诺设置窗口已达到 100 MB**。本轮 UI 改动没有重新进行同口径的可见窗口内存测量，也没有把旧测量值当作新版实测。
 
-真实播放器、IME、桌面关闭/热重开的本轮人工交互验收仍待补充；离屏渲染和隔离状态检查不能替代这些验收。具体范围见[本版说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.2/DotIsle-3.1.2-Notes.md)。
+真实播放器、IME、桌面关闭/热重开的本轮人工交互验收仍待补充；离屏渲染和隔离状态检查不能替代这些验收。具体范围见[本版说明](https://github.com/Heiamer/LyricIsland/releases/download/v3.1.6/DotIsle-3.1.6-Notes.md)。
 
 ## 源码与构建
 
